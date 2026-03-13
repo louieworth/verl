@@ -17,6 +17,8 @@ The input is a parquet file that contains N generated sequences and (optional) t
 
 """
 
+import json
+import os
 from collections import defaultdict
 
 import hydra
@@ -35,7 +37,43 @@ def process_item(config, data_source, response_lst, reward_data):
     reward_fn = get_custom_reward_fn(config)
     ground_truth = reward_data["ground_truth"]
     score_lst = [reward_fn(data_source, r, ground_truth) for r in response_lst]
-    return data_source, np.mean(score_lst)
+    aggregation = config.get("sample_aggregation", "pass_at_k")
+
+    if aggregation == "mean":
+        aggregated_score = float(np.mean(score_lst))
+    elif aggregation == "pass_at_k":
+        aggregated_score = float(any(score > 0 for score in score_lst))
+    else:
+        raise ValueError(f"Unknown sample aggregation mode: {aggregation}")
+
+    return data_source, aggregated_score
+
+
+def format_eval_results(metric_dict: dict[str, float], pass_k: int) -> dict[str, float]:
+    formatted_results = {}
+    for key, value in metric_dict.items():
+        data_source = key.removeprefix("test_score/")
+        formatted_results[f"{data_source}_pass{pass_k}_generation_pass_{pass_k}"] = float(value)
+    return formatted_results
+
+
+def save_eval_results(metric_dict: dict[str, float], output_json_path: str, model_name: str, pass_k: int):
+    formatted_results = format_eval_results(metric_dict, pass_k=pass_k)
+
+    os.makedirs(os.path.dirname(output_json_path), exist_ok=True)
+
+    if os.path.exists(output_json_path):
+        with open(output_json_path) as f:
+            all_results = json.load(f)
+    else:
+        all_results = {}
+
+    model_results = dict(all_results.get(model_name, {}))
+    model_results.update(formatted_results)
+    all_results[model_name] = model_results
+
+    with open(output_json_path, "w") as f:
+        json.dump(all_results, f, indent=4)
 
 
 @hydra.main(config_path="config", config_name="evaluation", version_base=None)
@@ -74,6 +112,16 @@ def main(config):
         metric_dict[f"test_score/{data_source}"] = np.mean(rewards)
 
     print(metric_dict)
+
+    output_json_path = config.get("output_json_path")
+    model_name = config.get("model_name")
+    if output_json_path and model_name:
+        save_eval_results(
+            metric_dict,
+            output_json_path=output_json_path,
+            model_name=model_name,
+            pass_k=config.get("pass_k", 1),
+        )
 
 
 if __name__ == "__main__":

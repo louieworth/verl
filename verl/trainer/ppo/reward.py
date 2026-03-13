@@ -47,6 +47,20 @@ async def _call_with_kwargs_async(raw_fn, extra_kwargs, *args, **kwargs):
     return await raw_fn(*args, **merged_kwargs)
 
 
+def _resolve_custom_reward_fn_config(config: DictConfig) -> dict[str, Any]:
+    reward_cfg = config.get("reward")
+    if reward_cfg is not None:
+        reward_fn_config = reward_cfg.get("custom_reward_function")
+        if reward_fn_config:
+            return dict(reward_fn_config)
+
+    legacy_reward_fn_config = config.get("custom_reward_function")
+    if legacy_reward_fn_config:
+        return dict(legacy_reward_fn_config)
+
+    return {}
+
+
 def get_custom_reward_fn(config: DictConfig) -> Optional[RawRewardFn]:
     """Load and return a custom reward function from external file.
 
@@ -67,7 +81,7 @@ def get_custom_reward_fn(config: DictConfig) -> Optional[RawRewardFn]:
         AttributeError: If the specified function name isn't found in the module.
     """
 
-    reward_fn_config = config.reward.get("custom_reward_function") or {}
+    reward_fn_config = _resolve_custom_reward_fn_config(config)
     module_path = reward_fn_config.get("path")
     if not module_path:
         return None

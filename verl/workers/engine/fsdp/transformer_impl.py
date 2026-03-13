@@ -988,16 +988,20 @@ class FSDPEngineWithLMHead(FSDPEngine):
         pad_mode = tu.get_non_tensor_data(data=micro_batch, key="pad_mode", default=DatasetPadMode.NO_PADDING)
         use_fused_kernels = tu.get_non_tensor_data(data=micro_batch, key="use_fused_kernels", default=False)
         calculate_entropy = tu.get_non_tensor_data(data=micro_batch, key="calculate_entropy", default=False)
+        return_logits = tu.get_non_tensor_data(data=micro_batch, key="return_logits", default=False)
 
         model_output = {}
 
         input_ids = micro_batch["input_ids"]
+        logits = None
 
         if use_remove_padding:
             input_ids_rmpad_rolled = output_args["input_ids_rmpad_rolled"]
             temperature_rmpad = output_args["temperature_rmpad"]
 
             if use_fused_kernels:
+                if return_logits:
+                    raise NotImplementedError("return_logits is not supported with fused kernels enabled.")
                 # temperature is singleton
                 log_probs = output.log_probs.squeeze(0)  # (total_nnz,)
                 entropy_rmpad = output.entropy.squeeze(0)  # (total_nnz,)
@@ -1042,6 +1046,13 @@ class FSDPEngineWithLMHead(FSDPEngine):
                         unpad_dim=0,
                         padding_size=pad_size,
                     )
+                if return_logits:
+                    logits_rmpad = gather_outputs_and_unpad(
+                        logits_rmpad,
+                        gather_dim=0,
+                        unpad_dim=0,
+                        padding_size=pad_size,
+                    )
 
             if pad_mode == DatasetPadMode.NO_PADDING:
                 cu_seqlens = input_ids.offsets()
@@ -1049,6 +1060,8 @@ class FSDPEngineWithLMHead(FSDPEngine):
                 log_probs = torch.nested.nested_tensor_from_jagged(log_probs, cu_seqlens)
                 if calculate_entropy:
                     entropy = torch.nested.nested_tensor_from_jagged(entropy_rmpad, cu_seqlens)
+                if return_logits:
+                    logits = torch.nested.nested_tensor_from_jagged(logits_rmpad, cu_seqlens)
             else:
                 raise NotImplementedError(f"pad_mode {pad_mode} not implemented")
 
@@ -1074,8 +1087,8 @@ class FSDPEngineWithLMHead(FSDPEngine):
                     cu_seqlens = input_ids.offsets()
                     seq_lengths = cu_seqlens.diff()
                     starts = torch.zeros_like(seq_lengths, dtype=torch.int64)
-                    logits = torch.nested.narrow(logits, 1, starts, seq_lengths, layout=torch.jagged)
-                    logits_rmpad = torch.cat([t for t in logits.unbind()])
+                    logits_nested = torch.nested.narrow(logits, 1, starts, seq_lengths, layout=torch.jagged)
+                    logits_rmpad = torch.cat([t for t in logits_nested.unbind()])
                     input_ids_rmpad_rolled = output_args["input_ids_rmpad_rolled"]
                     log_probs = logprobs_from_logits(logits=logits_rmpad, labels=input_ids_rmpad_rolled)
                     # (bsz, j1), for each sample, length of each sample: [real_prompt_length + real_response_length]
@@ -1084,12 +1097,16 @@ class FSDPEngineWithLMHead(FSDPEngine):
                         entropy = torch.nested.narrow(entropy, 1, starts, seq_lengths, layout=torch.jagged)
                         entropy_rmpad = torch.cat([t for t in entropy.unbind()])
                         entropy = torch.nested.nested_tensor_from_jagged(entropy_rmpad, cu_seqlens)
+                    if return_logits:
+                        logits = logits_nested
                 else:
                     raise NotImplementedError(f"pad_mode {pad_mode} not implemented")
 
         model_output["log_probs"] = log_probs
         if calculate_entropy:
             model_output["entropy"] = entropy
+        if return_logits:
+            model_output["logits"] = logits
 
         return model_output
 

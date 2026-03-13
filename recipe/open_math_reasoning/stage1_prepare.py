@@ -55,7 +55,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--input_path",
-        default="/data/data/jiangli/huggingface/datasets/DeepScaleR",
+        default="/data/data/jiangli/huggingface/datasets/DeepScaleR-Preview-Dataset-Update",
         help="Path to DeepScaleR dataset directory",
     )
     parser.add_argument(

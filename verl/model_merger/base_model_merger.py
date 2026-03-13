@@ -60,6 +60,12 @@ def parse_args():
         help="Whether to use CPU initialization for the model. This is useful for large models that cannot "
         "fit into GPU memory during initialization.",
     )
+    base_op_parser.add_argument(
+        "--hf_model_config_path",
+        type=str,
+        default=None,
+        help="Path to the Hugging Face config/tokenizer source. Defaults to <local_dir>/huggingface.",
+    )
 
     merge_parser = subparsers.add_parser("merge", parents=[base_op_parser], help="Merge model checkpoints and save.")
     merge_parser.add_argument(
@@ -135,7 +141,7 @@ def generate_config_from_args(args: argparse.Namespace) -> ModelMergerConfig:
         "trust_remote_code": args.trust_remote_code,
         "is_value_model": args.is_value_model,
         "local_dir": args.local_dir,
-        "hf_model_config_path": os.path.join(args.local_dir, "huggingface"),
+        "hf_model_config_path": args.hf_model_config_path or os.path.join(args.local_dir, "huggingface"),
         "use_cpu_initialization": args.use_cpu_initialization,
     }
 
@@ -236,6 +242,27 @@ class BaseModelMerger(ABC):
                     f"generation config created from the model config."
                 )
         return model
+
+    def save_hf_processing_assets(self):
+        processor = hf_processor(self.hf_model_config_path, trust_remote_code=self.config.trust_remote_code)
+        if processor is not None:
+            print(f"Saving processor to {self.config.target_dir}")
+            processor.save_pretrained(self.config.target_dir)
+
+        try:
+            tokenizer = hf_tokenizer(self.hf_model_config_path, trust_remote_code=self.config.trust_remote_code)
+        except Exception as e:
+            warnings.warn(
+                f"Failed to load tokenizer from {self.hf_model_config_path}: {e}. "
+                "The merged model was saved without tokenizer files. If tokenizer assets live elsewhere, rerun "
+                "the model merger with --hf_model_config_path pointing to the original Hugging Face model or "
+                "tokenizer directory.",
+                stacklevel=2,
+            )
+            return
+
+        print(f"Saving tokenizer to {self.config.target_dir}")
+        tokenizer.save_pretrained(self.config.target_dir)
 
     def _load_lora_train_meta(self) -> Optional[dict[str, object]]:
         if not self.config.local_dir:
@@ -387,14 +414,7 @@ class BaseModelMerger(ABC):
         del state_dict
         del model
 
-        processor = hf_processor(self.hf_model_config_path, trust_remote_code=self.config.trust_remote_code)
-        tokenizer = hf_tokenizer(self.hf_model_config_path, trust_remote_code=self.config.trust_remote_code)
-        if processor is not None:
-            print(f"Saving processor to {self.config.target_dir}")
-            processor.save_pretrained(self.config.target_dir)
-        if tokenizer is not None:
-            print(f"Saving tokenizer to {self.config.target_dir}")
-            tokenizer.save_pretrained(self.config.target_dir)
+        self.save_hf_processing_assets()
 
     def upload_to_huggingface(self):
         import requests

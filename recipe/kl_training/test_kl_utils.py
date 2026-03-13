@@ -5,7 +5,7 @@
 
 import torch
 import pytest
-from recipe.open_math_reasoning.kl_training.kl_utils import (
+from recipe.kl_training.kl_utils import (
     compute_reverse_kl_monte_carlo,
     compute_reverse_kl_full_vocab,
     compute_forward_kl_monte_carlo,
@@ -49,20 +49,22 @@ def test_reverse_kl_monte_carlo_with_mask():
 
 
 def test_forward_kl_monte_carlo_identical():
-    """Test that forward KL is 0 when distributions are identical."""
+    """Teacher-forced forward KL surrogate reduces to NLL."""
     batch_size, seq_len = 2, 10
-    logprobs = torch.randn(batch_size, seq_len)
+    logits = torch.randn(batch_size, seq_len, 32)
+    logprobs = torch.log_softmax(logits, dim=-1)[..., 0]
     mask = torch.ones(batch_size, seq_len)
 
     kl = compute_forward_kl_monte_carlo(logprobs, logprobs, mask)
-    assert torch.allclose(kl, torch.tensor(0.0), atol=1e-5)
+    expected = (-logprobs * mask).sum() / mask.sum()
+    assert torch.allclose(kl, expected, atol=1e-5)
 
 
 def test_forward_kl_monte_carlo_non_negative():
-    """Test that forward KL is always non-negative."""
+    """Teacher-forced NLL is non-negative for valid log-probabilities."""
     batch_size, seq_len = 2, 10
-    teacher_logprobs = torch.randn(batch_size, seq_len)
-    student_logprobs = torch.randn(batch_size, seq_len)
+    teacher_logprobs = torch.log_softmax(torch.randn(batch_size, seq_len, 16), dim=-1)[..., 0]
+    student_logprobs = torch.log_softmax(torch.randn(batch_size, seq_len, 16), dim=-1)[..., 0]
     mask = torch.ones(batch_size, seq_len)
 
     kl = compute_forward_kl_monte_carlo(teacher_logprobs, student_logprobs, mask)

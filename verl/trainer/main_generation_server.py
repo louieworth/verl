@@ -32,6 +32,7 @@ from pprint import pprint
 import pandas as pd
 from omegaconf import OmegaConf
 from openai.types.chat import ChatCompletion
+from tqdm import tqdm
 
 from verl.utils.hdfs_io import makedirs
 from verl.workers.rollout.replica import get_rollout_replica_class
@@ -79,7 +80,19 @@ async def submit_request(server_address, **chat_complete_request):
         await session.close()
 
 
-async def generate_per_replica(server_address, model_path: str, n_samples: int, sampling_params: dict, chat_lst: list):
+async def submit_indexed_request(request_index: int, server_address: str, **chat_complete_request):
+    result = await submit_request(server_address, **chat_complete_request)
+    return request_index, result
+
+
+async def generate_per_replica(
+    server_address,
+    model_path: str,
+    n_samples: int,
+    sampling_params: dict,
+    chat_lst: list,
+    progress_bar: tqdm | None = None,
+):
     # here we should sample n_samples for each chat_lst.
     # we use aiohttp to avoid hang in AsyncOpenAI when the number of requests is large.
 
@@ -98,8 +111,28 @@ async def generate_per_replica(server_address, model_path: str, n_samples: int, 
         for _ in range(n_samples)
     ]
 
-    tasks = [submit_request(server_address, **req) for req in chat_complete_request]
-    results = await asyncio.gather(*tasks)
+    if not chat_complete_request:
+        return []
+
+    tasks = [
+        asyncio.create_task(submit_indexed_request(request_index, server_address, **req))
+        for request_index, req in enumerate(chat_complete_request)
+    ]
+    results = [None] * len(tasks)
+
+    try:
+        for task in asyncio.as_completed(tasks):
+            request_index, result = await task
+            results[request_index] = result
+            if progress_bar is not None:
+                progress_bar.update(1)
+    except Exception:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
+
     return results
 
 
@@ -110,12 +143,21 @@ async def generate(
     chat_sub_array = np.array_split(chat_numpy, num_replicas)
     chat_sub_array = [chat.tolist() for chat in chat_sub_array]
     assert len(server_addresses) == len(chat_sub_array)
-    results = await asyncio.gather(
-        *[
-            generate_per_replica(server_addresses[i], model_path, n_samples, sampling_params, chat_sub_array[i])
-            for i in range(num_replicas)
-        ]
-    )
+    total_requests = len(chat_numpy) * n_samples
+    with tqdm(total=total_requests, desc="Generating responses", dynamic_ncols=True) as progress_bar:
+        results = await asyncio.gather(
+            *[
+                generate_per_replica(
+                    server_addresses[i],
+                    model_path,
+                    n_samples,
+                    sampling_params,
+                    chat_sub_array[i],
+                    progress_bar=progress_bar,
+                )
+                for i in range(num_replicas)
+            ]
+        )
     return results
 
 

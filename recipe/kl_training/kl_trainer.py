@@ -1,289 +1,127 @@
 #!/usr/bin/env python3
 # Copyright 2025 Bytedance Ltd. and/or its affiliates
 #
-# KL Divergence Trainer for Math Reasoning
+# KL divergence trainer backed by verl FSDP TrainingWorker engines.
 
-import os
-import json
-import math
-import torch
-import torch.nn as nn
-import torch.distributed as dist
-from torch.utils.data import DataLoader
-from transformers import (
-    AutoModelForCausalLM,
-    AutoTokenizer,
-    get_linear_schedule_with_warmup,
-)
-from peft import LoraConfig, get_peft_model, TaskType, PeftModel
-from tqdm import tqdm
+import glob
 import logging
-from typing import Dict, Optional, List
+import math
+import os
+import subprocess
+import sys
+import time
+from typing import Any
+
+import torch
+import torch.distributed as dist
+from tensordict import TensorDict
+from torch.utils.data.distributed import DistributedSampler
+from tqdm import tqdm
+from transformers import AutoTokenizer
 
 try:
     import wandb
+
     HAS_WANDB = True
 except ImportError:
     HAS_WANDB = False
 
+from verl.trainer.config.config import CheckpointConfig
+from verl.utils import tensordict_utils as tu
+from verl.utils.dataset.dataset_utils import DatasetPadMode
+from verl.utils.distributed import destroy_global_process_group, initialize_global_process_group
+from verl.workers.config import FSDPEngineConfig, FSDPOptimizerConfig, HFModelConfig, TrainingWorkerConfig
+from verl.workers.engine_workers import TrainingWorker
+
 from .config import KLTrainingConfig
 from .data_utils import create_kl_dataloader
+from .eval_utils import run_evaluation_suite
 from .kl_utils import compute_kl_divergence
-from .eval_utils import save_eval_results, run_evaluation_on_dataset
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
 class KLTrainer:
-    """
-    Trainer for Token-Level KL Divergence Training.
-
-    Supports 4 variants:
-    1. Reverse KL + Monte Carlo
-    2. Reverse KL + Full Vocabulary
-    3. Forward KL + Monte Carlo
-    4. Forward KL + Full Vocabulary
-    """
+    """Token-level KL training using verl's sharded FSDP engines."""
 
     def __init__(self, config: KLTrainingConfig):
         self.config = config
         self.global_step = 0
         self.epoch = 0
 
-        # Setup distributed training
-        self._setup_distributed()
+        self.local_rank, self.rank, self.world_size = initialize_global_process_group()
+        self.config.local_rank = self.local_rank
+        self.config.world_size = self.world_size
 
-        # Initialize wandb (only on main process)
-        if self.config.local_rank in [-1, 0] and HAS_WANDB:
+        self.tokenizer = self._load_tokenizer()
+        self.train_dataloader = self._create_dataloader()
+        self.total_training_steps = (
+            math.ceil(len(self.train_dataloader) / self.config.gradient_accumulation_steps) * self.config.total_epochs
+        )
+
+        self.student_worker = self._build_student_worker()
+        self.teacher_worker = self._build_teacher_worker()
+        self.student_engine = self.student_worker.engine
+        self.teacher_engine = self.teacher_worker.engine
+
+        self.is_logging = (
+            self.student_engine.is_mp_src_rank_with_outputs() and self.student_engine.get_data_parallel_rank() == 0
+        )
+
+        if self.is_logging and HAS_WANDB:
             self._init_wandb()
 
-        # Load tokenizer
-        self.tokenizer = self._load_tokenizer()
+        logger.info("KL Trainer initialized with verl FSDP backend")
+        logger.info("  KL Type: %s", self.config.kl_type)
+        logger.info("  KL Method: %s", self.config.kl_method)
+        logger.info("  Student Model: %s", self.config.student_model_path)
+        logger.info("  Teacher Model: %s", self.config.teacher_model_path or self.config.student_model_path)
+        logger.info("  World Size: %s", self.world_size)
+        logger.info("  FSDP Strategy: %s", self.config.fsdp_strategy)
+        logger.info("  FSDP Size: %s", self.config.fsdp_size)
+        logger.info("  Max Token Len/GPU: %s", self.config.max_token_len_per_gpu)
+        logger.info("  Per-GPU Batch Size: %s", self.config.train_batch_size)
+        logger.info("  Grad Accum Steps: %s", self.config.gradient_accumulation_steps)
 
-        # Load models
-        self.student_model = self._load_student_model()
-        self.teacher_model = self._load_teacher_model()
-
-        # Setup optimizer and scheduler
-        self.optimizer = self._setup_optimizer()
-        self.scheduler = None  # Will be set after dataloader is created
-
-        # Setup dataloader
-        self.train_dataloader = self._create_dataloader()
-
-        # Setup scheduler (needs total steps from dataloader)
-        self.scheduler = self._setup_scheduler()
-
-        logger.info(f"KL Trainer initialized:")
-        logger.info(f"  KL Type: {config.kl_type}")
-        logger.info(f"  KL Method: {config.kl_method}")
-        logger.info(f"  Student Model: {config.student_model_path}")
-        logger.info(f"  Teacher Model: {config.teacher_model_path or 'Same as student'}")
-        logger.info(f"  Use LoRA: {config.use_lora}")
-        logger.info(f"  Model Save Dir: {config.model_save_dir}")
-        logger.info(f"  Gen Results Dir: {config.gen_results_dir}")
-        if HAS_WANDB and self.config.local_rank in [-1, 0]:
-            logger.info(f"  Wandb Project: {config.wandb_project}")
-            logger.info(f"  Wandb Run Name: {config.wandb_run_name}")
+    def close(self):
+        if HAS_WANDB and self.is_logging:
+            wandb.finish()
+        destroy_global_process_group()
 
     def _init_wandb(self):
-        """Initialize Weights & Biases logging."""
-        if not HAS_WANDB:
-            logger.warning("wandb not installed, skipping wandb initialization")
-            return
-
         wandb.init(
             project=self.config.wandb_project,
             name=self.config.wandb_run_name,
             config={
                 "kl_type": self.config.kl_type,
                 "kl_method": self.config.kl_method,
-                "kl_coef": self.config.kl_coef,
                 "temperature": self.config.temperature,
                 "use_initial_response": self.config.use_initial_response,
-                "model_path": self.config.student_model_path,
+                "student_model_path": self.config.student_model_path,
+                "teacher_model_path": self.config.teacher_model_path or self.config.student_model_path,
                 "use_lora": self.config.use_lora,
                 "lora_rank": self.config.lora_rank,
                 "lora_alpha": self.config.lora_alpha,
                 "learning_rate": self.config.learning_rate,
-                "train_batch_size": self.config.train_batch_size,
+                "train_batch_size_per_gpu": self.config.train_batch_size,
                 "gradient_accumulation_steps": self.config.gradient_accumulation_steps,
                 "total_epochs": self.config.total_epochs,
                 "max_length": self.config.max_length,
-                "warmup_ratio": self.config.warmup_steps_ratio,
-                "weight_decay": self.config.weight_decay,
-                "max_grad_norm": self.config.max_grad_norm,
+                "max_token_len_per_gpu": self.config.max_token_len_per_gpu,
+                "fsdp_strategy": self.config.fsdp_strategy,
+                "fsdp_size": self.config.fsdp_size,
             },
         )
-        logger.info(f"Wandb initialized: {wandb.run.url}")
-
-    def _setup_distributed(self):
-        """Setup distributed training."""
-        if self.config.local_rank != -1:
-            torch.cuda.set_device(self.config.local_rank)
-            dist.init_process_group(backend=self.config.distributed_backend)
-            self.config.world_size = dist.get_world_size()
-            logger.info(f"Distributed training: rank {self.config.local_rank}/{self.config.world_size}")
-        else:
-            self.config.world_size = 1
-            logger.info("Single GPU training")
+        logger.info("Wandb initialized: %s", wandb.run.url)
 
     def _load_tokenizer(self) -> AutoTokenizer:
-        """Load tokenizer."""
-        logger.info(f"Loading tokenizer from: {self.config.student_model_path}")
-        tokenizer = AutoTokenizer.from_pretrained(
-            self.config.student_model_path,
-            trust_remote_code=True,
-        )
+        tokenizer = AutoTokenizer.from_pretrained(self.config.student_model_path, trust_remote_code=True)
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
         return tokenizer
 
-    def _load_student_model(self) -> nn.Module:
-        """Load student model (trainable)."""
-        logger.info(f"Loading student model from: {self.config.student_model_path}")
-
-        model = AutoModelForCausalLM.from_pretrained(
-            self.config.student_model_path,
-            torch_dtype=torch.bfloat16 if self.config.bf16 else torch.float16,
-            device_map=None,
-            trust_remote_code=True,
-        )
-
-        # Apply LoRA if enabled
-        if self.config.use_lora:
-            logger.info(f"Applying LoRA: rank={self.config.lora_rank}, alpha={self.config.lora_alpha}")
-            lora_config = LoraConfig(
-                task_type=TaskType.CAUSAL_LM,
-                r=self.config.lora_rank,
-                lora_alpha=self.config.lora_alpha,
-                lora_dropout=self.config.lora_dropout,
-                target_modules=self.config.lora_target_modules,
-                bias="none",
-            )
-            model = get_peft_model(model, lora_config)
-            model.print_trainable_parameters()
-
-        # Enable gradient checkpointing
-        if self.config.gradient_checkpointing:
-            model.gradient_checkpointing_enable()
-
-        # Move to device
-        if self.config.local_rank != -1:
-            model = model.to(self.config.local_rank)
-            model = nn.parallel.DistributedDataParallel(
-                model,
-                device_ids=[self.config.local_rank],
-                output_device=self.config.local_rank,
-            )
-        else:
-            model = model.cuda()
-
-        return model
-
-    def _load_teacher_model(self) -> nn.Module:
-        """
-        Load teacher model (reference model).
-
-        Design choice:
-        - If teacher_model_path is provided: Load a separate teacher model
-        - If teacher_model_path is empty AND student uses LoRA:
-          Teacher shares the base model with student (memory efficient)
-        - If teacher_model_path is empty AND student doesn't use LoRA:
-          Load the same model separately (fallback)
-        """
-        config = self.config
-
-        # If a separate teacher path is provided, load it
-        if config.teacher_model_path:
-            logger.info(f"Loading separate teacher model from: {config.teacher_model_path}")
-            model = AutoModelForCausalLM.from_pretrained(
-                config.teacher_model_path,
-                torch_dtype=torch.bfloat16 if config.bf16 else torch.float16,
-                device_map=None,
-                trust_remote_code=True,
-            )
-
-            # Move to device
-            if config.local_rank != -1:
-                model = model.to(config.local_rank)
-            else:
-                model = model.cuda()
-
-            model.eval()
-            return model
-
-        # If student uses LoRA, teacher can share the base model
-        if config.use_lora:
-            logger.info("Teacher model shares base model with student (memory efficient)")
-            # Get the base model from the LoRA-wrapped student
-            if hasattr(self.student_model, 'module'):
-                # Unwrap DDP
-                base_model = self.student_model.module.get_base_model()
-            else:
-                base_model = self.student_model.get_base_model()
-
-            base_model.eval()
-            return base_model
-
-        # Fallback: load the same model separately (not ideal but works)
-        logger.warning(
-            "Loading teacher model separately from same path as student. "
-            "This uses extra memory. Consider using LoRA or providing a separate teacher_model_path."
-        )
-        model = AutoModelForCausalLM.from_pretrained(
-            config.student_model_path,
-            torch_dtype=torch.bfloat16 if config.bf16 else torch.float16,
-            device_map=None,
-            trust_remote_code=True,
-        )
-
-        # Move to device
-        if config.local_rank != -1:
-            model = model.to(config.local_rank)
-        else:
-            model = model.cuda()
-
-        model.eval()
-        return model
-
-    def _setup_optimizer(self) -> torch.optim.Optimizer:
-        """Setup optimizer."""
-        # Get trainable parameters
-        if self.config.use_lora:
-            # Only optimize LoRA parameters
-            if hasattr(self.student_model, 'module'):
-                trainable_params = [p for p in self.student_model.module.parameters() if p.requires_grad]
-            else:
-                trainable_params = [p for p in self.student_model.parameters() if p.requires_grad]
-        else:
-            trainable_params = self.student_model.parameters()
-
-        optimizer = torch.optim.AdamW(
-            trainable_params,
-            lr=self.config.learning_rate,
-            weight_decay=self.config.weight_decay,
-        )
-        return optimizer
-
-    def _setup_scheduler(self) -> Optional[torch.optim.lr_scheduler.LambdaLR]:
-        """Setup learning rate scheduler."""
-        if self.train_dataloader is None:
-            return None
-
-        total_steps = len(self.train_dataloader) * self.config.total_epochs // self.config.gradient_accumulation_steps
-        warmup_steps = int(total_steps * self.config.warmup_steps_ratio)
-
-        scheduler = get_linear_schedule_with_warmup(
-            self.optimizer,
-            num_warmup_steps=warmup_steps,
-            num_training_steps=total_steps,
-        )
-        return scheduler
-
-    def _create_dataloader(self) -> DataLoader:
-        """Create training dataloader."""
+    def _create_dataloader(self):
         return create_kl_dataloader(
             data_path=self.config.data_path,
             tokenizer=self.tokenizer,
@@ -293,410 +131,472 @@ class KLTrainer:
             max_samples=self.config.max_samples,
             corrected_responses_path=self.config.corrected_responses_path,
             use_initial_response=self.config.use_initial_response,
+            num_workers=self.config.num_workers,
+            local_rank=self.rank,
+            world_size=self.world_size,
         )
 
-    def compute_loss(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        """
-        Compute KL divergence loss and additional metrics.
-
-        Key insight: We compute KL divergence ONLY over the response part,
-        not the prompt part. The labels tensor has -100 for prompt tokens.
-
-        Returns:
-            Dictionary with 'loss' and other metrics including perplexity
-        """
-        # Move batch to device
-        device = self.config.local_rank if self.config.local_rank != -1 else 0
-        student_input_ids = batch["student_input_ids"].to(device)
-        student_attention_mask = batch["student_attention_mask"].to(device)
-        student_labels = batch["student_labels"].to(device)
-        student_prompt_len = batch["student_prompt_len"]
-
-        teacher_input_ids = batch["teacher_input_ids"].to(device)
-        teacher_attention_mask = batch["teacher_attention_mask"].to(device)
-        teacher_labels = batch["teacher_labels"].to(device)
-        teacher_prompt_len = batch["teacher_prompt_len"]
-
-        # Forward pass: Student
-        student_outputs = self.student_model(
-            input_ids=student_input_ids,
-            attention_mask=student_attention_mask,
-            use_cache=False,
+    def _build_model_config(self, model_path: str, *, trainable: bool) -> HFModelConfig:
+        return HFModelConfig(
+            path=model_path,
+            tokenizer_path=model_path,
+            trust_remote_code=True,
+            load_tokenizer=False,
+            enable_gradient_checkpointing=trainable and self.config.gradient_checkpointing,
+            use_remove_padding=self.config.use_remove_padding,
+            lora_rank=self.config.lora_rank if trainable and self.config.use_lora else 0,
+            lora_alpha=self.config.lora_alpha,
+            target_modules=self.config.lora_target_modules,
         )
 
-        # Forward pass: Teacher (no gradient)
-        with torch.no_grad():
-            teacher_outputs = self.teacher_model(
-                input_ids=teacher_input_ids,
-                attention_mask=teacher_attention_mask,
-                use_cache=False,
-            )
+    def _build_engine_config(self, *, forward_only: bool) -> FSDPEngineConfig:
+        return FSDPEngineConfig(
+            strategy=self.config.fsdp_strategy,
+            fsdp_size=self.config.fsdp_size,
+            ulysses_sequence_parallel_size=self.config.ulysses_sequence_parallel_size,
+            forward_only=forward_only,
+            use_dynamic_bsz=True,
+            max_token_len_per_gpu=self.config.max_token_len_per_gpu,
+            infer_max_token_len_per_gpu=self.config.max_token_len_per_gpu,
+            micro_batch_size_per_gpu=None,
+            infer_micro_batch_size_per_gpu=None,
+            use_remove_padding=self.config.use_remove_padding,
+            use_torch_compile=self.config.use_torch_compile,
+            param_offload=self.config.param_offload,
+            optimizer_offload=self.config.optimizer_offload,
+            offload_policy=self.config.offload_policy,
+            dtype="bfloat16" if self.config.bf16 else "float16",
+        )
 
-        # Create response masks (labels != -100)
-        # For student: shift by 1 because logits[i] predicts token[i+1]
-        student_response_mask = (student_labels[:, 1:] != -100).float()
-        teacher_response_mask = (teacher_labels[:, 1:] != -100).float()
+    def _build_optimizer_config(self) -> FSDPOptimizerConfig:
+        return FSDPOptimizerConfig(
+            lr=self.config.learning_rate,
+            lr_warmup_steps_ratio=self.config.warmup_steps_ratio,
+            total_training_steps=self.total_training_steps,
+            weight_decay=self.config.weight_decay,
+            betas=(0.9, 0.95),
+            clip_grad=self.config.max_grad_norm,
+            min_lr_ratio=self.config.min_lr_ratio,
+            lr_scheduler_type="cosine",
+        )
 
-        # Compute KL divergence
-        if self.config.kl_method == "monte_carlo":
-            # Monte Carlo: need log probabilities
-            # Logits shape: [batch, seq_len, vocab]
-            # We need logits[:, :-1, :] to predict tokens[:, 1:]
-            student_logprobs_full = torch.log_softmax(student_outputs.logits[:, :-1, :], dim=-1)
-            teacher_logprobs_full = torch.log_softmax(teacher_outputs.logits[:, :-1, :], dim=-1)
+    def _build_worker(self, model_path: str, *, trainable: bool) -> TrainingWorker:
+        checkpoint_config = CheckpointConfig(
+            save_contents=["model", "optimizer", "extra"],
+            load_contents=["model", "optimizer", "extra"],
+        )
+        worker_config = TrainingWorkerConfig(
+            model_type="language_model",
+            model_config=self._build_model_config(model_path, trainable=trainable),
+            engine_config=self._build_engine_config(forward_only=not trainable),
+            optimizer_config=self._build_optimizer_config(),
+            checkpoint_config=checkpoint_config,
+        )
+        worker = TrainingWorker(config=worker_config)
+        worker.reset()
+        return worker
 
-            # Get log probs of actual response tokens
-            # Use labels[:, 1:] as the target tokens (shifted by 1)
-            student_labels_shifted = student_labels[:, 1:].clamp(min=0)  # Replace -100 with 0 for gather
-            teacher_labels_shifted = teacher_labels[:, 1:].clamp(min=0)
+    def _build_student_worker(self) -> TrainingWorker:
+        return self._build_worker(self.config.student_model_path, trainable=True)
 
-            student_logprobs = torch.gather(
-                student_logprobs_full,
-                dim=-1,
-                index=student_labels_shifted.unsqueeze(-1)
-            ).squeeze(-1)
-            teacher_logprobs = torch.gather(
-                teacher_logprobs_full,
-                dim=-1,
-                index=teacher_labels_shifted.unsqueeze(-1)
-            ).squeeze(-1)
+    def _build_teacher_worker(self) -> TrainingWorker:
+        teacher_model_path = self.config.teacher_model_path or self.config.student_model_path
+        return self._build_worker(teacher_model_path, trainable=False)
 
-            kl_loss = compute_kl_divergence(
-                student_logprobs,
-                teacher_logprobs,
-                student_response_mask,  # Only compute over response
-                kl_type=self.config.kl_type,
-                kl_method="monte_carlo",
-                is_logprobs=True,
-            )
+    def _common_meta(self, *, return_logits: bool) -> dict[str, Any]:
+        return {
+            "pad_mode": DatasetPadMode.NO_PADDING,
+            "pad_token_id": self.tokenizer.pad_token_id,
+            "use_remove_padding": self.config.use_remove_padding,
+            "use_dynamic_bsz": True,
+            "max_token_len_per_gpu": self.config.max_token_len_per_gpu,
+            "micro_batch_size_per_gpu": None,
+            "calculate_entropy": False,
+            "return_logits": return_logits,
+        }
 
-            # Compute perplexity over response tokens
-            student_nll = -student_logprobs * student_response_mask
-            student_ppl = torch.exp(student_nll.sum() / student_response_mask.sum().clamp(min=1))
+    def _make_teacher_batch(self, batch: dict[str, torch.Tensor]) -> TensorDict:
+        batch_size = batch["teacher_input_ids"].size(0)
+        return tu.get_tensordict(
+            tensor_dict={
+                "input_ids": batch["teacher_input_ids"],
+                "position_ids": batch["teacher_position_ids"],
+                "loss_mask": batch["teacher_loss_mask"],
+                "temperature": torch.full((batch_size,), self.config.temperature, dtype=torch.float32),
+            },
+            non_tensor_dict=self._common_meta(return_logits=self.config.kl_method == "full_vocab"),
+        )
 
-            teacher_nll = -teacher_logprobs * teacher_response_mask
-            teacher_ppl = torch.exp(teacher_nll.sum() / teacher_response_mask.sum().clamp(min=1))
+    def _make_student_batch(self, batch: dict[str, torch.Tensor], teacher_model_output: dict[str, torch.Tensor]) -> TensorDict:
+        batch_size = batch["student_input_ids"].size(0)
+        tensor_dict = {
+            "input_ids": batch["student_input_ids"],
+            "position_ids": batch["student_position_ids"],
+            "loss_mask": batch["student_loss_mask"],
+            "temperature": torch.full((batch_size,), self.config.temperature, dtype=torch.float32),
+            "teacher_log_probs": teacher_model_output["log_probs"],
+            "teacher_loss_mask": batch["teacher_loss_mask"],
+        }
+        if self.config.kl_method == "full_vocab":
+            tensor_dict["teacher_logits"] = teacher_model_output["logits"]
 
-        else:
-            # Full vocabulary: use logits directly
-            # Shift logits to align with labels
-            student_logits_shifted = student_outputs.logits[:, :-1, :]
-            teacher_logits_shifted = teacher_outputs.logits[:, :-1, :]
+        meta = self._common_meta(return_logits=self.config.kl_method == "full_vocab")
+        meta["grad_accum_steps"] = self.config.gradient_accumulation_steps
+        return tu.get_tensordict(tensor_dict=tensor_dict, non_tensor_dict=meta)
 
-            kl_loss = compute_kl_divergence(
-                student_logits_shifted,
-                teacher_logits_shifted,
-                student_response_mask,
+    @staticmethod
+    def _masked_nested_to_padded(tensor: torch.Tensor, mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        tensor_rows = list(tensor.unbind())
+        mask_rows = list(mask.unbind())
+        trailing_shape = tensor_rows[0].shape[1:]
+
+        selected_rows = []
+        max_len = 0
+        for tensor_row, mask_row in zip(tensor_rows, mask_rows, strict=True):
+            selected = tensor_row[mask_row.to(torch.bool)]
+            selected_rows.append(selected)
+            max_len = max(max_len, selected.shape[0])
+
+        if max_len == 0:
+            raise ValueError("No response tokens remain in the current micro-batch.")
+
+        padded = tensor_rows[0].new_zeros((len(selected_rows), max_len, *trailing_shape))
+        padded_mask = torch.zeros((len(selected_rows), max_len), dtype=torch.float32, device=padded.device)
+
+        for idx, selected in enumerate(selected_rows):
+            if selected.shape[0] == 0:
+                continue
+            padded[idx, : selected.shape[0]] = selected
+            padded_mask[idx, : selected.shape[0]] = 1.0
+
+        if padded.dim() == 3 and not trailing_shape:
+            padded = padded.squeeze(-1)
+
+        return padded, padded_mask
+
+    @staticmethod
+    def _all_reduce_in_place(tensors: list[torch.Tensor], dp_group):
+        if dp_group is None or dist.get_world_size(group=dp_group) == 1:
+            return
+        for tensor in tensors:
+            dist.all_reduce(tensor, op=dist.ReduceOp.SUM, group=dp_group)
+
+    def _compute_kl_loss(self, model_output: dict[str, torch.Tensor], data: TensorDict, dp_group=None):
+        student_log_probs, mask = self._masked_nested_to_padded(model_output["log_probs"], data["loss_mask"])
+        teacher_log_probs, teacher_mask = self._masked_nested_to_padded(data["teacher_log_probs"], data["teacher_loss_mask"])
+
+        student_counts = mask.sum(dim=1)
+        teacher_counts = teacher_mask.sum(dim=1)
+        if not torch.equal(student_counts, teacher_counts):
+            raise ValueError("Student and teacher response lengths diverged inside the KL loss.")
+
+        if self.config.kl_method == "full_vocab":
+            student_logits, _ = self._masked_nested_to_padded(model_output["logits"], data["loss_mask"])
+            teacher_logits, _ = self._masked_nested_to_padded(data["teacher_logits"], data["teacher_loss_mask"])
+            kl_per_position = compute_kl_divergence(
+                student_logits,
+                teacher_logits,
+                mask,
                 kl_type=self.config.kl_type,
                 kl_method="full_vocab",
                 is_logprobs=False,
+                reduction="none",
                 temperature=self.config.temperature,
             )
+        else:
+            kl_per_position = compute_kl_divergence(
+                student_log_probs,
+                teacher_log_probs,
+                mask,
+                kl_type=self.config.kl_type,
+                kl_method="monte_carlo",
+                is_logprobs=True,
+                reduction="none",
+            )
 
-            # Compute perplexity using response tokens
-            student_logprobs_full = torch.log_softmax(student_logits_shifted, dim=-1)
-            teacher_logprobs_full = torch.log_softmax(teacher_logits_shifted, dim=-1)
+        kl_num = (kl_per_position * mask).sum()
+        student_nll_num = (-student_log_probs * mask).sum()
+        teacher_nll_num = (-teacher_log_probs * mask).sum()
+        response_tokens = mask.sum()
 
-            student_labels_shifted = student_labels[:, 1:].clamp(min=0)
-            teacher_labels_shifted = teacher_labels[:, 1:].clamp(min=0)
+        batch_num_tokens = float(data["batch_num_tokens"])
+        dp_size = float(data["dp_size"])
+        kl_loss = kl_num / max(batch_num_tokens, 1.0) * dp_size
+        loss = kl_loss / float(tu.get_non_tensor_data(data, "grad_accum_steps", 1))
 
-            student_token_logprobs = torch.gather(
-                student_logprobs_full, dim=-1, index=student_labels_shifted.unsqueeze(-1)
-            ).squeeze(-1)
-            teacher_token_logprobs = torch.gather(
-                teacher_logprobs_full, dim=-1, index=teacher_labels_shifted.unsqueeze(-1)
-            ).squeeze(-1)
+        kl_num_metric = kl_num.detach().clone()
+        student_nll_num_metric = student_nll_num.detach().clone()
+        teacher_nll_num_metric = teacher_nll_num.detach().clone()
+        response_tokens_metric = response_tokens.detach().clone()
+        self._all_reduce_in_place(
+            [kl_num_metric, student_nll_num_metric, teacher_nll_num_metric, response_tokens_metric],
+            dp_group,
+        )
 
-            student_nll = -student_token_logprobs * student_response_mask
-            student_ppl = torch.exp(student_nll.sum() / student_response_mask.sum().clamp(min=1))
+        metrics = {
+            "kl_num": kl_num_metric.float().item(),
+            "student_nll_num": student_nll_num_metric.float().item(),
+            "teacher_nll_num": teacher_nll_num_metric.float().item(),
+            "response_tokens": response_tokens_metric.float().item(),
+        }
+        return loss, metrics
 
-            teacher_nll = -teacher_token_logprobs * teacher_response_mask
-            teacher_ppl = torch.exp(teacher_nll.sum() / teacher_response_mask.sum().clamp(min=1))
-
-        # Loss = KL loss
-        loss = kl_loss
+    @staticmethod
+    def _summarize_step_output(output: dict[str, Any]) -> dict[str, float]:
+        metrics = output.get("metrics", {})
+        kl_num = float(sum(metrics.get("kl_num", [])))
+        student_nll_num = float(sum(metrics.get("student_nll_num", [])))
+        teacher_nll_num = float(sum(metrics.get("teacher_nll_num", [])))
+        response_tokens = float(sum(metrics.get("response_tokens", [])))
+        response_tokens = max(response_tokens, 1.0)
 
         return {
-            "loss": loss,
-            "kl_loss": kl_loss.detach(),
-            "student_perplexity": student_ppl.detach(),
-            "teacher_perplexity": teacher_ppl.detach(),
+            "kl_loss": kl_num / response_tokens,
+            "student_perplexity": math.exp(student_nll_num / response_tokens),
+            "teacher_perplexity": math.exp(teacher_nll_num / response_tokens),
+            "response_tokens": response_tokens,
         }
 
-    def train_epoch(self):
-        """Train for one epoch."""
-        self.student_model.train()
-        self.teacher_model.eval()
+    def _save_checkpoint(self):
+        ckpt_dir = os.path.join(self.config.model_save_dir, f"global_step_{self.global_step}")
+        self.student_engine.save_checkpoint(
+            local_path=ckpt_dir,
+            global_step=self.global_step,
+            max_ckpt_to_keep=None,
+        )
+        logger.info("Checkpoint saved to %s", ckpt_dir)
 
-        total_loss = 0
-        total_kl_loss = 0
+    def _find_latest_checkpoint(self) -> str:
+        ckpt_dirs = glob.glob(os.path.join(self.config.model_save_dir, "global_step_*"))
+        if not ckpt_dirs:
+            raise FileNotFoundError(f"No FSDP checkpoints found under {self.config.model_save_dir}")
+        return max(ckpt_dirs, key=lambda path: int(path.rsplit("_", 1)[-1]))
+
+    def _broadcast_rank0_error(self, error_message: str | None) -> str | None:
+        error_holder = [error_message]
+        dist.broadcast_object_list(error_holder, src=0)
+        return error_holder[0]
+
+    def _export_hf_model(self):
+        latest_ckpt = self._find_latest_checkpoint()
+        merged_dir = os.path.join(self.config.model_save_dir, "hf_merged")
+        hf_assets_source = self.config.student_model_path
+        rank0_exception = None
+        rank0_error = None
+
+        if self.rank == 0:
+            try:
+                os.makedirs(merged_dir, exist_ok=True)
+                cmd = [
+                    sys.executable,
+                    "-m",
+                    "verl.model_merger",
+                    "merge",
+                    "--backend",
+                    "fsdp",
+                    "--local_dir",
+                    latest_ckpt,
+                    "--hf_model_config_path",
+                    hf_assets_source,
+                    "--target_dir",
+                    merged_dir,
+                ]
+                if hf_assets_source:
+                    logger.info("Using HF assets from %s for merged export", hf_assets_source)
+                cmd.append("--trust-remote-code")
+                logger.info("Merging FSDP checkpoint %s -> %s", latest_ckpt, merged_dir)
+                subprocess.run(cmd, check=True)
+            except Exception as e:
+                rank0_exception = e
+                rank0_error = f"{type(e).__name__}: {e}"
+                logger.exception("Failed to export checkpoint %s to %s", latest_ckpt, merged_dir)
+
+        exported_error = self._broadcast_rank0_error(rank0_error)
+        if exported_error is not None:
+            raise RuntimeError(f"FSDP checkpoint export failed on rank 0: {exported_error}") from rank0_exception
+
+    def train_epoch(self) -> dict[str, float]:
+        sampler = getattr(self.train_dataloader, "sampler", None)
+        if isinstance(sampler, DistributedSampler):
+            sampler.set_epoch(self.epoch)
+
+        running_kl = 0.0
+        running_student_ppl = 0.0
+        running_teacher_ppl = 0.0
         num_batches = 0
 
         progress_bar = tqdm(
             self.train_dataloader,
-            desc=f"Epoch {self.epoch}",
-            disable=self.config.local_rank not in [-1, 0],
+            desc=f"Epoch {self.epoch + 1}/{self.config.total_epochs}",
+            disable=not self.is_logging,
         )
 
-        for step, batch in enumerate(progress_bar):
-            # Compute loss
-            loss_dict = self.compute_loss(batch)
-            loss = loss_dict["loss"]
+        self.student_engine.optimizer_zero_grad()
+        grad_norm = 0.0
+        lr = self.config.learning_rate
 
-            # Backward
-            loss = loss / self.config.gradient_accumulation_steps
-            loss.backward()
-
-            # Update
-            if (step + 1) % self.config.gradient_accumulation_steps == 0:
-                # Compute gradient norm before clipping
-                grad_norm = torch.nn.utils.clip_grad_norm_(
-                    self.student_model.parameters(),
-                    self.config.max_grad_norm,
-                )
-
-                # Optimizer step
-                self.optimizer.step()
-                if self.scheduler is not None:
-                    self.scheduler.step()
-                self.optimizer.zero_grad()
-
-                self.global_step += 1
-
-                # Logging
-                if self.global_step % self.config.logging_steps == 0:
-                    lr = self.scheduler.get_last_lr()[0] if self.scheduler else self.config.learning_rate
-
-                    # Log to wandb
-                    if HAS_WANDB and self.config.local_rank in [-1, 0]:
-                        wandb.log({
-                            "train/loss": loss_dict['loss'].item(),
-                            "train/kl_loss": loss_dict['kl_loss'].item(),
-                            "train/student_perplexity": loss_dict['student_perplexity'].item(),
-                            "train/teacher_perplexity": loss_dict['teacher_perplexity'].item(),
-                            "train/grad_norm": grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm,
-                            "train/learning_rate": lr,
-                            "train/epoch": self.epoch,
-                            "train/global_step": self.global_step,
-                        })
-
-                    # Log to console
-                    logger.info(
-                        f"Step {self.global_step}: "
-                        f"loss={loss_dict['loss'].item():.4f}, "
-                        f"kl_loss={loss_dict['kl_loss'].item():.4f}, "
-                        f"student_ppl={loss_dict['student_perplexity'].item():.2f}, "
-                        f"teacher_ppl={loss_dict['teacher_perplexity'].item():.2f}, "
-                        f"grad_norm={grad_norm:.4f}, "
-                        f"lr={lr:.2e}"
+        with self.student_engine.train_mode():
+            for batch_idx, batch in enumerate(progress_bar):
+                teacher_batch = self._make_teacher_batch(batch)
+                with self.teacher_engine.eval_mode():
+                    teacher_output = self.teacher_engine.forward_backward_batch(
+                        teacher_batch,
+                        loss_function=None,
+                        forward_only=True,
                     )
 
-                # Save checkpoint
-                if self.global_step % self.config.save_steps == 0:
-                    self.save_checkpoint()
+                student_batch = self._make_student_batch(batch, teacher_output["model_output"])
 
-            # Accumulate metrics
-            total_loss += loss_dict["loss"].item()
-            total_kl_loss += loss_dict["kl_loss"].item()
-            num_batches += 1
+                start_time = time.time()
+                train_output = self.student_engine.forward_backward_batch(
+                    student_batch,
+                    loss_function=self._compute_kl_loss,
+                    forward_only=False,
+                )
+                step_time = time.time() - start_time
 
-            # Update progress bar
-            progress_bar.set_postfix({
-                "loss": f"{total_loss / num_batches:.4f}",
-                "kl": f"{total_kl_loss / num_batches:.4f}",
-            })
+                step_metrics = self._summarize_step_output(train_output)
+                running_kl += step_metrics["kl_loss"]
+                running_student_ppl += step_metrics["student_perplexity"]
+                running_teacher_ppl += step_metrics["teacher_perplexity"]
+                num_batches += 1
+
+                should_step = (
+                    (batch_idx + 1) % self.config.gradient_accumulation_steps == 0
+                    or batch_idx + 1 == len(self.train_dataloader)
+                )
+
+                if should_step:
+                    grad_norm = self.student_engine.optimizer_step()
+                    self.student_engine.optimizer_zero_grad()
+                    lr = self.student_engine.lr_scheduler_step()
+                    self.global_step += 1
+
+                    if self.is_logging and HAS_WANDB:
+                        wandb.log(
+                            {
+                                "train/kl_loss": step_metrics["kl_loss"],
+                                "train/student_perplexity": step_metrics["student_perplexity"],
+                                "train/teacher_perplexity": step_metrics["teacher_perplexity"],
+                                "train/response_tokens": step_metrics["response_tokens"],
+                                "train/grad_norm": grad_norm,
+                                "train/learning_rate": lr,
+                                "train/step_time_sec": step_time,
+                                "train/epoch": self.epoch,
+                                "train/global_step": self.global_step,
+                            }
+                        )
+
+                    if self.global_step % self.config.logging_steps == 0 and self.is_logging:
+                        logger.info(
+                            "step=%s kl=%.4f student_ppl=%.2f teacher_ppl=%.2f grad_norm=%.4f lr=%.2e",
+                            self.global_step,
+                            step_metrics["kl_loss"],
+                            step_metrics["student_perplexity"],
+                            step_metrics["teacher_perplexity"],
+                            grad_norm,
+                            lr,
+                        )
+
+                    if self.global_step % self.config.save_steps == 0:
+                        self._save_checkpoint()
+
+                progress_bar.set_postfix(
+                    {
+                        "kl": f"{running_kl / num_batches:.4f}",
+                        "student_ppl": f"{running_student_ppl / num_batches:.2f}",
+                        "teacher_ppl": f"{running_teacher_ppl / num_batches:.2f}",
+                    }
+                )
+
+                del teacher_output
+                del train_output
 
         return {
-            "loss": total_loss / num_batches,
-            "kl_loss": total_kl_loss / num_batches,
+            "kl_loss": running_kl / max(num_batches, 1),
+            "student_perplexity": running_student_ppl / max(num_batches, 1),
+            "teacher_perplexity": running_teacher_ppl / max(num_batches, 1),
         }
 
     def train(self):
-        """Main training loop."""
-        logger.info("Starting training...")
-        logger.info(f"Total epochs: {self.config.total_epochs}")
-        logger.info(f"Batch size: {self.config.train_batch_size}")
-        logger.info(f"Gradient accumulation steps: {self.config.gradient_accumulation_steps}")
-        logger.info(f"Total steps: {len(self.train_dataloader) * self.config.total_epochs // self.config.gradient_accumulation_steps}")
+        logger.info("Starting KL training")
+        logger.info("Total epochs: %s", self.config.total_epochs)
+        logger.info("Total optimizer steps: %s", self.total_training_steps)
 
         for epoch in range(self.config.total_epochs):
             self.epoch = epoch
-            metrics = self.train_epoch()
+            epoch_metrics = self.train_epoch()
+            if self.is_logging:
+                logger.info("Epoch %s metrics: %s", epoch + 1, epoch_metrics)
+                if HAS_WANDB:
+                    wandb.log(
+                        {
+                            "epoch/kl_loss": epoch_metrics["kl_loss"],
+                            "epoch/student_perplexity": epoch_metrics["student_perplexity"],
+                            "epoch/teacher_perplexity": epoch_metrics["teacher_perplexity"],
+                            "epoch/index": epoch + 1,
+                        }
+                    )
 
-            # Log epoch metrics to wandb
-            if HAS_WANDB and self.config.local_rank in [-1, 0]:
-                wandb.log({
-                    "epoch/total_loss": metrics["loss"],
-                    "epoch/total_kl_loss": metrics["kl_loss"],
-                    "epoch/epoch": epoch,
-                })
+        if self.global_step == 0:
+            raise RuntimeError("Training finished without any optimizer step.")
 
-            logger.info(f"Epoch {epoch} completed: {metrics}")
+        self._save_checkpoint()
 
-        logger.info("Training completed!")
+        if self.config.save_merged_model or self.config.run_eval_after_training:
+            self._export_hf_model()
 
-        # Save final checkpoint
-        self.save_checkpoint(final=True)
-
-        # Merge LoRA adapters if needed
-        if self.config.use_lora and self.config.save_merged_model:
-            self.merge_lora_model()
-
-        # Run evaluation if enabled
-        if getattr(self.config, 'run_eval_after_training', False):
+        if self.config.run_eval_after_training:
             self.run_evaluation()
 
-        # Finish wandb run
-        if HAS_WANDB and self.config.local_rank in [-1, 0]:
-            wandb.finish()
-
     def run_evaluation(self):
-        """Run evaluation on specified datasets and save results."""
-        if self.config.local_rank not in [-1, 0]:
+        if not self.is_logging:
             return
 
-        logger.info("Running evaluation...")
+        eval_model_path = os.path.join(self.config.model_save_dir, "hf_merged")
+        if not os.path.isdir(eval_model_path):
+            raise FileNotFoundError(
+                f"Evaluation requires a merged HuggingFace checkpoint at {eval_model_path}."
+            )
 
-        # Determine which model to evaluate
-        if self.config.use_lora and self.config.save_merged_model:
-            eval_model_path = os.path.join(self.config.model_save_dir, "hf_merged")
-        else:
-            eval_model_path = os.path.join(self.config.model_save_dir, "final")
+        eval_datasets = self.config.eval_datasets or ["aime24", "aime25", "math500"]
+        dataset_paths = self.config.eval_dataset_paths
 
-        logger.info(f"Evaluating model: {eval_model_path}")
+        base_model_name = self.config.base_model_name or self.config.student_model_path.split("/")[-1]
+        eval_tag = f"kl_{self.config.kl_type}_{self.config.kl_method}"
+        model_name = f"{base_model_name}_{eval_tag}_epoch{self.config.epoch_index}"
 
-        # Get evaluation datasets
-        eval_datasets = getattr(self.config, 'eval_datasets', [])
-        if not eval_datasets:
-            eval_datasets = ["aime24", "aime25", "math500"]
-
-        # Get dataset paths from config
-        dataset_paths = getattr(self.config, 'eval_dataset_paths', {
-            "aime24": "data/aime24.parquet",
-            "aime25": "data/aime25.parquet",
-            "math500": "data/math500.parquet",
-            "hmmt24": "data/hmmt24.parquet",
-            "hmmt25": "data/hmmt25.parquet",
-            "amc23": "data/amc23.parquet",
-        })
-
-        # Generate model name for results (format: MODEL_NAME_kl_TYPE_METHOD)
-        base_model_name = self.config.student_model_path.split('/')[-1]
-        model_name = f"{base_model_name}_kl_{self.config.kl_type}_{self.config.kl_method}"
-
-        # Create evaluation output directory (gen_results/evaluate/)
-        # Use gen_results_dir if set, otherwise use output_dir
-        gen_results_dir = getattr(self.config, 'gen_results_dir', '') or self.config.output_dir
-        eval_output_dir = os.path.join(gen_results_dir, "evaluate")
+        gen_results_dir = self.config.gen_results_dir or self.config.output_dir
+        eval_output_dir = os.path.join(gen_results_dir, f"evaluate_{eval_tag}")
         os.makedirs(eval_output_dir, exist_ok=True)
 
-        # Results file path (same format as run_full_pipeline_multi_epoch.sh)
         verl_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
         results_base_dir = os.path.join(verl_root, "results", base_model_name)
         results_file = os.path.join(results_base_dir, "results.json")
 
-        # Run evaluation on each dataset
-        eval_results = {}
-        for dataset in eval_datasets:
-            if dataset not in dataset_paths:
-                logger.warning(f"Dataset {dataset} not found in dataset_paths, skipping...")
-                continue
-
-            dataset_path = dataset_paths[dataset]
-            if not os.path.exists(dataset_path):
-                logger.warning(f"Dataset file not found: {dataset_path}, skipping...")
-                continue
-
-            logger.info(f"Evaluating on {dataset}...")
-
-            try:
-                accuracy = run_evaluation_on_dataset(
-                    model_path=eval_model_path,
-                    dataset_name=dataset,
-                    dataset_path=dataset_path,
-                    output_dir=eval_output_dir,
-                    pass_k=1,
-                    temperature=0.6,
-                    top_p=0.95,
-                    ngpus=self.config.world_size,
-                    output_json_path=results_file,
-                    model_name=model_name,
-                )
-                eval_results[dataset] = accuracy
-                logger.info(f"  {dataset}: {accuracy:.2%}")
-            except Exception as e:
-                logger.error(f"  Failed to evaluate {dataset}: {e}")
-                eval_results[dataset] = 0.0
-
-        # Results are already saved by run_evaluation_on_dataset to results_file
-        logger.info(f"Evaluation completed. Results saved to: {results_file}")
-        logger.info(f"Evaluation generation files saved to: {eval_output_dir}")
-
-        # Log eval results to wandb
-        if HAS_WANDB and self.config.local_rank in [-1, 0]:
-            wandb.log({f"eval/{dataset}": acc for dataset, acc in eval_results.items()})
-
-    def merge_lora_model(self):
-        """Merge LoRA adapters into base model."""
-        if self.config.local_rank not in [-1, 0]:
-            return
-
-        logger.info("Merging LoRA adapters into base model...")
-
-        # Get the final checkpoint path
-        final_checkpoint = os.path.join(self.config.model_save_dir, "final")
-
-        # Load base model
-        base_model = AutoModelForCausalLM.from_pretrained(
-            self.config.student_model_path,
-            torch_dtype=torch.bfloat16 if self.config.bf16 else torch.float16,
-            device_map="cpu",  # Load to CPU for merging
-            trust_remote_code=True,
+        selected_dataset_paths = {dataset: dataset_paths.get(dataset) for dataset in eval_datasets}
+        eval_results = run_evaluation_suite(
+            eval_model_path,
+            selected_dataset_paths,
+            eval_output_dir,
+            pass_k=1,
+            temperature=0.6,
+            top_p=0.95,
+            nnodes=self.config.nnodes,
+            n_gpus_per_node=self.config.n_gpus_per_node,
+            tensor_model_parallel_size=1,
+            output_json_path=results_file,
+            model_name=model_name,
         )
 
-        # Load LoRA model
-        model = PeftModel.from_pretrained(base_model, final_checkpoint)
+        for dataset, accuracy in eval_results.items():
+            logger.info("Evaluation %s: %.2f%%", dataset, accuracy * 100)
 
-        # Merge and unload
-        merged_model = model.merge_and_unload()
+        if not eval_results:
+            raise RuntimeError(
+                "Automatic evaluation was requested, but no valid evaluation datasets were found. "
+                f"Checked datasets={eval_datasets} under {self.config.eval_datasets_dir}."
+            )
 
-        # Save merged model
-        merged_dir = os.path.join(self.config.model_save_dir, "hf_merged")
-        os.makedirs(merged_dir, exist_ok=True)
-
-        merged_model.save_pretrained(merged_dir)
-        self.tokenizer.save_pretrained(merged_dir)
-
-        logger.info(f"Merged model saved to: {merged_dir}")
-
-    def save_checkpoint(self, final: bool = False):
-        """Save model checkpoint."""
-        if self.config.local_rank not in [-1, 0]:
-            return
-
-        # Save to model_save_dir instead of output_dir
-        if final:
-            save_dir = os.path.join(self.config.model_save_dir, "final")
-        else:
-            save_dir = os.path.join(self.config.model_save_dir, f"checkpoint-{self.global_step}")
-
-        os.makedirs(save_dir, exist_ok=True)
-
-        # Save student model
-        if self.config.use_lora:
-            # Save LoRA adapters
-            if hasattr(self.student_model, 'module'):
-                self.student_model.module.save_pretrained(save_dir)
-            else:
-                self.student_model.save_pretrained(save_dir)
-        else:
-            # Save full model
-            if hasattr(self.student_model, 'module'):
-                self.student_model.module.save_pretrained(save_dir)
-            else:
-                self.student_model.save_pretrained(save_dir)
-
-        # Save tokenizer
-        self.tokenizer.save_pretrained(save_dir)
-
-        logger.info(f"Checkpoint saved to: {save_dir}")
+        if HAS_WANDB and eval_results:
+            wandb.log({f"eval/{dataset}": acc for dataset, acc in eval_results.items()})

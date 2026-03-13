@@ -21,8 +21,9 @@ def compute_reverse_kl_monte_carlo(
     Formula: D_KL[P || Q] where P = student, Q = teacher
     KL = E_P[log(P/Q)] = E_P[log P - log Q]
 
-    Monte Carlo approximation:
-    KL ≈ exp(log_p - log_q) - 1 - (log_p - log_q)
+    Monte Carlo surrogate evaluated on student-sampled tokens:
+    KL = E_P[Q/P - 1 - log(Q/P)]
+       = E_P[exp(log_q - log_p) - 1 - (log_q - log_p)]
 
     This is the most memory-efficient variant, only computing KL for sampled tokens.
 
@@ -38,7 +39,7 @@ def compute_reverse_kl_monte_carlo(
     Reference:
         LMOps/minillm/minillm/utils.py:get_rev_kl()
     """
-    log_ratio = (student_logprobs - teacher_logprobs) * mask
+    log_ratio = (teacher_logprobs - student_logprobs) * mask
     # Numerical stability: clamp log_ratio to prevent overflow in exp()
     # When log_ratio > 20, exp(log_ratio) can overflow (exp(20) ≈ 5e8)
     # When log_ratio < -100, exp(log_ratio) underflows to 0 (handled gracefully)
@@ -65,10 +66,12 @@ def compute_forward_kl_monte_carlo(
     Formula: D_KL[Q || P] where Q = teacher, P = student
     KL = E_Q[log(Q/P)] = E_Q[log Q - log P]
 
-    Monte Carlo approximation (sampling from teacher):
-    KL ≈ -log P(sampled tokens from Q)
+    Teacher-sampled surrogate:
+    KL = E_Q[log Q - log P]
+    d/dtheta KL = d/dtheta E_Q[-log P]
 
-    This encourages the student to cover the teacher's distribution.
+    The teacher term is constant with respect to student parameters, so the
+    token-level partial-gradient objective reduces to the teacher-forced NLL.
 
     Args:
         teacher_logprobs: Log probabilities from teacher model [batch, seq_len]
@@ -79,6 +82,7 @@ def compute_forward_kl_monte_carlo(
     Returns:
         KL divergence value(s)
     """
+    del teacher_logprobs
     # For forward KL with Monte Carlo, we use the negative log likelihood
     # of teacher's samples under student's distribution
     kl = -student_logprobs

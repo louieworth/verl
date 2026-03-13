@@ -4,12 +4,16 @@
 # Results are saved to results/${BASE_MODEL_NAME}/results.json (same format as run_full_pipeline_multi_epoch.sh)
 #
 # Usage:
-#   bash benchmark_kl_model.sh <model_path>
+#   bash benchmark_kl_model.sh <model_path> [tokenizer_path]
+#   bash benchmark_kl_model.sh --config <config_json>
 #
 # Examples:
 #   bash benchmark_kl_model.sh /data/data/jiangli/models/Qwen3-1.7B_kl_reverse_monte_carlo_20260306_223015/hf_merged
 #
+#   bash benchmark_kl_model.sh /path/to/hf_merged /data/data/jiangli/models/Qwen3-4B-Instruct-2507
+#
 #   DATASETS="aime24 aime25 math500" bash benchmark_kl_model.sh /path/to/model
+#   bash benchmark_kl_model.sh --config recipe/kl_training/benchmark_batch_config.json
 #
 
 set -e
@@ -18,11 +22,39 @@ set -e
 # Configuration
 ################################################################################
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VERL_ROOT="$(dirname "$(dirname "$SCRIPT_DIR")")"
+PYTHON_BIN=${PYTHON_BIN:-python3}
+
+BENCHMARK_CONFIG=${BENCHMARK_CONFIG:-""}
+DRY_RUN_FLAG=""
+
+if [ "${1:-}" = "--dry-run" ]; then
+    DRY_RUN_FLAG="--dry_run"
+    shift
+fi
+
+if [ "${1:-}" = "--config" ]; then
+    BENCHMARK_CONFIG="$2"
+    shift 2
+fi
+
+if [ -n "${BENCHMARK_CONFIG}" ]; then
+    if [ ! -f "${BENCHMARK_CONFIG}" ]; then
+        echo "ERROR: Config file not found at ${BENCHMARK_CONFIG}"
+        exit 1
+    fi
+
+    "${PYTHON_BIN}" "$SCRIPT_DIR/run_benchmark_batch.py" --config "${BENCHMARK_CONFIG}" ${DRY_RUN_FLAG}
+    exit $?
+fi
+
 # Model path (required)
 MODEL_PATH=${MODEL_PATH:-$1}
+TOKENIZER_PATH=${TOKENIZER_PATH:-$2}
 if [ -z "${MODEL_PATH}" ]; then
     echo "ERROR: Please specify model path"
-    echo "Usage: bash benchmark_kl_model.sh <model_path>"
+    echo "Usage: bash benchmark_kl_model.sh <model_path> [tokenizer_path]"
     exit 1
 fi
 
@@ -31,14 +63,28 @@ if [ ! -d "${MODEL_PATH}" ]; then
     exit 1
 fi
 
+if [ -n "${TOKENIZER_PATH}" ] && [ ! -d "${TOKENIZER_PATH}" ]; then
+    echo "ERROR: Tokenizer path not found at ${TOKENIZER_PATH}"
+    exit 1
+fi
+
 # Extract model names
-# e.g., /data/data/jiangli/models/Qwen3-1.7B_kl_reverse_monte_carlo_20260306_223015/hf_merged
-# -> BASE_MODEL_NAME = Qwen3-1.7B
-# -> MODEL_NAME = Qwen3-1.7B_kl_reverse_monte_carlo
+# Supported layouts:
+#   /.../<base>_kl_<type>_<sample>/hf_merged
+#   /.../<base>_kl_<type>_<sample>/epochN/hf_merged
 FULL_MODEL_DIR=$(dirname "${MODEL_PATH}")
 FULL_MODEL_NAME=$(basename "${FULL_MODEL_DIR}")
-BASE_MODEL_NAME=$(echo "${FULL_MODEL_NAME}" | cut -d'_' -f1)
-MODEL_NAME="${FULL_MODEL_NAME}"
+
+if [[ "${FULL_MODEL_NAME}" =~ ^epoch([0-9]+)$ ]]; then
+    EPOCH_SUFFIX="_${FULL_MODEL_NAME}"
+    FULL_MODEL_DIR=$(dirname "${FULL_MODEL_DIR}")
+    FULL_MODEL_NAME=$(basename "${FULL_MODEL_DIR}")
+else
+    EPOCH_SUFFIX=""
+fi
+
+BASE_MODEL_NAME=$(echo "${FULL_MODEL_NAME}" | sed -E 's/_kl_.*$//')
+MODEL_NAME="${FULL_MODEL_NAME}${EPOCH_SUFFIX}"
 
 # GPU settings
 NGPUS_PER_NODE=${NGPUS_PER_NODE:-4}
@@ -56,18 +102,17 @@ declare -A DATASETS=(
     ["aime25"]="${EVAL_DATASETS_DIR}/aime25/aime25_test.parquet"
     ["math500"]="${EVAL_DATASETS_DIR}/math500/math500_test.parquet"
     ["hmmt25"]="${EVAL_DATASETS_DIR}/hmmt25/hmmt25_test.parquet"
+    ["beyondaime"]="${EVAL_DATASETS_DIR}/beyondaime/beyondaime_test.parquet"
+    ["amobench"]="${EVAL_DATASETS_DIR}/amobench/amobench_test.parquet"
+    ["gsm8k"]="${EVAL_DATASETS_DIR}/gsm8k/gsm8k_test.parquet"
 )
 
 # Datasets to test
-DEFAULT_DATASETS="aime24 aime25 math500"
+DEFAULT_DATASETS="beyondaime amobench gsm8k"
 DATASETS_TO_TEST=${DATASETS:-"${DEFAULT_DATASETS}"}
 
 # Pass@k
 PASS_K=${PASS_K:-1}
-
-# VERL root
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VERL_ROOT="$(dirname "$(dirname "$SCRIPT_DIR")")"
 
 ################################################################################
 # Main
@@ -76,6 +121,9 @@ VERL_ROOT="$(dirname "$(dirname "$SCRIPT_DIR")")"
 echo "################################################################################"
 echo "# KL Model Benchmark"
 echo "# Model: ${MODEL_PATH}"
+if [ -n "${TOKENIZER_PATH}" ]; then
+    echo "# Tokenizer: ${TOKENIZER_PATH}"
+fi
 echo "# Model Name: ${MODEL_NAME}"
 echo "# Datasets: ${DATASETS_TO_TEST}"
 echo "################################################################################"
@@ -89,69 +137,35 @@ if [ -f "${RESULTS_FILE}" ]; then
     echo "Loading existing results from: ${RESULTS_FILE}"
 fi
 
-# Run evaluation for each dataset
-for DATASET_NAME in ${DATASETS_TO_TEST}; do
-    DATASET_PATH="${DATASETS[$DATASET_NAME]}"
+DATASETS_TO_TEST_CSV=$(echo "${DATASETS_TO_TEST}" | tr ' ' ',')
 
-    if [ -z "${DATASET_PATH}" ]; then
-        echo "WARNING: Unknown dataset '${DATASET_NAME}', skipping..."
-        continue
-    fi
+echo ""
+echo "=========================================="
+echo "Evaluating with one model load"
+echo "=========================================="
+echo ""
 
-    if [ ! -f "${DATASET_PATH}" ]; then
-        echo "WARNING: Dataset not found at ${DATASET_PATH}, skipping..."
-        continue
-    fi
+PY_CMD=(
+    "${PYTHON_BIN}" "$SCRIPT_DIR/run_eval_suite.py"
+    --model_path "${MODEL_PATH}"
+    --model_name "${MODEL_NAME}"
+    --output_dir "${GEN_OUTPUT_DIR}"
+    --results_file "${RESULTS_FILE}"
+    --datasets "${DATASETS_TO_TEST_CSV}"
+    --datasets_dir "${EVAL_DATASETS_DIR}"
+    --pass_k "${PASS_K}"
+    --temperature 0.6
+    --top_p 0.95
+    --nnodes "${NNODES}"
+    --n_gpus_per_node "${NGPUS_PER_NODE}"
+    --gen_tp "${GEN_TP}"
+)
 
-    echo ""
-    echo "=========================================="
-    echo "Evaluating on ${DATASET_NAME}"
-    echo "=========================================="
+if [ -n "${TOKENIZER_PATH}" ]; then
+    PY_CMD+=(--tokenizer_path "${TOKENIZER_PATH}")
+fi
 
-    # Generation output
-    GEN_OUTPUT="${GEN_OUTPUT_DIR}/${DATASET_NAME}_pass${PASS_K}_generation.parquet"
-
-    # Generate responses
-    echo "[1/2] Generating responses..."
-    python3 -m verl.trainer.main_generation_server \
-        trainer.nnodes="${NNODES}" \
-        trainer.n_gpus_per_node="${NGPUS_PER_NODE}" \
-        actor_rollout_ref.model.path="${MODEL_PATH}" \
-        actor_rollout_ref.model.trust_remote_code=true \
-        actor_rollout_ref.rollout.temperature=0.6 \
-        actor_rollout_ref.rollout.top_p=0.95 \
-        actor_rollout_ref.rollout.prompt_length=4096 \
-        actor_rollout_ref.rollout.response_length=38912 \
-        actor_rollout_ref.rollout.tensor_model_parallel_size="${GEN_TP}" \
-        actor_rollout_ref.rollout.gpu_memory_utilization=0.95 \
-        actor_rollout_ref.rollout.name=vllm \
-        actor_rollout_ref.rollout.n=${PASS_K} \
-        data.train_files="['${DATASET_PATH}']" \
-        data.prompt_key=prompt \
-        +data.output_path="${GEN_OUTPUT}"
-
-    if [ $? -ne 0 ]; then
-        echo "ERROR: Generation failed for ${DATASET_NAME}"
-        continue
-    fi
-
-    # Evaluate and save to results.json
-    echo "[2/2] Evaluating responses..."
-    python3 -m verl.trainer.main_eval \
-        data.path="${GEN_OUTPUT}" \
-        custom_reward_function.path=recipe/open_math_reasoning/compute_score.py \
-        custom_reward_function.name=compute_score_data_source \
-        +output_json_path="${RESULTS_FILE}" \
-        +model_name="${MODEL_NAME}" \
-        +pass_k=${PASS_K}
-
-    if [ $? -ne 0 ]; then
-        echo "ERROR: Evaluation failed for ${DATASET_NAME}"
-        continue
-    fi
-
-    echo "✓ ${DATASET_NAME} completed!"
-done
+"${PY_CMD[@]}"
 
 # Display summary
 echo ""
@@ -160,7 +174,7 @@ echo "Benchmark Summary"
 echo "=========================================="
 echo ""
 
-python3 << EOF
+"${PYTHON_BIN}" << EOF
 import json
 import os
 

@@ -44,7 +44,6 @@ from verl.utils.device import get_device_name, get_nccl_backend, get_torch_devic
 from verl.utils.distributed import set_numa_affinity
 from verl.utils.megatron.dist_checkpointing import load_dist_checkpointing
 from verl.utils.megatron_utils import get_model
-from verl.utils.tokenizer import hf_processor, hf_tokenizer
 
 from .base_model_merger import BaseModelMerger, ModelMergerConfig
 
@@ -478,15 +477,7 @@ class MegatronModelMerger(BaseModelMerger):
             print(f"model saved to {target_dir} with {numel=}")
 
             self.model_config.save_pretrained(self.config.target_dir)
-
-            processor = hf_processor(self.hf_model_config_path, trust_remote_code=self.config.trust_remote_code)
-            tokenizer = hf_tokenizer(self.hf_model_config_path, trust_remote_code=self.config.trust_remote_code)
-            if processor is not None:
-                print(f"Saving processor to {self.config.target_dir}")
-                processor.save_pretrained(self.config.target_dir)
-            if tokenizer is not None:
-                print(f"Saving tokenizer to {self.config.target_dir}")
-                tokenizer.save_pretrained(self.config.target_dir)
+            self.save_hf_processing_assets()
 
     def merge_and_save(self):
         from verl.utils.megatron_utils import get_dist_checkpoint_path

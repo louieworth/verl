@@ -130,3 +130,8 @@ logs
 log
 outputs
 .history
+.claude
+.gemini
+LMOps
+gen_results
+agentica-org

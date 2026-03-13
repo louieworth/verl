@@ -14,12 +14,12 @@ class KLTrainingConfig:
     # KL Settings
     kl_type: Literal["reverse", "forward"] = "reverse"
     kl_method: Literal["monte_carlo", "full_vocab"] = "monte_carlo"
-    kl_coef: float = 1.0  # Pure KL divergence loss (no scaling)
-    temperature: float = 1.0
+    temperature: float = 0.7
 
     # Model Settings
     student_model_path: str = "Qwen/Qwen3-1.7B"
     teacher_model_path: str = ""  # Empty means same as student (memory efficient with LoRA)
+    base_model_name: str = ""  # Stable name used for result keys/paths across multi-epoch runs
     use_lora: bool = True
     lora_rank: int = 64
     lora_alpha: int = 128
@@ -32,27 +32,43 @@ class KLTrainingConfig:
     )
 
     # Training Settings
-    learning_rate: float = 2e-5  # Lower LR for pure KL loss (kl_coef=1.0)
-    train_batch_size: int = 96
-    gradient_accumulation_steps: int = 1
+    learning_rate: float = 2e-5
+    train_batch_size: int = 1  # per-GPU batch size
+    gradient_accumulation_steps: int = 4
     total_epochs: int = 1
     max_length: int = 20480
     warmup_steps_ratio: float = 0.1
     weight_decay: float = 0.01
     max_grad_norm: float = 1.0
+    min_lr_ratio: float = 0.1
 
     # Data Settings
-    data_path: str = ""  # Path to stage1 generation results (contains expert_cot in extra_info)
-    corrected_responses_path: str = ""  # Required for forward KL
+    data_path: str = ""  # Reverse: stage1 responses. Forward: stage2 rewritten responses.
+    corrected_responses_path: str = ""  # Optional legacy second file for forward KL rewrite targets
     max_samples: Optional[int] = None
-    use_initial_response: bool = False  # For reverse KL: Variant 1 (False) or Variant 2 (True)
+    use_initial_response: bool = False  # Forward stage2/teacher prompt: False=rewrite from expert, True=correct initial response
+    num_workers: int = 4
+
+    # verl FSDP Settings
+    fsdp_strategy: Literal["fsdp", "fsdp2"] = "fsdp2"
+    fsdp_size: int = -1
+    ulysses_sequence_parallel_size: int = 1
+    max_token_len_per_gpu: Optional[int] = None
+    use_remove_padding: bool = True
+    use_torch_compile: bool = True
+    param_offload: bool = False
+    optimizer_offload: bool = False
+    offload_policy: bool = False
 
     # Distributed Training
     local_rank: int = -1
     world_size: int = 1
+    nnodes: int = 1
+    n_gpus_per_node: int = 1
     distributed_backend: str = "nccl"
 
     # Output Settings
+    epoch_index: int = 1
     output_dir: str = "outputs/kl_training"
     model_save_dir: str = "/data/data/jiangli/models"  # Models saved here to avoid /home space
     gen_results_dir: str = ""  # Intermediate generation files (auto-generated if empty)
@@ -62,8 +78,9 @@ class KLTrainingConfig:
     save_merged_model: bool = True  # Merge LoRA adapters after training
 
     # Evaluation Settings
-    eval_datasets: list = field(default_factory=lambda: ["aime24", "aime25", "math500"])
+    eval_datasets: list = field(default_factory=lambda: ["aime24", "aime25", "math500", "hmmt25"])
     run_eval_after_training: bool = False  # Set to True to run evaluation automatically
+    eval_datasets_dir: str = "/data/data/jiangli/huggingface/datasets"
     eval_dataset_paths: dict = field(default_factory=lambda: {
         "aime24": "data/aime24.parquet",
         "aime25": "data/aime25.parquet",
@@ -71,6 +88,9 @@ class KLTrainingConfig:
         "hmmt24": "data/hmmt24.parquet",
         "hmmt25": "data/hmmt25.parquet",
         "amc23": "data/amc23.parquet",
+        "beyondaime": "data/beyondaime.parquet",
+        "amobench": "data/amobench.parquet",
+        "gsm8k": "data/gsm8k.parquet",
     })
 
     # Optimization
@@ -82,22 +102,31 @@ class KLTrainingConfig:
     wandb_project: str = "verl-kl-training"
     wandb_run_name: str = ""
 
-    # Adaptive KL coefficient (optional)
-    use_adaptive_kl: bool = False
-    target_kl: float = 0.01
-    kl_coef_min: float = 0.01
-    kl_coef_max: float = 1.0
-
     def __post_init__(self):
         """Validate configuration."""
-        if self.kl_type == "forward" and not self.corrected_responses_path:
-            raise ValueError("Forward KL requires corrected_responses_path")
+        if not self.base_model_name:
+            self.base_model_name = self.student_model_path.rstrip("/").split("/")[-1]
+
+        if self.max_token_len_per_gpu is None:
+            self.max_token_len_per_gpu = self.max_length
 
         if self.bf16 and self.fp16:
             raise ValueError("Cannot use both bf16 and fp16")
 
         if not self.bf16 and not self.fp16:
             print("Warning: Neither bf16 nor fp16 is enabled. Training will use fp32.")
+
+        self.eval_dataset_paths = {
+            "aime24": f"{self.eval_datasets_dir}/aime24/aime24_test.parquet",
+            "aime25": f"{self.eval_datasets_dir}/aime25/aime25_test.parquet",
+            "math500": f"{self.eval_datasets_dir}/math500/math500_test.parquet",
+            "hmmt24": f"{self.eval_datasets_dir}/hmmt24/hmmt24_test.parquet",
+            "hmmt25": f"{self.eval_datasets_dir}/hmmt25/hmmt25_test.parquet",
+            "amc23": f"{self.eval_datasets_dir}/amc23/amc23_test.parquet",
+            "beyondaime": f"{self.eval_datasets_dir}/beyondaime/beyondaime_test.parquet",
+            "amobench": f"{self.eval_datasets_dir}/amobench/amobench_test.parquet",
+            "gsm8k": f"{self.eval_datasets_dir}/gsm8k/gsm8k_test.parquet",
+        }
 
 
 # ============================================================================
@@ -109,9 +138,8 @@ def get_reverse_kl_monte_carlo_config(**kwargs) -> KLTrainingConfig:
     config = KLTrainingConfig(
         kl_type="reverse",
         kl_method="monte_carlo",
-        kl_coef=1.0,  # Pure KL
         temperature=1.0,
-        learning_rate=2e-6,  # Lower LR for pure KL
+        learning_rate=2e-6,
     )
     for key, value in kwargs.items():
         setattr(config, key, value)
@@ -123,10 +151,9 @@ def get_reverse_kl_full_vocab_config(**kwargs) -> KLTrainingConfig:
     config = KLTrainingConfig(
         kl_type="reverse",
         kl_method="full_vocab",
-        kl_coef=1.0,  # Pure KL
         temperature=1.0,
-        learning_rate=1e-6,  # Even lower LR for full vocab (memory intensive)
-        gradient_checkpointing=True,  # Required for memory
+        learning_rate=1e-6,
+        gradient_checkpointing=True,
     )
     for key, value in kwargs.items():
         setattr(config, key, value)
@@ -138,9 +165,8 @@ def get_forward_kl_monte_carlo_config(**kwargs) -> KLTrainingConfig:
     config = KLTrainingConfig(
         kl_type="forward",
         kl_method="monte_carlo",
-        kl_coef=1.0,  # Pure KL
         temperature=1.0,
-        learning_rate=2e-6,  # Lower LR for pure KL
+        learning_rate=2e-6,
     )
     for key, value in kwargs.items():
         setattr(config, key, value)
@@ -152,9 +178,8 @@ def get_forward_kl_full_vocab_config(**kwargs) -> KLTrainingConfig:
     config = KLTrainingConfig(
         kl_type="forward",
         kl_method="full_vocab",
-        kl_coef=1.0,  # Pure KL
         temperature=1.0,
-        learning_rate=1e-6,  # Even lower LR for full vocab
+        learning_rate=1e-6,
         gradient_checkpointing=True,
     )
     for key, value in kwargs.items():

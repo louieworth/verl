@@ -1,0 +1,14 @@
+{
+    "Qwen3-1.7B_epoch1": {
+        "aime24_pass1_generation_pass_1": 0.433,
+        "aime25_pass1_generation_pass_1": 0.367,
+        "math500_pass1_generation_pass_1": 0.874,
+        "hmmt25_pass1_generation_pass_1": 0.233
+    },
+    "Qwen3-1.7B_epoch2": {
+        "aime24_pass1_generation_pass_1": 0.367,
+        "aime25_pass1_generation_pass_1": 0.3,
+        "math500_pass1_generation_pass_1": 0.854,
+        "hmmt25_pass1_generation_pass_1": 0.233
+    }
+}
