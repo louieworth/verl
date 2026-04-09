@@ -17,6 +17,10 @@ import pandas as pd
 import ray
 from omegaconf import OmegaConf
 
+from verl.trainer.generation_server_env import (
+    build_generation_server_runtime_env,
+    temporarily_clear_torch_launch_env,
+)
 from verl.trainer.main_generation_server import generate, start_server
 
 logger = logging.getLogger(__name__)
@@ -301,8 +305,9 @@ def launch_generation_server(
     if ray.is_initialized():
         ray.shutdown()
 
-    ray.init(runtime_env={"env_vars": {"TOKENIZERS_PARALLELISM": "true", "NCCL_DEBUG": "WARN", "VLLM_USE_V1": "1"}})
-    return asyncio.run(start_server(config))
+    with temporarily_clear_torch_launch_env():
+        ray.init(runtime_env=build_generation_server_runtime_env())
+        return asyncio.run(start_server(config))
 
 
 def shutdown_generation_server(server_handles: list):

@@ -29,36 +29,48 @@ PROMPT_TEMPLATE_REVERSE_KL_STUDENT = """
 {PROBLEM}
 """
 
-PROMPT_TEMPLATE_FORWARD_KL_CORRECT = """
-Your task is to correct your wrong mathematical solution using the expert solution as reference.
+PROMPT_TEMPLATE_FORWARD_KL_WITH_INITIAL_RESPONSE = """
+Your task is to rewrite your mathematical solution using the reference solution as guidance.
 
 **Problem:**
 {PROBLEM}
 
-**Your Initial Solution (Wrong):**
+**Your Initial Solution:**
 {INITIAL_RESPONSE}
 
-**Expert Solution (Correct):**
+**Reference Solution:**
 {EXPERT_SOLUTION}
 
-**Correction Strategy:**
-1. First, try to MINIMALLY EDIT your initial solution:
-   - Keep your original structure, style, and flow
-   - Only change specific wrong steps/numbers/equations
-   - Preserve your original wording and explanations where correct
-
-2. If minimal editing is NOT feasible (e.g., fundamental approach error):
-   - Then rewrite using the expert solution's approach
-   - But still try to maintain your original style and format
-
-**Key Principles:**
-- Prefer MINIMAL EDITS over complete rewrites
-- Stay as close as possible to your original solution style
-- Only use the expert solution to identify and fix specific errors
-- Output ONLY the corrected solution, no meta-commentary
-
-Please provide your corrected solution:
+**Instructions:**
+1. Review the reference solution to understand the target reasoning and method
+2. Rewrite your solution so it is consistent with the reference solution
+3. Keep useful parts of your original structure and style when appropriate
+4. Output ONLY the rewritten solution
 """
+
+
+def build_teacher_prompt(
+    problem: str,
+    expert_solution: str,
+    *,
+    initial_response: str = "",
+    use_initial_response: bool = False,
+) -> str:
+    """Build the teacher-side prompt for either rewrite-only or rewrite-with-initial-response mode."""
+    if use_initial_response:
+        prompt = (
+            PROMPT_TEMPLATE_FORWARD_KL_WITH_INITIAL_RESPONSE.replace("{PROBLEM}", problem)
+            .replace("{INITIAL_RESPONSE}", initial_response)
+            .replace("{EXPERT_SOLUTION}", expert_solution)
+            .strip()
+        )
+    else:
+        prompt = (
+            PROMPT_TEMPLATE_REVERSE_KL_TEACHER.replace("{PROBLEM}", problem)
+            .replace("{EXPERT_SOLUTION}", expert_solution)
+            .strip()
+        )
+    return prompt + " " + instruction_following
 
 
 class KLTrainingDataset(Dataset):
@@ -173,12 +185,12 @@ class KLTrainingDataset(Dataset):
         student_prompt = PROMPT_TEMPLATE_REVERSE_KL_STUDENT.replace("{PROBLEM}", problem).strip()
         student_prompt = student_prompt + " " + instruction_following
 
-        teacher_prompt = (
-            PROMPT_TEMPLATE_REVERSE_KL_TEACHER.replace("{PROBLEM}", problem)
-            .replace("{EXPERT_SOLUTION}", expert_solution)
-            .strip()
+        teacher_prompt = build_teacher_prompt(
+            problem,
+            expert_solution,
+            initial_response=response,
+            use_initial_response=self.use_initial_response,
         )
-        teacher_prompt = teacher_prompt + " " + instruction_following
 
         return self._prepare_item(student_prompt=student_prompt, teacher_prompt=teacher_prompt, response=response)
 
@@ -206,20 +218,12 @@ class KLTrainingDataset(Dataset):
                 )
 
         student_prompt = problem + " " + instruction_following
-        if self.use_initial_response:
-            teacher_prompt = (
-                PROMPT_TEMPLATE_FORWARD_KL_CORRECT.replace("{PROBLEM}", problem)
-                .replace("{INITIAL_RESPONSE}", initial_response)
-                .replace("{EXPERT_SOLUTION}", expert_solution)
-                .strip()
-            )
-        else:
-            teacher_prompt = (
-                PROMPT_TEMPLATE_REVERSE_KL_TEACHER.replace("{PROBLEM}", problem)
-                .replace("{EXPERT_SOLUTION}", expert_solution)
-                .strip()
-            )
-        teacher_prompt = teacher_prompt + " " + instruction_following
+        teacher_prompt = build_teacher_prompt(
+            problem,
+            expert_solution,
+            initial_response=initial_response,
+            use_initial_response=self.use_initial_response,
+        )
 
         return self._prepare_item(
             student_prompt=student_prompt,

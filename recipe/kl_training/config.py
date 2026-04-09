@@ -7,6 +7,15 @@ from dataclasses import dataclass, field
 from typing import Literal, Optional
 
 
+def get_prompt_mode_tag(use_initial_response: bool) -> str:
+    """Return the prompt-mode suffix used in paths and evaluation names.
+
+    The historical "correction" suffix is kept for compatibility with existing
+    output paths even though the prompt now means rewrite-with-initial-response.
+    """
+    return "correction" if use_initial_response else "rewrite"
+
+
 @dataclass
 class KLTrainingConfig:
     """Configuration for KL Divergence Training."""
@@ -46,7 +55,7 @@ class KLTrainingConfig:
     data_path: str = ""  # Reverse: stage1 responses. Forward: stage2 rewritten responses.
     corrected_responses_path: str = ""  # Optional legacy second file for forward KL rewrite targets
     max_samples: Optional[int] = None
-    use_initial_response: bool = False  # Forward stage2/teacher prompt: False=rewrite from expert, True=correct initial response
+    use_initial_response: bool = False  # Teacher prompt mode: False=rewrite from expert only, True=rewrite using initial response + expert guidance
     num_workers: int = 4
 
     # verl FSDP Settings
@@ -127,6 +136,10 @@ class KLTrainingConfig:
             "amobench": f"{self.eval_datasets_dir}/amobench/amobench_test.parquet",
             "gsm8k": f"{self.eval_datasets_dir}/gsm8k/gsm8k_test.parquet",
         }
+
+    @property
+    def prompt_mode_tag(self) -> str:
+        return get_prompt_mode_tag(self.use_initial_response)
 
 
 # ============================================================================

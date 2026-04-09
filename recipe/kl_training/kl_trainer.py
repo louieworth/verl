@@ -42,6 +42,15 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+def build_eval_tag(config: KLTrainingConfig) -> str:
+    return f"kl_{config.kl_type}_{config.kl_method}_{config.prompt_mode_tag}"
+
+
+def build_eval_model_name(config: KLTrainingConfig) -> str:
+    base_model_name = config.base_model_name or config.student_model_path.split("/")[-1]
+    return f"{base_model_name}_{build_eval_tag(config)}_epoch{config.epoch_index}"
+
+
 class KLTrainer:
     """Token-level KL training using verl's sharded FSDP engines."""
 
@@ -97,6 +106,7 @@ class KLTrainer:
                 "kl_type": self.config.kl_type,
                 "kl_method": self.config.kl_method,
                 "temperature": self.config.temperature,
+                "prompt_mode": self.config.prompt_mode_tag,
                 "use_initial_response": self.config.use_initial_response,
                 "student_model_path": self.config.student_model_path,
                 "teacher_model_path": self.config.teacher_model_path or self.config.student_model_path,
@@ -149,11 +159,23 @@ class KLTrainer:
             target_modules=self.config.lora_target_modules,
         )
 
-    def _build_engine_config(self, *, forward_only: bool) -> FSDPEngineConfig:
+    def _build_wrap_policy(self, model_path: str) -> dict[str, list[str]]:
+        model_identifiers = [
+            model_path,
+            self.config.base_model_name,
+            self.config.student_model_path,
+            self.config.teacher_model_path,
+        ]
+        if any(identifier and "Qwen3" in identifier for identifier in model_identifiers):
+            return {"transformer_layer_cls_to_wrap": ["Qwen3DecoderLayer"]}
+        return {}
+
+    def _build_engine_config(self, model_path: str, *, forward_only: bool) -> FSDPEngineConfig:
         return FSDPEngineConfig(
             strategy=self.config.fsdp_strategy,
             fsdp_size=self.config.fsdp_size,
             ulysses_sequence_parallel_size=self.config.ulysses_sequence_parallel_size,
+            wrap_policy=self._build_wrap_policy(model_path),
             forward_only=forward_only,
             use_dynamic_bsz=True,
             max_token_len_per_gpu=self.config.max_token_len_per_gpu,
@@ -188,7 +210,7 @@ class KLTrainer:
         worker_config = TrainingWorkerConfig(
             model_type="language_model",
             model_config=self._build_model_config(model_path, trainable=trainable),
-            engine_config=self._build_engine_config(forward_only=not trainable),
+            engine_config=self._build_engine_config(model_path, forward_only=not trainable),
             optimizer_config=self._build_optimizer_config(),
             checkpoint_config=checkpoint_config,
         )
@@ -563,8 +585,8 @@ class KLTrainer:
         dataset_paths = self.config.eval_dataset_paths
 
         base_model_name = self.config.base_model_name or self.config.student_model_path.split("/")[-1]
-        eval_tag = f"kl_{self.config.kl_type}_{self.config.kl_method}"
-        model_name = f"{base_model_name}_{eval_tag}_epoch{self.config.epoch_index}"
+        eval_tag = build_eval_tag(self.config)
+        model_name = build_eval_model_name(self.config)
 
         gen_results_dir = self.config.gen_results_dir or self.config.output_dir
         eval_output_dir = os.path.join(gen_results_dir, f"evaluate_{eval_tag}")

@@ -27,7 +27,7 @@ set -o pipefail
 KL_TYPE=${KL_TYPE:-"forward"}          # reverse or forward
 KL_METHOD=${KL_METHOD:-"monte_carlo"}  # monte_carlo or full_vocab
 TEMPERATURE=${TEMPERATURE:-0.7}         # Softmax temperature
-USE_INITIAL_RESPONSE=${USE_INITIAL_RESPONSE:-"false"}  # Stage 2 / forward teacher prompt: false=rewrite, true=correct initial response
+USE_INITIAL_RESPONSE=${USE_INITIAL_RESPONSE:-"true"}  # Teacher prompt mode: false=rewrite from expert only, true=rewrite using initial response + expert guidance
 FORWARD_STAGE2_MODE=${FORWARD_STAGE2_MODE:-"rewrite_all"}  # rewrite_all or reward0_only
 
 # Model Settings
@@ -39,13 +39,13 @@ LORA_ALPHA=${LORA_ALPHA:-128}
 
 # Training Settings
 LEARNING_RATE=${LEARNING_RATE:-2e-5}
-TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-96}
+TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-8}
 GRADIENT_ACCUMULATION_STEPS=${GRADIENT_ACCUMULATION_STEPS:-4}
 TOTAL_EPOCHS=${TOTAL_EPOCHS:-1}  # Outer pipeline epochs
 TRAIN_EPOCHS_PER_ROUND=${TRAIN_EPOCHS_PER_ROUND:-1}  # Trainer epochs for each pipeline epoch
-MAX_LENGTH=${MAX_LENGTH:-20480}
+MAX_LENGTH=${MAX_LENGTH:-36864}
 WARMUP_RATIO=${WARMUP_RATIO:-0.1}
-WEIGHT_DECAY=${WEIGHT_DECAY:-0.01}
+WEIGHT_DECAY=${WEIGHT_DECAY:-0.005}
 
 # Data Settings
 DATA_PATH=${DATA_PATH:-""}  # Optional override; reused across epochs if set
@@ -95,6 +95,7 @@ TRAIN_DATA_PATH=${TRAIN_DATA_PATH:-"$VERL_ROOT/data/deepscaleR_train.parquet"}
 
 # Model name from the original base model, not from epoch checkpoints
 MODEL_NAME="${MODEL_PATH##*/}"
+PROMPT_MODE_TAG=$( [ "$USE_INITIAL_RESPONSE" = "true" ] && echo "correction" || echo "rewrite" )
 
 if [ "$KL_TYPE" = "forward" ] && [ "$FORWARD_STAGE2_MODE" != "rewrite_all" ] && [ "$FORWARD_STAGE2_MODE" != "reward0_only" ]; then
     echo "ERROR: FORWARD_STAGE2_MODE must be one of: rewrite_all, reward0_only"
@@ -114,19 +115,19 @@ fi
 # Base directories
 GEN_RESULTS_BASE_DIR="$VERL_ROOT/gen_results/${MODEL_NAME}"
 if [ -z "$OUTPUT_DIR" ]; then
-    OUTPUT_BASE_DIR="$VERL_ROOT/outputs/${MODEL_NAME}_kl_${KL_TYPE}_${KL_METHOD}"
+    OUTPUT_BASE_DIR="$VERL_ROOT/outputs/${MODEL_NAME}_kl_${KL_TYPE}_${KL_METHOD}_${PROMPT_MODE_TAG}"
 else
     OUTPUT_BASE_DIR="$OUTPUT_DIR"
 fi
 
 if [ -z "$MODEL_SAVE_DIR" ] || [ "$MODEL_SAVE_DIR" = "/data/data/jiangli/models" ]; then
-    MODEL_SAVE_BASE_DIR="/data/data/jiangli/models/${MODEL_NAME}_kl_${KL_TYPE}_${KL_METHOD}"
+    MODEL_SAVE_BASE_DIR="/data/data/jiangli/models/${MODEL_NAME}_kl_${KL_TYPE}_${KL_METHOD}_${PROMPT_MODE_TAG}"
 else
     MODEL_SAVE_BASE_DIR="$MODEL_SAVE_DIR"
 fi
 
 if [ -z "$WANDB_RUN_NAME" ]; then
-    WANDB_RUN_NAME_BASE="kl_${KL_TYPE}_${KL_METHOD}"
+    WANDB_RUN_NAME_BASE="kl_${KL_TYPE}_${KL_METHOD}_${PROMPT_MODE_TAG}"
 else
     WANDB_RUN_NAME_BASE="$WANDB_RUN_NAME"
 fi
@@ -168,9 +169,9 @@ resolve_epoch_data_path() {
 
     if [ "$KL_TYPE" = "forward" ]; then
         if [ "$FORWARD_STAGE2_MODE" = "reward0_only" ]; then
-            echo "$epoch_dir/deepscaleR_stage2_reward0_responses.parquet"
+            echo "$epoch_dir/deepscaleR_stage2_reward0_${PROMPT_MODE_TAG}_responses.parquet"
         else
-            echo "$epoch_dir/deepscaleR_stage2_responses.parquet"
+            echo "$epoch_dir/deepscaleR_stage2_${PROMPT_MODE_TAG}_responses.parquet"
         fi
     else
         echo "$epoch_dir/deepscaleR_stage1_responses.parquet"
@@ -213,9 +214,9 @@ print_base_configuration() {
     echo "  Type:     $KL_TYPE"
     echo "  Method:   $KL_METHOD"
     echo "  Temp:     $TEMPERATURE"
+    echo "  Prompt:   $PROMPT_MODE_TAG"
     if [ "$KL_TYPE" = "forward" ]; then
         echo "  Stage2 Mode: $FORWARD_STAGE2_MODE"
-        echo "  Stage2 Prompt: $( [ "$USE_INITIAL_RESPONSE" = "true" ] && echo "correct_initial_response" || echo "rewrite_from_expert" )"
     fi
     echo ""
     echo "Model Settings:"
@@ -294,9 +295,9 @@ run_epoch() {
 
     if [ "$KL_TYPE" = "forward" ]; then
         if file_exists_and_nonempty "$current_data_path"; then
-            echo "Found existing Stage 2 rewrite data: $current_data_path"
+            echo "Found existing Stage 2 $PROMPT_MODE_TAG data: $current_data_path"
         else
-            echo "Stage 2 rewrite data not found. Generating..."
+            echo "Stage 2 $PROMPT_MODE_TAG data not found. Generating..."
 
             local stage1_output="$current_gen_results_dir/deepscaleR_stage1_responses.parquet"
             local stage1_prompts="$current_gen_results_dir/deepscaleR_stage1_prompts.parquet"
@@ -331,7 +332,7 @@ run_epoch() {
             local stage2_prompts
             if [ "$FORWARD_STAGE2_MODE" = "reward0_only" ]; then
                 echo "  [Stage 2] Generating reward==0 prompts..."
-                stage2_prompts="$current_gen_results_dir/deepscaleR_stage2_reward0_prompts.parquet"
+                stage2_prompts="$current_gen_results_dir/deepscaleR_stage2_reward0_${PROMPT_MODE_TAG}_prompts.parquet"
                 if file_exists_and_nonempty "$stage2_prompts"; then
                     echo "  Stage 2 reward==0 prompts already prepared: $stage2_prompts"
                 else
@@ -342,7 +343,7 @@ run_epoch() {
                 fi
             else
                 echo "  [Stage 2] Generating prompts over all samples..."
-                stage2_prompts="$current_gen_results_dir/deepscaleR_stage2_prompts.parquet"
+                stage2_prompts="$current_gen_results_dir/deepscaleR_stage2_${PROMPT_MODE_TAG}_prompts.parquet"
                 if file_exists_and_nonempty "$stage2_prompts"; then
                     echo "  Stage 2 prompts already prepared: $stage2_prompts"
                 else
@@ -353,7 +354,7 @@ run_epoch() {
                 fi
             fi
 
-            echo "  [Stage 2] Generating rewritten responses..."
+            echo "  [Stage 2] Generating ${PROMPT_MODE_TAG} responses..."
             python3 -m verl.trainer.main_generation_server \
                 trainer.nnodes="${NNODES}" \
                 trainer.n_gpus_per_node="${NGPUS_PER_NODE}" \
@@ -414,6 +415,7 @@ trainer_total_epochs: $TRAIN_EPOCHS_PER_ROUND
 kl_type: $KL_TYPE
 kl_method: $KL_METHOD
 temperature: $TEMPERATURE
+prompt_mode: $PROMPT_MODE_TAG
 use_initial_response: $USE_INITIAL_RESPONSE
 forward_stage2_mode: $FORWARD_STAGE2_MODE
 base_model_name: $MODEL_NAME

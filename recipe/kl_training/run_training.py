@@ -7,11 +7,14 @@ import argparse
 import os
 import sys
 
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
 # Add repository root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from recipe.kl_training.config import KLTrainingConfig
 from recipe.kl_training.kl_trainer import KLTrainer
+from recipe.kl_training._tokenizer_compat import apply_qwen2_tokenizer_vllm_compat
 
 
 def parse_args():
@@ -48,7 +51,7 @@ def parse_args():
         "--use_initial_response",
         type=lambda x: x.lower() == "true",
         default=False,
-        help="Forward stage2/teacher prompt mode: false=rewrite from expert, true=correct initial response.",
+        help="Teacher prompt mode: false=rewrite from expert only, true=rewrite using the initial response plus expert guidance.",
     )
     parser.add_argument("--num_workers", type=int, default=4)
 
@@ -92,6 +95,12 @@ def parse_args():
 
 
 def main():
+    pythonpath_entries = [entry for entry in os.environ.get("PYTHONPATH", "").split(os.pathsep) if entry]
+    if SCRIPT_DIR not in pythonpath_entries:
+        os.environ["PYTHONPATH"] = os.pathsep.join([SCRIPT_DIR, *pythonpath_entries])
+
+    apply_qwen2_tokenizer_vllm_compat()
+
     args = parse_args()
 
     # Create config

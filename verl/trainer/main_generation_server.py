@@ -34,6 +34,10 @@ from omegaconf import OmegaConf
 from openai.types.chat import ChatCompletion
 from tqdm import tqdm
 
+from verl.trainer.generation_server_env import (
+    build_generation_server_runtime_env,
+    temporarily_clear_torch_launch_env,
+)
 from verl.utils.hdfs_io import makedirs
 from verl.workers.rollout.replica import get_rollout_replica_class
 
@@ -163,61 +167,62 @@ async def generate(
 
 @hydra.main(config_path="config", config_name="ppo_trainer", version_base=None)
 def main(config):
-    ray.init(runtime_env={"env_vars": {"TOKENIZERS_PARALLELISM": "true", "NCCL_DEBUG": "WARN", "VLLM_USE_V1": "1"}})
+    with temporarily_clear_torch_launch_env():
+        ray.init(runtime_env=build_generation_server_runtime_env())
 
-    pprint(OmegaConf.to_container(config, resolve=True))  # resolve=True will eval symbol values
-    OmegaConf.resolve(config)
+        pprint(OmegaConf.to_container(config, resolve=True))  # resolve=True will eval symbol values
+        OmegaConf.resolve(config)
 
-    n_samples = config.actor_rollout_ref.rollout.n
+        n_samples = config.actor_rollout_ref.rollout.n
 
-    if config.actor_rollout_ref.rollout.temperature == 0.0:
-        assert n_samples == 1, "When temperature=0, n_samples must be 1."
-    assert n_samples >= 1, "n_samples should always >= 1"
+        if config.actor_rollout_ref.rollout.temperature == 0.0:
+            assert n_samples == 1, "When temperature=0, n_samples must be 1."
+        assert n_samples >= 1, "n_samples should always >= 1"
 
-    sampling_params = {
-        "temperature": config.actor_rollout_ref.rollout.temperature,
-        "top_p": config.actor_rollout_ref.rollout.top_p,
-        # "top_k": config.actor_rollout_ref.rollout.top_k,
-        "max_tokens": config.actor_rollout_ref.rollout.response_length,
-    }
+        sampling_params = {
+            "temperature": config.actor_rollout_ref.rollout.temperature,
+            "top_p": config.actor_rollout_ref.rollout.top_p,
+            # "top_k": config.actor_rollout_ref.rollout.top_k,
+            "max_tokens": config.actor_rollout_ref.rollout.response_length,
+        }
 
-    from omegaconf import ListConfig
+        from omegaconf import ListConfig
 
-    train_files = config.data.train_files
-    if not isinstance(train_files, list | ListConfig):
-        train_files = [train_files]
+        train_files = config.data.train_files
+        if not isinstance(train_files, list | ListConfig):
+            train_files = [train_files]
 
-    # read dataset. Note that the dataset should directly contain chat template format (e.g., a list of dictionary)
+        # read dataset. Note that the dataset should directly contain chat template format (e.g., a list of dictionary)
 
-    datasets = []
-    for train_file in train_files:
-        dataset = pd.read_parquet(train_file)
-        datasets.append(dataset)
+        datasets = []
+        for train_file in train_files:
+            dataset = pd.read_parquet(train_file)
+            datasets.append(dataset)
 
-    # concat dataset
-    dataset = pd.concat(datasets, axis=0, ignore_index=True)
-    chat_lst = dataset[config.data.prompt_key].tolist()
-    chat_lst = [chat.tolist() for chat in chat_lst]
-    chat_numpy = np.array(chat_lst)
+        # concat dataset
+        dataset = pd.concat(datasets, axis=0, ignore_index=True)
+        chat_lst = dataset[config.data.prompt_key].tolist()
+        chat_lst = [chat.tolist() for chat in chat_lst]
+        chat_numpy = np.array(chat_lst)
 
-    # start native server
-    server_handles, server_addresses = asyncio.run(start_server(config))
+        # start native server
+        server_handles, server_addresses = asyncio.run(start_server(config))
 
-    # run generate
-    gen_results = asyncio.run(
-        generate(server_addresses, config.actor_rollout_ref.model.path, n_samples, sampling_params, chat_numpy)
-    )
+        # run generate
+        gen_results = asyncio.run(
+            generate(server_addresses, config.actor_rollout_ref.model.path, n_samples, sampling_params, chat_numpy)
+        )
 
-    # reshape results into a numpy array
-    import itertools
+        # reshape results into a numpy array
+        import itertools
 
-    results = list(itertools.chain.from_iterable(gen_results))
+        results = list(itertools.chain.from_iterable(gen_results))
 
-    # extract content from results
-    results = np.array([result.choices[0].message.content for result in results])
-    results = np.reshape(results, (-1, n_samples))
+        # extract content from results
+        results = np.array([result.choices[0].message.content for result in results])
+        results = np.reshape(results, (-1, n_samples))
 
-    assert results.shape == (len(chat_lst), n_samples)
+        assert results.shape == (len(chat_lst), n_samples)
 
     results = results.tolist()
 

@@ -23,7 +23,10 @@ from recipe.kl_training.kl_trainer import KLTrainer
 def build_trainer(tmp_path, rank: int):
     trainer = object.__new__(KLTrainer)
     trainer.rank = rank
-    trainer.config = SimpleNamespace(model_save_dir=str(tmp_path))
+    trainer.config = SimpleNamespace(
+        model_save_dir=str(tmp_path),
+        student_model_path="Qwen/Qwen3-4B-Instruct-2507",
+    )
     trainer._find_latest_checkpoint = lambda: str(tmp_path / "global_step_27")
     return trainer
 
@@ -43,7 +46,9 @@ def test_export_hf_model_rank0_success(monkeypatch, tmp_path):
 
     assert recorded["check"] is True
     assert recorded["cmd"][:4] == [recorded["cmd"][0], "-m", "verl.model_merger", "merge"]
-    assert recorded["cmd"][-2:] == ["--target_dir", str(tmp_path / "hf_merged")]
+    assert "--target_dir" in recorded["cmd"]
+    target_dir_index = recorded["cmd"].index("--target_dir")
+    assert recorded["cmd"][target_dir_index + 1] == str(tmp_path / "hf_merged")
 
 
 def test_export_hf_model_rank0_failure_is_rethrown_after_broadcast(monkeypatch, tmp_path):

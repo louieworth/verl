@@ -24,35 +24,23 @@ Answer:
 """
 
 
-PROMPT_TEMPLATE_STAGE_2_CORRECT_ALL = """
-Your task is to correct your wrong mathematical solution using the expert solution as reference.
+PROMPT_TEMPLATE_STAGE_2_WITH_INITIAL_RESPONSE_ALL = """
+Your task is to rewrite your mathematical solution using the reference solution as guidance.
 
 **Problem:**
 {PROBLEM}
 
-**Your Initial Solution (Wrong):**
+**Your Initial Solution:**
 {INITIAL_RESPONSE}
 
-**Expert Solution (Correct):**
+**Reference Solution:**
 {EXPERT_SOLUTION}
 
-**Correction Strategy:**
-1. First, try to MINIMALLY EDIT your initial solution:
-   - Keep your original structure, style, and flow
-   - Only change specific wrong steps/numbers/equations
-   - Preserve your original wording and explanations where correct
-
-2. If minimal editing is NOT feasible (e.g., fundamental approach error):
-   - Then rewrite using the expert solution's approach
-   - But still try to maintain your original style and format
-
-**Key Principles:**
-- Prefer MINIMAL EDITS over complete rewrites
-- Stay as close as possible to your original solution style
-- Only use the expert solution to identify and fix specific errors
-- Output ONLY the corrected solution, no meta-commentary
-
-Please provide your corrected solution:
+**Instructions:**
+1. Review the reference solution to understand the target reasoning and method
+2. Rewrite your solution so it is consistent with the reference solution
+3. Keep useful parts of your original structure and style when appropriate
+4. Output ONLY the rewritten solution
 """
 
 
@@ -83,7 +71,7 @@ def make_map_fn_stage2_rewrite_all(use_initial_response: bool):
 
         if use_initial_response:
             prompt_content = (
-                PROMPT_TEMPLATE_STAGE_2_CORRECT_ALL
+                PROMPT_TEMPLATE_STAGE_2_WITH_INITIAL_RESPONSE_ALL
                 .replace("{PROBLEM}", problem)
                 .replace("{INITIAL_RESPONSE}", initial_response)
                 .replace("{EXPERT_SOLUTION}", expert_solution)
@@ -123,14 +111,14 @@ if __name__ == "__main__":
         "--use_initial_response",
         type=lambda x: x.lower() == "true",
         default=False,
-        help="If true, build correction prompts around the stage1 response; otherwise use reverse-style rewrite prompts.",
+        help="If true, build rewrite prompts that include the stage1 response; otherwise use reference-only rewrite prompts.",
     )
     args = parser.parse_args()
 
     print(f"Loading Stage 1 output: {args.stage1_output}")
     ds_raw = datasets.load_dataset("parquet", data_files=args.stage1_output, split="train")
 
-    prompt_mode = "correct_initial_response" if args.use_initial_response else "rewrite_from_expert"
+    prompt_mode = "rewrite_with_initial_response" if args.use_initial_response else "rewrite_from_expert"
     print(f"Building stage2 prompt dataset over all samples... mode={prompt_mode}")
     ds_rewrite = ds_raw.map(
         function=make_map_fn_stage2_rewrite_all(args.use_initial_response),

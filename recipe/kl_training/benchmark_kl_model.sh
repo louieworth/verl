@@ -108,7 +108,7 @@ declare -A DATASETS=(
 )
 
 # Datasets to test
-DEFAULT_DATASETS="beyondaime amobench gsm8k"
+DEFAULT_DATASETS="aime24 aime25 math500 hmmt25 beyondaime amobench gsm8k"
 DATASETS_TO_TEST=${DATASETS:-"${DEFAULT_DATASETS}"}
 
 # Pass@k

@@ -5,7 +5,12 @@ import json
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.dirname(os.path.dirname(SCRIPT_DIR))
+
+sys.path.insert(0, REPO_ROOT)
+
+from recipe.kl_training._tokenizer_compat import apply_qwen2_tokenizer_vllm_compat
 
 from recipe.kl_training.eval_utils import resolve_eval_dataset_paths, run_evaluation_suite
 
@@ -29,6 +34,12 @@ def parse_args():
 
 
 def main():
+    pythonpath_entries = [entry for entry in os.environ.get("PYTHONPATH", "").split(os.pathsep) if entry]
+    if SCRIPT_DIR not in pythonpath_entries:
+        os.environ["PYTHONPATH"] = os.pathsep.join([SCRIPT_DIR, *pythonpath_entries])
+
+    apply_qwen2_tokenizer_vllm_compat()
+
     args = parse_args()
     dataset_names = [dataset.strip() for dataset in args.datasets.split(",") if dataset.strip()]
     dataset_paths = resolve_eval_dataset_paths(dataset_names, args.datasets_dir)
