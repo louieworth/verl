@@ -1,0 +1,61 @@
+# paper-like DPO test preset based on Appendix B of arXiv:2305.18290
+#
+# This preset is intended for smoke-testing the offline DPO recipe on the original
+# prompt/chosen/rejected preference format. It does not replace the default recipe.
+#
+# Paper-aligned settings:
+# - beta = 0.1 by default
+# - effective batch size = 64
+# - optimizer = RMSprop
+# - learning rate = 1e-6
+# - linear warmup from 0 to 1e-6 over 150 steps
+# - rollout/log-prob temperature = 1.0
+#
+# Notes:
+# - `ppo_micro_batch_size_per_gpu` is an implementation/memory knob and is not specified by the paper.
+# - max prompt / response length are task- and model-dependent and are therefore left as explicit recipe values.
+# - For TL;DR summarization in the paper, set `algorithm.dpo_beta=0.5`.
+
+defaults:
+  - dpo_trainer
+  - _self_
+
+algorithm:
+  dpo_beta: 0.1
+  dpo_loss_type: sigmoid
+  dpo_label_smoothing: 0.0
+  reference_free: false
+
+actor_rollout_ref:
+  actor:
+    ppo_mini_batch_size: ${data.train_batch_size}
+    # Effective batch size stays 64 because gradients accumulate over the whole dataloader batch.
+    ppo_micro_batch_size_per_gpu: 8
+    ppo_max_token_len_per_gpu: 2048
+    optim:
+      optimizer: RMSprop
+      optimizer_impl: torch.optim
+      lr: 1e-6
+      weight_decay: 0.0
+      lr_warmup_steps: 150
+      lr_scheduler_type: constant
+  rollout:
+    temperature: 1.0
+    log_prob_micro_batch_size_per_gpu: ${actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu}
+    log_prob_max_token_len_per_gpu: ${actor_rollout_ref.actor.ppo_max_token_len_per_gpu}
+  ref:
+    log_prob_micro_batch_size_per_gpu: ${actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu}
+    log_prob_max_token_len_per_gpu: ${actor_rollout_ref.actor.ppo_max_token_len_per_gpu}
+
+data:
+  train_batch_size: 64
+  val_batch_size: 64
+  # These are not specified in the paper and should be adjusted for the chosen base model / dataset.
+  max_prompt_length: 1024
+  max_response_length: 1024
+
+trainer:
+  # Smoke-test default for the original pair dataset. This is not specified as a universal
+  # hyperparameter in the paper and can be overridden freely.
+  total_epochs: 1
+  experiment_name: dpo_paper_test

@@ -1,0 +1,65 @@
+# the IPO config mirrors the default DPO recipe but switches to IPO loss
+
+hydra:
+  searchpath:
+    - file://verl/trainer/config
+
+defaults:
+  - ppo_trainer
+  - _self_
+
+actor_rollout_ref:
+  hybrid_engine: false
+  actor:
+    ppo_epochs: 1
+    ppo_mini_batch_size: ${data.train_batch_size}
+    ppo_micro_batch_size_per_gpu: 4
+    ppo_max_token_len_per_gpu: 2048
+    optim:
+      lr_warmup_steps: 0
+  rollout:
+    name: hf
+    n: 1
+    temperature: 1.0
+    log_prob_micro_batch_size_per_gpu: ${actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu}
+    log_prob_max_token_len_per_gpu: ${actor_rollout_ref.actor.ppo_max_token_len_per_gpu}
+    val_kwargs:
+      n: 1
+      do_sample: false
+  ref:
+    log_prob_micro_batch_size_per_gpu: ${actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu}
+    log_prob_max_token_len_per_gpu: ${actor_rollout_ref.actor.ppo_max_token_len_per_gpu}
+
+algorithm:
+  adv_estimator: reinforce_plus_plus
+  reference_free: false
+  dpo_beta: 0.1
+  dpo_loss_type: ipo
+  dpo_label_smoothing: 0.0
+  simpo_gamma: 0.5
+
+critic:
+  enable: false
+
+reward:
+  reward_model:
+    enable: false
+
+data:
+  prompt_key: prompt
+  chosen_key: chosen
+  rejected_key: rejected
+  max_prompt_length: 1024
+  max_response_length: 1024
+  prompt_truncation: left
+  add_eos: true
+  train_batch_size: 128
+  val_batch_size: 128
+  dataloader_num_workers: 8
+
+trainer:
+  val_before_train: true
+  log_val_generations: 0
+  test_freq: -1
+  save_freq: -1
+  use_legacy_worker_impl: enable

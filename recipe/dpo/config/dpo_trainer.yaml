@@ -1,0 +1,86 @@
+# the dpo config overrides the default ppo trainer config
+
+hydra:
+  searchpath:
+    - file://verl/trainer/config
+
+defaults:
+  - ppo_trainer
+  - _self_
+
+actor_rollout_ref:
+  hybrid_engine: false
+  actor:
+    ppo_epochs: 1
+    ppo_mini_batch_size: ${data.train_batch_size}
+    ppo_micro_batch_size_per_gpu: 4
+    ppo_max_token_len_per_gpu: 2048
+    optim:
+      lr_warmup_steps: 0
+  rollout:
+    name: hf
+    n: 1
+    temperature: 1.0
+    log_prob_micro_batch_size_per_gpu: ${actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu}
+    log_prob_max_token_len_per_gpu: ${actor_rollout_ref.actor.ppo_max_token_len_per_gpu}
+    val_kwargs:
+      n: 1
+      do_sample: false
+  ref:
+    log_prob_micro_batch_size_per_gpu: ${actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu}
+    log_prob_max_token_len_per_gpu: ${actor_rollout_ref.actor.ppo_max_token_len_per_gpu}
+
+algorithm:
+  adv_estimator: reinforce_plus_plus
+  reference_free: false
+  dpo_beta: 0.1
+  dpo_loss_type: sigmoid
+  dpo_label_smoothing: 0.0
+  simpo_gamma: 0.5
+  prospect_dpo_alpha_tau: 0.2
+  prospect_dpo_alpha_k: 10.0
+  prospect_dpo_lambda_max: 2.0
+  prospect_dpo_lambda_gamma: 2.0
+
+critic:
+  enable: false
+
+reward:
+  reward_model:
+    enable: false
+
+data:
+  prompt_key: prompt
+  chosen_key: chosen
+  rejected_key: rejected
+  response_key: response
+  label_key: label
+  s_dwell_key: s_dwell
+  p_ctr_key: p_ctr
+  sample_id_key: sample_id
+  reference_logps_key: reference_logps
+  max_prompt_length: 1024
+  max_response_length: 1024
+  prompt_truncation: left
+  add_eos: true
+  train_batch_size: 128
+  val_batch_size: 128
+  dataloader_num_workers: 8
+  auto_precompute_reference_logps: false
+  reference_logps_materialized_dir: null
+  reference_logps_reuse_train_files_csv: null
+  reference_logps_reuse_val_files_csv: null
+  reference_logps_allow_cross_namespace_reuse: false
+  reference_logps_allow_sample_id_reuse: false
+  reference_logps_num_workers: 0
+  reference_logps_rows_per_task: 2048
+  reference_logps_max_batch_size: 8
+  reference_logps_max_batched_tokens: 24576
+  reference_logps_compression: zstd
+
+trainer:
+  val_before_train: true
+  log_val_generations: 0
+  test_freq: -1
+  save_freq: -1
+  use_legacy_worker_impl: enable

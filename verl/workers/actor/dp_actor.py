@@ -27,6 +27,12 @@ from torch.distributed.tensor import DTensor
 
 import verl.utils.torch_functional as verl_F
 from verl import DataProto
+from verl.trainer.dpo.core_algos import (
+    compute_dpo_loss,
+    get_batch_logps,
+    requires_reference_model,
+    use_average_sequence_log_probs,
+)
 from verl.trainer.ppo.core_algos import agg_loss, get_policy_loss_fn, kl_penalty
 from verl.utils.attention_utils import index_first_axis, pad_input, rearrange, unpad_input
 from verl.utils.device import get_device_id, get_device_name
@@ -504,6 +510,129 @@ class DataParallelPPOActor(BasePPOActor):
         if calculate_sum_pi_squared:
             outputs["sum_pi_squared"] = sum_pi_squared
         return outputs
+
+    @GPUMemoryLogger(role="dp actor", logger=logger)
+    def update_policy_dpo(self, data: DataProto) -> dict[str, float]:
+        """Run a DPO update on pre-built chosen/rejected pair batches."""
+        self.actor_module.train()
+
+        required_keys = [
+            "chosen_input_ids",
+            "chosen_attention_mask",
+            "chosen_position_ids",
+            "chosen_labels",
+            "rejected_input_ids",
+            "rejected_attention_mask",
+            "rejected_position_ids",
+            "rejected_labels",
+        ]
+        missing_keys = [key for key in required_keys if key not in data.batch]
+        if missing_keys:
+            raise KeyError(f"Missing required DPO batch keys: {missing_keys}")
+
+        beta = data.meta_info.get("dpo_beta", 0.1)
+        loss_type = data.meta_info.get("dpo_loss_type", "sigmoid")
+        label_smoothing = data.meta_info.get("dpo_label_smoothing", 0.0)
+        reference_free = data.meta_info.get("reference_free", False)
+        simpo_gamma = data.meta_info.get("simpo_gamma", 0.5)
+        average_log_prob = use_average_sequence_log_probs(loss_type)
+        use_reference_model = requires_reference_model(loss_type, reference_free)
+
+        reference_chosen_logps = data.batch.get("reference_chosen_logps")
+        reference_rejected_logps = data.batch.get("reference_rejected_logps")
+        if use_reference_model and (reference_chosen_logps is None or reference_rejected_logps is None):
+            raise ValueError("Reference log probabilities are required for non-reference-free DPO updates")
+
+        micro_batch_size = self.config.ppo_micro_batch_size_per_gpu
+        if micro_batch_size is None:
+            raise ValueError("actor.ppo_micro_batch_size_per_gpu must be set for DPO updates")
+
+        batch_size = data.batch["chosen_input_ids"].shape[0]
+        if batch_size == 0:
+            return {"actor/dpo_loss": 0.0, "actor/dpo_accuracy": 0.0, "actor/grad_norm": 0.0}
+
+        num_micro_batches = (batch_size + micro_batch_size - 1) // micro_batch_size
+        self.actor_optimizer.zero_grad()
+
+        aggregated_metrics: dict[str, list[float]] = {}
+        for micro_batch_idx in range(num_micro_batches):
+            start = micro_batch_idx * micro_batch_size
+            end = min(start + micro_batch_size, batch_size)
+
+            chosen_inputs = {
+                "input_ids": data.batch["chosen_input_ids"][start:end].to(get_device_id()),
+                "attention_mask": data.batch["chosen_attention_mask"][start:end].to(get_device_id()),
+                "position_ids": data.batch["chosen_position_ids"][start:end].to(get_device_id()),
+            }
+            chosen_labels = data.batch["chosen_labels"][start:end].to(get_device_id())
+
+            rejected_inputs = {
+                "input_ids": data.batch["rejected_input_ids"][start:end].to(get_device_id()),
+                "attention_mask": data.batch["rejected_attention_mask"][start:end].to(get_device_id()),
+                "position_ids": data.batch["rejected_position_ids"][start:end].to(get_device_id()),
+            }
+            rejected_labels = data.batch["rejected_labels"][start:end].to(get_device_id())
+
+            if reference_chosen_logps is not None:
+                micro_ref_chosen = reference_chosen_logps[start:end].to(get_device_id())
+                micro_ref_rejected = reference_rejected_logps[start:end].to(get_device_id())
+            else:
+                micro_ref_chosen = None
+                micro_ref_rejected = None
+
+            with torch.autocast(device_type=self.device_name, dtype=self.param_dtype):
+                chosen_outputs = self.actor_module(**chosen_inputs, use_cache=False)
+                rejected_outputs = self.actor_module(**rejected_inputs, use_cache=False)
+
+                policy_chosen_logps = get_batch_logps(
+                    chosen_outputs.logits, chosen_labels, average_log_prob=average_log_prob
+                )
+                policy_rejected_logps = get_batch_logps(
+                    rejected_outputs.logits, rejected_labels, average_log_prob=average_log_prob
+                )
+
+                loss, dpo_stats = compute_dpo_loss(
+                    policy_chosen_logps=policy_chosen_logps,
+                    policy_rejected_logps=policy_rejected_logps,
+                    reference_chosen_logps=micro_ref_chosen,
+                    reference_rejected_logps=micro_ref_rejected,
+                    beta=beta,
+                    label_smoothing=label_smoothing,
+                    loss_type=loss_type,
+                    reference_free=reference_free,
+                    simpo_gamma=simpo_gamma,
+                )
+
+                scaled_loss = loss / num_micro_batches
+
+            if self.scaler is not None:
+                self.scaler.scale(scaled_loss).backward()
+            else:
+                scaled_loss.backward()
+
+            micro_metrics = {
+                "actor/dpo_loss": loss.detach().item(),
+                "actor/dpo_logits": dpo_stats["logits"].detach().item(),
+                "actor/dpo_accuracy": dpo_stats["accuracy"].detach().item(),
+                "actor/dpo_margin": dpo_stats["margin"].detach().item(),
+                "actor/policy_logratio": dpo_stats["policy_logratio"].detach().item(),
+                "actor/reference_logratio": dpo_stats["reference_logratio"].detach().item(),
+                "actor/chosen_reward": dpo_stats["chosen_reward"].detach().item(),
+                "actor/rejected_reward": dpo_stats["rejected_reward"].detach().item(),
+                "actor/policy_chosen_logps": policy_chosen_logps.detach().mean().item(),
+                "actor/policy_rejected_logps": policy_rejected_logps.detach().mean().item(),
+            }
+            if micro_ref_chosen is not None:
+                micro_metrics["actor/reference_chosen_logps"] = micro_ref_chosen.detach().mean().item()
+                micro_metrics["actor/reference_rejected_logps"] = micro_ref_rejected.detach().mean().item()
+            append_to_dict(aggregated_metrics, micro_metrics)
+
+        grad_norm = self._optimizer_step()
+        self.actor_optimizer.zero_grad()
+
+        final_metrics = {key: sum(values) / len(values) for key, values in aggregated_metrics.items() if values}
+        final_metrics["actor/grad_norm"] = grad_norm.detach().item()
+        return final_metrics
 
     @GPUMemoryLogger(role="dp actor", logger=logger)
     def update_policy(self, data: DataProto):

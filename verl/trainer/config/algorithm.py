@@ -580,6 +580,11 @@ class AlgoConfig(BaseConfig):
         kl_ctrl (KLControlConfig): KL control configuration.
         use_pf_ppo (bool): Whether to enable preference feedback PPO.
         pf_ppo (dict[str, Any]): Preference feedback PPO settings.
+        reference_free (bool): Whether DPO should omit the reference model term.
+        dpo_beta (float): DPO temperature / reward scale.
+        dpo_loss_type (str): DPO-family loss type, e.g. "sigmoid", "ipo", or "simpo".
+        dpo_label_smoothing (float): Optional label smoothing for sigmoid DPO.
+        simpo_gamma (float): Target reward margin used by SimPO.
         filter_groups (Optional[FilterGroupsConfig]): Filter groups configuration, used in DAPO and Entropy
         rollout_correction (Optional[RolloutCorrectionConfig]): Rollout Correction configuration.
             Addresses off-policy issues from policy mismatch, model staleness, and general distribution shifts.
@@ -608,6 +613,11 @@ class AlgoConfig(BaseConfig):
     kl_ctrl: KLControlConfig = field(default_factory=KLControlConfig)
     use_pf_ppo: bool = False
     pf_ppo: dict[str, Any] = field(default_factory=dict)
+    reference_free: bool = False
+    dpo_beta: float = 0.1
+    dpo_loss_type: str = "sigmoid"
+    dpo_label_smoothing: float = 0.0
+    simpo_gamma: float = 0.5
     filter_groups: Optional[FilterGroupsConfig] = None
     # Rollout Correction: corrects off-policy issues (policy mismatch, model staleness, distribution shifts)
     # Set to None to disable, use RolloutCorrectionConfig presets (e.g., .tis(), .mis()), or pass dict

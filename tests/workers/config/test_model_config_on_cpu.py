@@ -13,11 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import os
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 from omegaconf import OmegaConf
 
-from verl.workers.config.model import HFModelConfig
+from verl.workers.config.model import HFModelConfig, resolve_remove_padding_for_model
 
 
 class TestHFModelConfigCPU:
@@ -82,15 +84,38 @@ class TestHFModelConfigCPU:
         merged = OmegaConf.merge(cfg_from_dataclass, cli_config)
         assert merged.target_modules == "all-linear"
 
-    def test_target_modules_raises_on_invalid_type(self):
+    @patch("verl.workers.config.model.AutoConfig.from_pretrained")
+    @patch("verl.workers.config.model.get_generation_config")
+    @patch("verl.workers.config.model.copy_to_local")
+    def test_target_modules_raises_on_invalid_type(
+        self, mock_copy_to_local, mock_get_generation_config, mock_auto_config_from_pretrained
+    ):
         """Test that __post_init__ raises TypeError for invalid target_modules types."""
+        mock_copy_to_local.side_effect = lambda path, use_shm=False: path
+        mock_get_generation_config.return_value = None
+        mock_auto_config_from_pretrained.return_value = SimpleNamespace(
+            model_type="qwen2",
+            tie_word_embeddings=False,
+            architectures=["Qwen2ForCausalLM"],
+        )
+
         base_config = OmegaConf.structured(HFModelConfig)
         invalid_cli_config = OmegaConf.create(
             {
                 "path": self.model_path,
+                "load_tokenizer": False,
                 "target_modules": [1, 2, 3],  # list of ints instead of strings
             }
         )
         merged_config = OmegaConf.merge(base_config, invalid_cli_config)
         with pytest.raises(TypeError):
             OmegaConf.to_object(merged_config)
+
+    def test_resolve_remove_padding_keeps_supported_models_enabled(self):
+        assert resolve_remove_padding_for_model("qwen2", True) is True
+        assert resolve_remove_padding_for_model(None, True) is True
+        assert resolve_remove_padding_for_model("qwen3_5", False) is False
+
+    def test_resolve_remove_padding_disables_qwen35(self):
+        with pytest.warns(UserWarning, match="qwen3_5"):
+            assert resolve_remove_padding_for_model("qwen3_5", True) is False

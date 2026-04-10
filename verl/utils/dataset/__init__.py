@@ -12,7 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from .dpo_dataset import DPOPairDataset
 from .rl_dataset import RLHFDataset
 from .rm_dataset import RMDataset
 
-__all__ = ["RLHFDataset", "RMDataset"]
+__all__ = ["DPOPairDataset", "RLHFDataset", "RMDataset"]

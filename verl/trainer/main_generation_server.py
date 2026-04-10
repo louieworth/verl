@@ -32,9 +32,12 @@ from pprint import pprint
 import pandas as pd
 from omegaconf import OmegaConf
 from openai.types.chat import ChatCompletion
+from tqdm import tqdm
 
 from verl.utils.hdfs_io import makedirs
 from verl.workers.rollout.replica import get_rollout_replica_class
+
+PROGRESS_UPDATE_INTERVAL = 500
 
 
 async def start_server(config):
@@ -63,23 +66,26 @@ async def start_server(config):
     return server_handles, server_addresses
 
 
-async def submit_request(server_address, **chat_complete_request):
-    try:
-        extra_headers = chat_complete_request.pop("extra_headers", {})
-        timeout = aiohttp.ClientTimeout(total=None)
-        session = aiohttp.ClientSession(timeout=timeout)
-        async with session.post(
-            url=f"http://{server_address}/v1/chat/completions",
-            headers={"Authorization": "Bearer token-abc123", **extra_headers},
-            json=chat_complete_request,
-        ) as resp:
-            data = await resp.json()
-            return ChatCompletion(**data)
-    finally:
-        await session.close()
+async def submit_request(session: aiohttp.ClientSession, server_address, **chat_complete_request):
+    extra_headers = chat_complete_request.pop("extra_headers", {})
+    async with session.post(
+        url=f"http://{server_address}/v1/chat/completions",
+        headers={"Authorization": "Bearer token-abc123", **extra_headers},
+        json=chat_complete_request,
+    ) as resp:
+        data = await resp.json()
+        return ChatCompletion(**data)
 
 
-async def generate_per_replica(server_address, model_path: str, n_samples: int, sampling_params: dict, chat_lst: list):
+async def generate_per_replica(
+    server_address,
+    model_path: str,
+    n_samples: int,
+    sampling_params: dict,
+    chat_lst: list,
+    request_concurrency: int | None,
+    progress_bar=None,
+):
     # here we should sample n_samples for each chat_lst.
     # we use aiohttp to avoid hang in AsyncOpenAI when the number of requests is large.
 
@@ -98,30 +104,101 @@ async def generate_per_replica(server_address, model_path: str, n_samples: int, 
         for _ in range(n_samples)
     ]
 
-    tasks = [submit_request(server_address, **req) for req in chat_complete_request]
-    results = await asyncio.gather(*tasks)
+    total_requests = len(chat_complete_request)
+    if total_requests == 0:
+        return []
+
+    if request_concurrency is None:
+        request_concurrency = total_requests
+    else:
+        request_concurrency = max(1, min(request_concurrency, total_requests))
+
+    timeout = aiohttp.ClientTimeout(total=None)
+    connector = aiohttp.TCPConnector(limit=request_concurrency if request_concurrency < total_requests else 0)
+    async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
+        results = [None] * total_requests
+        in_flight = {}
+        next_request_idx = 0
+        pending_progress_updates = 0
+
+        for _ in range(request_concurrency):
+            task = asyncio.create_task(
+                submit_request(session, server_address, **chat_complete_request[next_request_idx])
+            )
+            in_flight[task] = next_request_idx
+            next_request_idx += 1
+
+        try:
+            while in_flight:
+                done, _ = await asyncio.wait(in_flight, return_when=asyncio.FIRST_COMPLETED)
+                for task in done:
+                    request_idx = in_flight.pop(task)
+                    results[request_idx] = await task
+                    if progress_bar is not None:
+                        pending_progress_updates += 1
+                        if pending_progress_updates >= PROGRESS_UPDATE_INTERVAL:
+                            progress_bar.update(pending_progress_updates)
+                            pending_progress_updates = 0
+                    if next_request_idx < total_requests:
+                        next_task = asyncio.create_task(
+                            submit_request(session, server_address, **chat_complete_request[next_request_idx])
+                        )
+                        in_flight[next_task] = next_request_idx
+                        next_request_idx += 1
+        finally:
+            if progress_bar is not None and pending_progress_updates > 0:
+                progress_bar.update(pending_progress_updates)
+            for task in in_flight:
+                task.cancel()
+            if in_flight:
+                await asyncio.gather(*in_flight, return_exceptions=True)
+
     return results
 
 
 async def generate(
-    server_addresses: list, model_path: str, n_samples: int, sampling_params: dict, chat_numpy: np.ndarray
+    server_addresses: list,
+    model_path: str,
+    n_samples: int,
+    sampling_params: dict,
+    chat_numpy: np.ndarray,
+    request_concurrency: int | None,
 ):
     num_replicas = len(server_addresses)
     chat_sub_array = np.array_split(chat_numpy, num_replicas)
     chat_sub_array = [chat.tolist() for chat in chat_sub_array]
     assert len(server_addresses) == len(chat_sub_array)
-    results = await asyncio.gather(
-        *[
-            generate_per_replica(server_addresses[i], model_path, n_samples, sampling_params, chat_sub_array[i])
-            for i in range(num_replicas)
-        ]
-    )
+    total_requests = len(chat_numpy) * n_samples
+    progress_unit = "row" if n_samples == 1 else "sample"
+    with tqdm(total=total_requests, desc="Generating", unit=progress_unit) as progress_bar:
+        results = await asyncio.gather(
+            *[
+                generate_per_replica(
+                    server_addresses[i],
+                    model_path,
+                    n_samples,
+                    sampling_params,
+                    chat_sub_array[i],
+                    request_concurrency,
+                    progress_bar,
+                )
+                for i in range(num_replicas)
+            ]
+        )
     return results
 
 
 @hydra.main(config_path="config", config_name="ppo_trainer", version_base=None)
 def main(config):
-    ray.init(runtime_env={"env_vars": {"TOKENIZERS_PARALLELISM": "true", "NCCL_DEBUG": "WARN", "VLLM_USE_V1": "1"}})
+    default_runtime_env = {
+        "env_vars": {"TOKENIZERS_PARALLELISM": "true", "NCCL_DEBUG": "WARN", "VLLM_USE_V1": "1"}
+    }
+    ray_init_kwargs = OmegaConf.select(config, "ray_kwargs.ray_init", default={}) or {}
+    runtime_env_kwargs = ray_init_kwargs.get("runtime_env", {})
+    runtime_env = OmegaConf.merge(default_runtime_env, runtime_env_kwargs)
+    ray_init_kwargs = OmegaConf.create({**ray_init_kwargs, "runtime_env": runtime_env})
+    print(f"ray init kwargs: {ray_init_kwargs}")
+    ray.init(**OmegaConf.to_container(ray_init_kwargs))
 
     pprint(OmegaConf.to_container(config, resolve=True))  # resolve=True will eval symbol values
     OmegaConf.resolve(config)
@@ -157,13 +234,23 @@ def main(config):
     chat_lst = dataset[config.data.prompt_key].tolist()
     chat_lst = [chat.tolist() for chat in chat_lst]
     chat_numpy = np.array(chat_lst)
+    request_concurrency = OmegaConf.select(config, "data.request_concurrency", default=None)
+    request_concurrency = int(request_concurrency) if request_concurrency is not None else None
+    print(f"Per-replica request concurrency: {request_concurrency or 'unbounded'}")
 
     # start native server
     server_handles, server_addresses = asyncio.run(start_server(config))
 
     # run generate
     gen_results = asyncio.run(
-        generate(server_addresses, config.actor_rollout_ref.model.path, n_samples, sampling_params, chat_numpy)
+        generate(
+            server_addresses,
+            config.actor_rollout_ref.model.path,
+            n_samples,
+            sampling_params,
+            chat_numpy,
+            request_concurrency,
+        )
     )
 
     # reshape results into a numpy array

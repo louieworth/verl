@@ -61,7 +61,8 @@ coverage.xml
 .hypothesis/
 pytest.ini
 output.txt
-
+gen_results/
+results_gen/
 # Translations
 *.mo
 *.pot

@@ -260,7 +260,7 @@ def build_cli_args_from_config(config: dict[str, Any]) -> list[str]:
     Handles different value types appropriately:
     - None: skipped
     - bool True: adds '--key'
-    - bool False: skipped
+    - bool False: adds '--no-key' for argparse BooleanOptionalAction flags
     - list: expands to '--key item1 item2 ...'
     - empty list: skipped (vLLM uses nargs="+" which requires at least one value)
     - dict: JSON serialized
@@ -277,8 +277,7 @@ def build_cli_args_from_config(config: dict[str, Any]) -> list[str]:
         if v is None:
             continue
         if isinstance(v, bool):
-            if v:
-                cli_args.append(f"--{k}")
+            cli_args.append(f"--{k}" if v else f"--no-{k}")
         elif isinstance(v, list):
             if not v:
                 # Skip empty lists - vLLM uses nargs="+" which requires at least one value

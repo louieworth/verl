@@ -1,0 +1,65 @@
+# TL;DR paper-style preset for Direct Preference Optimization (arXiv:2305.18290)
+#
+# Paper-specified settings used here:
+# - beta = 0.5 for TL;DR summarization
+# - batch size = 64
+# - optimizer = RMSprop
+# - learning rate = 1e-6
+# - linearly warm up from 0 to 1e-6 over 150 steps
+#
+# Implementation choices required by verl but not specified in the paper:
+# - max_prompt_length = 512
+# - max_response_length = 512
+# - ppo_micro_batch_size_per_gpu = 8
+# - ppo_max_token_len_per_gpu = 1024
+#
+# The 512/512 length split follows common public TL;DR DPO-style implementations
+# that use max_prompt_length=512 and total max_length=1024.
+
+defaults:
+  - dpo_trainer
+  - _self_
+
+algorithm:
+  dpo_beta: 0.5
+  dpo_loss_type: sigmoid
+  dpo_label_smoothing: 0.0
+  reference_free: false
+
+actor_rollout_ref:
+  model:
+    # Paper-aligned default SFT model for TL;DR summarization.
+    # Override with:
+    #   DPO_TLDR_MODEL_PATH=/abs/path/to/model bash recipe/dpo/run_dpo_tldr_paper.sh
+    # or:
+    #   bash recipe/dpo/run_dpo_tldr_paper.sh actor_rollout_ref.model.path=/abs/path/to/model
+    path: ${oc.env:DPO_TLDR_MODEL_PATH,CarperAI/openai_summarize_tldr_sft}
+  actor:
+    ppo_mini_batch_size: ${data.train_batch_size}
+    ppo_micro_batch_size_per_gpu: 8
+    ppo_max_token_len_per_gpu: 1024
+    optim:
+      optimizer: RMSprop
+      optimizer_impl: torch.optim
+      lr: 1e-6
+      weight_decay: 0.0
+      lr_warmup_steps: 150
+      lr_scheduler_type: constant
+  rollout:
+    temperature: 1.0
+    log_prob_micro_batch_size_per_gpu: ${actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu}
+    log_prob_max_token_len_per_gpu: ${actor_rollout_ref.actor.ppo_max_token_len_per_gpu}
+  ref:
+    log_prob_micro_batch_size_per_gpu: ${actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu}
+    log_prob_max_token_len_per_gpu: ${actor_rollout_ref.actor.ppo_max_token_len_per_gpu}
+
+data:
+  train_batch_size: 64
+  val_batch_size: 64
+  max_prompt_length: 512
+  max_response_length: 512
+
+trainer:
+  # Smoke-test default for the original TL;DR preference data.
+  total_epochs: 1
+  experiment_name: dpo_tldr_paper

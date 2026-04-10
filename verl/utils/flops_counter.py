@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import inspect
+import numbers
 
 import torch
 from transformers import PretrainedConfig
@@ -85,7 +86,15 @@ def get_device_flops(unit="T", device_name=None):
     return flops_unit
 
 
+def _get_text_backbone_config(config):
+    text_config = getattr(config, "text_config", None)
+    if text_config is not None and getattr(text_config, "hidden_size", None) is not None:
+        return text_config
+    return config
+
+
 def _estimate_qwen2_flops(config, tokens_sum, batch_seqlens, delta_time):
+    config = _get_text_backbone_config(config)
     hidden_size = config.hidden_size
     vocab_size = config.vocab_size
     num_hidden_layers = config.num_hidden_layers
@@ -316,6 +325,7 @@ def _estimate_deepseek_v3_flops(config, tokens_sum, batch_seqlens, delta_time):
 
 
 def _estimate_qwen2_moe_flops(config, tokens_sum, batch_seqlens, delta_time):
+    config = _get_text_backbone_config(config)
     hidden_size = config.hidden_size
     vocab_size = config.vocab_size
     num_hidden_layers = config.num_hidden_layers
@@ -542,6 +552,7 @@ ESTIMATE_FUNC = {
     "qwen2_vl": _estimate_qwen2_flops,
     "qwen2_5_vl": _estimate_qwen2_flops,
     "qwen3": _estimate_qwen2_flops,
+    "qwen3_5": _estimate_qwen2_flops,
     "qwen3_moe": _estimate_qwen2_moe_flops,
     "qwen3_vl": _estimate_qwen3_vl_flops,
     "qwen3_vl_moe": _estimate_qwen3_vl_moe_flops,
@@ -584,14 +595,17 @@ class FlopsCounter:
         Estimate the FLOPS based on the number of valid tokens in the current batch and the time taken.
 
         Args:
-            batch_seqlens (List[int]): A list where each element represents the number of valid tokens in the
-                current batch.
+            batch_seqlens (int | List[int]): The number of valid tokens in the current batch, either as a total
+                scalar count or as per-sequence counts.
             delta_time (float): The time taken to process the batch, in seconds.
 
         Returns:
             estimated_flops (float): The estimated FLOPS based on the input tokens and time.
             promised_flops (float): The expected FLOPS of the current device.
         """
+        if isinstance(batch_seqlens, numbers.Integral):
+            batch_seqlens = [int(batch_seqlens)]
+
         tokens_sum = sum(batch_seqlens)
         func = ESTIMATE_FUNC.get(self.config.model_type, _estimate_unknown_flops)
         sig = inspect.signature(func)

@@ -478,3 +478,18 @@ def test_flops_counter(config_type: str):
             assert math.isclose(counted_flops, expected_flops), (
                 f"Expect flops for {test_config['config']} is {expected_flops}, but get {counted_flops}"
             )
+
+
+def test_flops_counter_accepts_scalar_batch_seqlens():
+    test_config = CONFIG["llama"]
+    config = Config(test_config["config"])
+    flops_counter = FlopsCounter(config)
+
+    batch_seqlens = test_config["batch_seqlens_tuple"][0]
+    expected_flops = test_config["expected_flops_tuple"][0]
+
+    scalar_counted_flops, _ = flops_counter.estimate_flops(sum(batch_seqlens), 1)
+    list_counted_flops, _ = flops_counter.estimate_flops(batch_seqlens, 1)
+
+    assert math.isclose(scalar_counted_flops, expected_flops)
+    assert math.isclose(list_counted_flops, expected_flops)

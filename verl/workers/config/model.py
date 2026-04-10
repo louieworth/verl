@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import warnings
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -24,7 +25,33 @@ from verl.utils.fs import copy_to_local
 from verl.utils.import_utils import import_external_libs
 from verl.utils.model import get_generation_config, update_model_config
 
-__all__ = ["HFModelConfig", "MtpConfig"]
+__all__ = ["HFModelConfig", "MtpConfig", "resolve_remove_padding_for_model"]
+
+_REMOVE_PADDING_UNSUPPORTED_MODEL_TYPES = frozenset({"qwen3_5"})
+
+
+def resolve_remove_padding_for_model(
+    model_type: Optional[str],
+    use_remove_padding: bool,
+    allow_unsupported: bool = False,
+) -> bool:
+    if not use_remove_padding or model_type not in _REMOVE_PADDING_UNSUPPORTED_MODEL_TYPES:
+        return use_remove_padding
+
+    if allow_unsupported:
+        warnings.warn(
+            f"`use_remove_padding=True` is being force-enabled for model_type={model_type!r}. "
+            "This model type is normally blocked because remove-padding may produce incorrect sequence packing.",
+            stacklevel=2,
+        )
+        return True
+
+    warnings.warn(
+        f"`use_remove_padding=True` is not supported for model_type={model_type!r}; "
+        "disabling it to avoid flattening multiple samples into a single recurrent sequence.",
+        stacklevel=2,
+    )
+    return False
 
 
 @dataclass
@@ -114,6 +141,7 @@ class HFModelConfig(BaseConfig):
     enable_activation_offload: bool = False
 
     use_remove_padding: bool = True
+    allow_unsupported_remove_padding: bool = False
 
     # TODO: unify fsdp and megatron lora config
     # fsdp lora related. We may setup a separate config later
@@ -172,6 +200,15 @@ class HFModelConfig(BaseConfig):
         attn_implementation = self.override_config.get("attn_implementation", "flash_attention_2")
         self.hf_config = AutoConfig.from_pretrained(
             self.local_hf_config_path, trust_remote_code=self.trust_remote_code, attn_implementation=attn_implementation
+        )
+        object.__setattr__(
+            self,
+            "use_remove_padding",
+            resolve_remove_padding_for_model(
+                getattr(self.hf_config, "model_type", None),
+                self.use_remove_padding,
+                self.allow_unsupported_remove_padding,
+            ),
         )
 
         override_config_kwargs = {}

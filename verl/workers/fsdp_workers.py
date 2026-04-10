@@ -87,7 +87,13 @@ from verl.utils.py_functional import convert_to_regular_types
 from verl.utils.qat import apply_qat, enable_qat_fuse
 from verl.utils.ray_utils import get_event_loop
 from verl.utils.transformers_compat import get_auto_model_for_vision2seq
-from verl.workers.config import FSDPCriticConfig, FSDPEngineConfig, HFModelConfig, RolloutConfig
+from verl.workers.config import (
+    FSDPCriticConfig,
+    FSDPEngineConfig,
+    HFModelConfig,
+    RolloutConfig,
+    resolve_remove_padding_for_model,
+)
 from verl.workers.config.optimizer import build_optimizer
 from verl.workers.rollout import get_rollout_class
 from verl.workers.sharding_manager.fsdp_ulysses import FSDPUlyssesShardingManager
@@ -333,6 +339,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         optim_config,
         override_model_config,
         use_remove_padding=False,
+        allow_unsupported_remove_padding=False,
         use_fused_kernels=False,
         enable_gradient_checkpointing=False,
         trust_remote_code=False,
@@ -405,6 +412,12 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # patch for kimi-vl
         if getattr(actor_model_config, "model_type", None) == "kimi_vl":
             actor_model_config.text_config.topk_method = "greedy"
+
+        use_remove_padding = resolve_remove_padding_for_model(
+            getattr(actor_model_config, "model_type", None),
+            use_remove_padding,
+            allow_unsupported_remove_padding,
+        )
 
         self.generation_config = get_generation_config(local_path, trust_remote_code=trust_remote_code)
 
@@ -673,7 +686,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             actor_optimizer = None
             actor_lr_scheduler = None
 
-        return actor_module_fsdp, actor_optimizer, actor_lr_scheduler, actor_model_config
+        return actor_module_fsdp, actor_optimizer, actor_lr_scheduler, actor_model_config, use_remove_padding
 
     def _build_rollout(self, trust_remote_code=False):
         from torch.distributed.device_mesh import init_device_mesh
@@ -858,6 +871,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         override_model_config = OmegaConf.to_container(OmegaConf.create(self.config.model.get("override_config", {})))
         use_remove_padding = self.config.model.get("use_remove_padding", False)
+        allow_unsupported_remove_padding = self.config.model.get("allow_unsupported_remove_padding", False)
         use_shm = self.config.model.get("use_shm", False)
         use_fused_kernels = self.config.model.get("use_fused_kernels", False)
 
@@ -881,12 +895,14 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 self.actor_optimizer,
                 self.actor_lr_scheduler,
                 self.actor_model_config,
+                use_remove_padding,
             ) = self._build_model_optimizer(
                 model_path=local_path,
                 fsdp_config=fsdp_config,
                 optim_config=optim_config,
                 override_model_config=override_model_config,
                 use_remove_padding=use_remove_padding,
+                allow_unsupported_remove_padding=allow_unsupported_remove_padding,
                 use_fused_kernels=use_fused_kernels,
                 enable_gradient_checkpointing=self.config.model.get("enable_gradient_checkpointing", False),
                 trust_remote_code=self.config.model.get("trust_remote_code", False),
@@ -897,6 +913,13 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 use_tiled_mlp=use_tiled_mlp,
                 tiled_mlp_shards=tiled_mlp_shards,
             )
+
+            if use_remove_padding != self.config.model.get("use_remove_padding", False):
+                with open_dict(self.config.model):
+                    self.config.model.use_remove_padding = use_remove_padding
+            if self._is_actor and use_remove_padding != self.config.actor.get("use_remove_padding", False):
+                with open_dict(self.config.actor):
+                    self.config.actor.use_remove_padding = use_remove_padding
 
             # get the original unwrapped module
             if fsdp_version(self.actor_module_fsdp) == 1:
@@ -937,12 +960,13 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             ref_use_tiled_mlp = ref_tiled_mlp_config.get("enabled", False)
             ref_tiled_mlp_shards = ref_tiled_mlp_config.get("num_shards", 4)
 
-            self.ref_module_fsdp = self._build_model_optimizer(
+            self.ref_module_fsdp, _, _, _, ref_use_remove_padding = self._build_model_optimizer(
                 model_path=local_path,
                 fsdp_config=omega_conf_to_dataclass(self.config.ref.fsdp_config),
                 optim_config=None,
                 override_model_config=override_model_config,
                 use_remove_padding=use_remove_padding,
+                allow_unsupported_remove_padding=allow_unsupported_remove_padding,
                 use_fused_kernels=use_fused_kernels,
                 trust_remote_code=self.config.model.get("trust_remote_code", False),
                 use_liger=self.config.model.get("use_liger", False),
@@ -950,10 +974,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 use_prefix_grouper=use_prefix_grouper,
                 use_tiled_mlp=ref_use_tiled_mlp,
                 tiled_mlp_shards=ref_tiled_mlp_shards,
-            )[0]
+            )
             OmegaConf.set_struct(self.config.ref, True)
             with open_dict(self.config.ref):
-                self.config.ref.use_remove_padding = use_remove_padding
+                self.config.ref.use_remove_padding = ref_use_remove_padding
                 self.config.ref.use_fused_kernels = use_fused_kernels
                 if use_prefix_grouper:
                     self.config.ref.use_prefix_grouper = use_prefix_grouper
@@ -1029,6 +1053,45 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         if self._is_offload_optimizer:
             offload_fsdp_optimizer(optimizer=self.actor_optimizer)
             log_gpu_memory_usage("After offload actor optimizer during update_actor", logger=logger)
+
+        return output
+
+    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
+    @DistProfiler.annotate(color="red", role="actor_update_dpo")
+    def update_actor_dpo(self, data: DataProto):
+        assert self._is_actor
+        if self._is_offload_param:
+            load_fsdp_model_to_gpu(self.actor_module_fsdp)
+        if self._is_offload_optimizer:
+            load_fsdp_optimizer(optimizer=self.actor_optimizer, device_id=get_device_id())
+
+        with self.ulysses_sharding_manager:
+            data = data.to("cpu")
+            with Timer(name="update_policy_dpo", logger=None) as timer:
+                metrics = self.actor.update_policy_dpo(data=data)
+            delta_time = timer.last
+            global_num_tokens = data.meta_info["global_token_num"]
+            estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_num_tokens, delta_time)
+            metrics["perf/mfu/actor"] = (
+                estimated_flops * self.config.actor.ppo_epochs / promised_flops / self.world_size
+            )
+            metrics["perf/max_memory_allocated_gb"] = get_torch_device().max_memory_allocated() / (1024**3)
+            metrics["perf/max_memory_reserved_gb"] = get_torch_device().max_memory_reserved() / (1024**3)
+            metrics["perf/cpu_memory_used_gb"] = psutil.virtual_memory().used / (1024**3)
+
+            lr = self.actor_lr_scheduler.get_last_lr()[0]
+            metrics["actor/lr"] = lr.item() if torch.is_tensor(lr) else lr
+            self.actor_lr_scheduler.step()
+
+            output = DataProto(meta_info={"metrics": metrics})
+            output = output.to("cpu")
+
+        if self._is_offload_param:
+            offload_fsdp_model_to_cpu(self.actor_module_fsdp)
+            log_gpu_memory_usage("After offload actor model during update_actor_dpo", logger=logger)
+        if self._is_offload_optimizer:
+            offload_fsdp_optimizer(optimizer=self.actor_optimizer)
+            log_gpu_memory_usage("After offload actor optimizer during update_actor_dpo", logger=logger)
 
         return output
 

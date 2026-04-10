@@ -1,0 +1,89 @@
+{
+  "qwen3_5-4b": {
+    "backend": "python",
+    "count": 20550,
+    "joined_count": 20554,
+    "skipped_count": 4,
+    "rouge_1_f1": 0.255794520962228,
+    "rouge_2_f1": 0.08734380878101664,
+    "rouge_l_f1": 0.2100524046939645,
+    "non_empty_prediction_count": 20550,
+    "parse_status_counts": {
+      "fenced_json": 20545,
+      "inline_json": 5,
+      "malformed_json_output": 4
+    },
+    "model_path": "Qwen/Qwen3.5-4B",
+    "raw_generation_file": "/home/jiangli/verl-pens/gen_results/qwen3_5-4b.parquet"
+  },
+  "single_wise_dpo_click_hist_positive_only_lora_qwen3_5-4b_global_step_5341_hf_merged": {
+    "backend": "python",
+    "count": 20529,
+    "joined_count": 20554,
+    "skipped_count": 25,
+    "rouge_1_f1": 0.2702904490337904,
+    "rouge_2_f1": 0.09834080111677954,
+    "rouge_l_f1": 0.22206617186185734,
+    "non_empty_prediction_count": 20529,
+    "parse_status_counts": {
+      "fenced_json": 19651,
+      "inline_json": 878,
+      "malformed_json_output": 7,
+      "missing_structured_output": 18
+    },
+    "model_path": "/data/data/jiangli/ckpt/PENS/single_wise_dpo_click_hist_positive_only_lora_qwen3_5-4b/global_step_5341/actor/hf_merged",
+    "raw_generation_file": "/home/jiangli/verl-pens/results_gen/generate.parquet"
+  },
+  "single_wise_dpo_click_hist_negative_only_lora_qwen3_5-4b_global_step_5340_hf_merged": {
+    "backend": "python",
+    "count": 20540,
+    "joined_count": 20554,
+    "skipped_count": 14,
+    "rouge_1_f1": 0.24249216256049327,
+    "rouge_2_f1": 0.07850551145683883,
+    "rouge_l_f1": 0.19796407829619186,
+    "non_empty_prediction_count": 20540,
+    "parse_status_counts": {
+      "fenced_json": 20540,
+      "malformed_json_output": 13,
+      "missing_structured_output": 1
+    },
+    "model_path": "/data/data/jiangli/ckpt/PENS/single_wise_dpo_click_hist_negative_only_lora_qwen3_5-4b/global_step_5340/actor/hf_merged",
+    "raw_generation_file": "/home/jiangli/verl-pens/gen_results/single_wise_dpo_click_hist_negative_only_lora_qwen3_5-4b_global_step_5340_hf_merged.parquet"
+  },
+  "single_wise_dpo_click_hist_all_lora_qwen3_5-4b_global_step_10682_hf_merged_3072": {
+    "backend": "python",
+    "count": 20549,
+    "joined_count": 20554,
+    "skipped_count": 5,
+    "rouge_1_f1": 0.25662979145370074,
+    "rouge_2_f1": 0.08827226219172327,
+    "rouge_l_f1": 0.21211417360241128,
+    "non_empty_prediction_count": 20549,
+    "parse_status_counts": {
+      "fenced_json": 20521,
+      "inline_json": 28,
+      "malformed_json_output": 4,
+      "missing_structured_output": 1
+    },
+    "model_path": "/data/data/jiangli/ckpt/PENS/single_wise_dpo_click_hist_all_lora_qwen3_5-4b/global_step_10682/actor/hf_merged",
+    "raw_generation_file": "/home/jiangli/verl-pens/gen_results/single_wise_dpo_click_hist_all_lora_qwen3_5-4b_global_step_10682_hf_merged.parquet"
+  },
+  "single_wise_dpo_click_hist_all_lora_qwen3_5-4b_global_step_10682_hf_merged": {
+    "backend": "python",
+    "count": 20550,
+    "joined_count": 20554,
+    "skipped_count": 4,
+    "rouge_1_f1": 0.25658108813465325,
+    "rouge_2_f1": 0.0877101071087817,
+    "rouge_l_f1": 0.21175508956823919,
+    "non_empty_prediction_count": 20550,
+    "parse_status_counts": {
+      "fenced_json": 20519,
+      "inline_json": 31,
+      "malformed_json_output": 4
+    },
+    "model_path": "/data/data/jiangli/ckpt/PENS/single_wise_dpo_click_hist_all_lora_qwen3_5-4b/global_step_10682/actor/hf_merged",
+    "raw_generation_file": "/home/jiangli/verl-pens/gen_results/single_wise_dpo_click_hist_all_lora_qwen3_5-4b_global_step_10682_hf_merged.parquet"
+  }
+}

@@ -22,7 +22,9 @@ from typing import Any, Callable, Optional
 
 import numpy as np
 import ray
+import torch
 import vllm.entrypoints.cli.serve
+import zmq
 from packaging import version
 from ray.actor import ActorHandle
 from vllm import SamplingParams
@@ -33,7 +35,10 @@ from vllm.inputs import TokensPrompt
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.usage.usage_lib import UsageContext
+from vllm.utils.network_utils import get_tcp_uri, zmq_socket_ctx
 from vllm.v1.engine.async_llm import AsyncLLM
+from vllm.v1.engine.utils import CoreEngine, CoreEngineProcManager, get_engine_zmq_addresses, wait_for_engine_startup
+from vllm.v1.executor import Executor
 
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.device import get_resource_name, get_visible_devices_keyword
@@ -75,6 +80,81 @@ else:
 
 logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
+
+
+def _register_missing_qwen3_5_causallm() -> None:
+    """Register text-only Qwen3.5 CausalLM with hybrid metadata for vLLM."""
+
+    from vllm.model_executor.models.registry import ModelRegistry
+    from vllm.model_executor.models.qwen3_5 import (
+        Qwen3_5ForCausalLM,
+        Qwen3_5ForConditionalGeneration,
+    )
+
+    def _get_text_only_mrope_input_positions(self, input_tokens, mm_features):
+        if mm_features:
+            raise NotImplementedError(
+                "Text-only Qwen3.5 CausalLM does not support multimodal M-RoPE inputs."
+            )
+        seq_len = len(input_tokens)
+        if seq_len == 0:
+            return torch.empty((3, 0), dtype=torch.long), 0
+        llm_positions = torch.arange(seq_len, dtype=torch.long).unsqueeze(0).expand(3, -1).contiguous()
+        return llm_positions, 0
+
+    # vLLM 0.18.1 resolves text-only Qwen3.5 checkpoints to Qwen3_5ForCausalLM,
+    # but that class is not marked hybrid and does not expose the required
+    # mamba helper classmethods. As a result, HybridAttentionMambaModelConfig
+    # never runs and worker-side Mamba KV specs keep block_size/page_size_padded
+    # unset. Patch the class in-place, then register the concrete class so the
+    # registry inspects the corrected hybrid metadata directly.
+    Qwen3_5ForCausalLM.is_hybrid = True
+    Qwen3_5ForCausalLM.get_mamba_state_dtype_from_config = classmethod(  # type: ignore[attr-defined]
+        Qwen3_5ForConditionalGeneration.get_mamba_state_dtype_from_config.__func__
+    )
+    Qwen3_5ForCausalLM.get_mamba_state_shape_from_config = classmethod(  # type: ignore[attr-defined]
+        Qwen3_5ForConditionalGeneration.get_mamba_state_shape_from_config.__func__
+    )
+    Qwen3_5ForCausalLM.get_mamba_state_copy_func = classmethod(  # type: ignore[attr-defined]
+        Qwen3_5ForConditionalGeneration.get_mamba_state_copy_func.__func__
+    )
+    Qwen3_5ForCausalLM.supports_mrope = True
+    Qwen3_5ForCausalLM.get_mrope_input_positions = _get_text_only_mrope_input_positions  # type: ignore[attr-defined]
+
+    logger.warning(
+        "Registering patched Qwen3_5ForCausalLM with hybrid metadata for "
+        "text-only Qwen3.5 checkpoints."
+    )
+    ModelRegistry.register_model("Qwen3_5ForCausalLM", Qwen3_5ForCausalLM)
+
+
+def _disable_multimodal_for_text_only_qwen3_5(vllm_config) -> None:
+    """Work around vLLM treating Qwen3.5 text-only exports as multimodal.
+
+    Some merged Hugging Face exports resolve to `Qwen3_5ForCausalLM` with a
+    `Qwen3_5TextConfig`, but vLLM still attaches multimodal processing and then
+    fails during renderer initialization. These checkpoints are text-only, so
+    explicitly disable multimodal handling before the engine starts.
+    """
+
+    model_config = vllm_config.model_config
+    hf_config = model_config.hf_config
+    model_type = getattr(hf_config, "model_type", None)
+    architectures = tuple(model_config.architectures or ())
+
+    if model_type != "qwen3_5_text":
+        return
+    if not any(arch.endswith("ForCausalLM") for arch in architectures):
+        return
+    if model_config.multimodal_config is None:
+        return
+
+    logger.warning(
+        "Detected a text-only Qwen3.5 causal LM with multimodal processing enabled. "
+        "Disabling multimodal setup for vLLM startup."
+    )
+    model_config.multimodal_config = None
+    vllm_config.scheduler_config.is_multimodal_model = False
 
 
 class vLLMHttpServer:
@@ -170,6 +250,92 @@ class vLLMHttpServer:
             f"master_address: {self._master_address}, master_port: {self._master_port}, "
             f"data_parallel_rpc_port: {self._dp_rpc_port}, data_parallel_master_port: {self._dp_master_port}"
         )
+        self._external_engine_manager = None
+
+    def _is_text_only_qwen3_5_causallm(self) -> bool:
+        hf_config = self.model_config.hf_config
+        model_type = getattr(hf_config, "model_type", None)
+        architectures = tuple(getattr(hf_config, "architectures", ()) or ())
+        return model_type == "qwen3_5_text" and any(arch.endswith("ForCausalLM") for arch in architectures)
+
+    def _should_use_external_headless_engine(self) -> bool:
+        if self.node_rank != 0:
+            return False
+        if self.nnodes != 1:
+            return False
+        if getattr(self.config, "data_parallel_size", 1) != 1:
+            return False
+        return self._is_text_only_qwen3_5_causallm()
+
+    def _launch_external_headless_engine(
+        self,
+        args: argparse.Namespace,
+        usage_context: UsageContext,
+    ) -> tuple[Any, dict[str, str]]:
+        engine_args = AsyncEngineArgs.from_cli_args(args)
+        vllm_config = engine_args.create_engine_config(usage_context=usage_context, headless=True)
+        _disable_multimodal_for_text_only_qwen3_5(vllm_config)
+        vllm_config.parallel_config.data_parallel_rpc_port = self._dp_rpc_port
+        vllm_config.parallel_config.data_parallel_master_port = self._dp_master_port
+
+        parallel_config = vllm_config.parallel_config
+        local_engine_count = parallel_config.data_parallel_size_local
+        if local_engine_count is None or local_engine_count <= 0:
+            raise ValueError(f"Invalid data_parallel_size_local for headless startup: {local_engine_count}")
+
+        dp_rank = parallel_config.data_parallel_rank
+        executor_class = Executor.get_class(vllm_config)
+        log_stats = not engine_args.disable_log_stats
+
+        addresses = get_engine_zmq_addresses(vllm_config)
+        handshake_address = get_tcp_uri(parallel_config.data_parallel_master_ip, parallel_config.data_parallel_rpc_port)
+        core_engines = [CoreEngine(index=i, local=False) for i in range(dp_rank, dp_rank + local_engine_count)]
+
+        with zmq_socket_ctx(handshake_address, zmq.ROUTER, bind=True) as handshake_socket:
+            engine_manager = CoreEngineProcManager(
+                local_engine_count=local_engine_count,
+                start_index=dp_rank,
+                local_start_index=0,
+                vllm_config=vllm_config,
+                local_client=False,
+                handshake_address=handshake_address,
+                executor_class=executor_class,
+                log_stats=log_stats,
+            )
+            try:
+                original_local_count = parallel_config.data_parallel_size_local
+                parallel_config.data_parallel_size_local = 0
+                try:
+                    wait_for_engine_startup(
+                        handshake_socket=handshake_socket,
+                        addresses=addresses,
+                        core_engines=core_engines,
+                        parallel_config=parallel_config,
+                        coordinated_dp=False,
+                        cache_config=vllm_config.cache_config,
+                        proc_manager=engine_manager,
+                        coord_process=None,
+                    )
+                finally:
+                    parallel_config.data_parallel_size_local = original_local_count
+            except Exception:
+                engine_manager.shutdown()
+                raise
+
+        self._external_engine_manager = engine_manager
+        client_addresses = {
+            "input_address": addresses.inputs[0],
+            "output_address": addresses.outputs[0],
+        }
+        if addresses.frontend_stats_publish_address is not None:
+            client_addresses["stats_update_address"] = addresses.frontend_stats_publish_address
+
+        logger.info(
+            "Started external headless vLLM engine for frontend client: input=%s output=%s",
+            client_addresses["input_address"],
+            client_addresses["output_address"],
+        )
+        return vllm_config, client_addresses
 
     def get_master_address(self):
         """Get master address and port for data parallel.
@@ -440,10 +606,9 @@ class vLLMHttpServer:
             await self.run_headless(server_args)
 
     async def run_server(self, args: argparse.Namespace):
+        _register_missing_qwen3_5_causallm()
         engine_args = AsyncEngineArgs.from_cli_args(args)
         usage_context = UsageContext.OPENAI_API_SERVER
-        vllm_config = engine_args.create_engine_config(usage_context=usage_context)
-        vllm_config.parallel_config.data_parallel_master_port = self._dp_master_port
 
         fn_args = set(dict(inspect.signature(AsyncLLM.from_vllm_config).parameters).keys())
         kwargs = {}
@@ -452,7 +617,21 @@ class vLLMHttpServer:
         if "disable_log_stats" in fn_args:
             kwargs["disable_log_stats"] = engine_args.disable_log_stats
 
-        engine_client = AsyncLLM.from_vllm_config(vllm_config=vllm_config, usage_context=usage_context, **kwargs)
+        if self._should_use_external_headless_engine() and "client_addresses" in fn_args:
+            vllm_config, client_addresses = self._launch_external_headless_engine(args, usage_context)
+            kwargs["client_addresses"] = client_addresses
+        else:
+            vllm_config = engine_args.create_engine_config(usage_context=usage_context)
+            _disable_multimodal_for_text_only_qwen3_5(vllm_config)
+            vllm_config.parallel_config.data_parallel_master_port = self._dp_master_port
+
+        try:
+            engine_client = AsyncLLM.from_vllm_config(vllm_config=vllm_config, usage_context=usage_context, **kwargs)
+        except Exception:
+            if self._external_engine_manager is not None:
+                self._external_engine_manager.shutdown()
+                self._external_engine_manager = None
+            raise
 
         # Don't keep the dummy data in memory
         await engine_client.reset_mm_cache()
