@@ -21,9 +21,14 @@ def parse_args():
     parser = argparse.ArgumentParser(description="KL Divergence Training for Math Reasoning")
 
     # KL Settings
-    parser.add_argument("--kl_type", type=str, default="reverse", choices=["reverse", "forward"])
+    parser.add_argument("--kl_type", type=str, default="reverse", choices=["reverse", "forward", "jsd"])
     parser.add_argument("--kl_method", type=str, default="monte_carlo", choices=["monte_carlo", "full_vocab"])
     parser.add_argument("--temperature", type=float, default=0.7)
+    parser.add_argument("--kl_token_clip", type=float, default=0.1,
+                        help="Per-token KL clip (OPSD jsd_token_clip). 0 disables.")
+    parser.add_argument("--beta", type=float, default=0.0,
+                        help="Mixture coefficient for generalized JSD (only used when kl_type=jsd). "
+                             "beta=0 → forward KL, beta=1 → reverse KL, beta∈(0,1) → JSD mixture.")
 
     # Model Settings
     parser.add_argument("--student_model_path", type=str, required=True)
@@ -85,6 +90,10 @@ def parse_args():
     parser.add_argument("--wandb_project", type=str, default="verl-kl-training")
     parser.add_argument("--wandb_run_name", type=str, default="")
     parser.add_argument("--save_merged_model", type=lambda x: x.lower() == "true", default=True)
+    parser.add_argument("--save_steps", type=int, default=100,
+                        help="Save FSDP checkpoint every N optimizer steps. Lower = better crash safety, more disk.")
+    parser.add_argument("--max_ckpt_to_keep", type=int, default=-1,
+                        help="FSDP checkpoint retention. -1 (or 0) = keep all; N>0 = rolling window of N.")
 
     # Evaluation Settings
     parser.add_argument("--run_eval_after_training", type=lambda x: x.lower() == "true", default=False)
@@ -109,6 +118,8 @@ def main():
         kl_type=args.kl_type,
         kl_method=args.kl_method,
         temperature=args.temperature,
+        kl_token_clip=args.kl_token_clip,
+        beta=args.beta,
         # Model Settings
         student_model_path=args.student_model_path,
         teacher_model_path=args.teacher_model_path,
@@ -153,6 +164,8 @@ def main():
         wandb_project=args.wandb_project,
         wandb_run_name=args.wandb_run_name,
         save_merged_model=args.save_merged_model,
+        save_steps=args.save_steps,
+        max_ckpt_to_keep=args.max_ckpt_to_keep,
         # Evaluation Settings
         run_eval_after_training=args.run_eval_after_training,
         eval_datasets=args.eval_datasets.split(",") if args.eval_datasets else [],
@@ -162,8 +175,17 @@ def main():
     trainer = KLTrainer(config)
     try:
         trainer.train()
-    finally:
-        trainer.close()
+    except BaseException:
+        # A single rank failing inside train() must not call destroy_process_group
+        # while peers are still inside an FSDP collective — that hangs the whole
+        # job (the other ranks busy-wait on NCCL forever). Print the traceback,
+        # then hard-exit so torchrun reaps every worker.
+        import traceback
+        traceback.print_exc()
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(1)
+    trainer.close()
 
 
 if __name__ == "__main__":

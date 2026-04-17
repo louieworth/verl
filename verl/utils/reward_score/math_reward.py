@@ -29,6 +29,38 @@ def compute_score(solution_str, ground_truth) -> float:
 
 
 # string normalization from https://github.com/EleutherAI/lm-evaluation-harness/blob/master/lm_eval/tasks/hendrycks_math.py
+def _try_numeric_equal(s1: str, s2: str) -> bool | None:
+    """Try to evaluate both strings as numbers and compare. Returns None if either fails to parse."""
+    import re
+
+    def _parse_latex_number(s: str) -> float | None:
+        s = s.strip()
+        # mixed fraction: optional_sign integer \frac{num}{den}
+        m = re.match(r'^([+-]?)(\d+)\\frac\{(\d+)\}\{(\d+)\}$', s)
+        if m:
+            sign = -1 if m.group(1) == '-' else 1
+            return sign * (int(m.group(2)) + int(m.group(3)) / int(m.group(4)))
+        # \frac{num}{den}
+        m = re.match(r'^([+-]?)\\frac\{([^}]+)\}\{([^}]+)\}$', s)
+        if m:
+            try:
+                sign = -1 if m.group(1) == '-' else 1
+                return sign * float(m.group(2)) / float(m.group(3))
+            except (ValueError, ZeroDivisionError):
+                return None
+        # plain number or decimal
+        try:
+            return float(s)
+        except ValueError:
+            return None
+
+    v1 = _parse_latex_number(s1)
+    v2 = _parse_latex_number(s2)
+    if v1 is not None and v2 is not None:
+        return abs(v1 - v2) < 1e-9
+    return None
+
+
 def is_equiv(str1, str2, verbose=False):
     if str1 is None and str2 is None:
         print("WARNING: Both None")
@@ -41,7 +73,12 @@ def is_equiv(str1, str2, verbose=False):
         ss2 = strip_string(str2)
         if verbose:
             print(ss1, ss2)
-        return ss1 == ss2
+        if ss1 == ss2:
+            return True
+        numeric_result = _try_numeric_equal(ss1, ss2)
+        if numeric_result is not None:
+            return numeric_result
+        return False
     except Exception:
         return str1 == str2
 

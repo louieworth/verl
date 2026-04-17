@@ -19,19 +19,27 @@
 set -e
 set -o pipefail
 
+# `expandable_segments:True` avoids a ~6GiB reserved-but-unallocated block
+# during FSDP backward, but it is incompatible with vLLM's CuMemAllocator
+# memory pool, so we only set it around the torchrun training command below
+# (not exported here, otherwise stage1/stage2 generation and eval — which
+# all spawn vLLM — crash with "Expandable segments are not compatible with
+# memory pool").
+
 # =============================================================================
 # Configuration
 # =============================================================================
-
 # KL Training Settings
-KL_TYPE=${KL_TYPE:-"forward"}          # reverse or forward
-KL_METHOD=${KL_METHOD:-"monte_carlo"}  # monte_carlo or full_vocab
+KL_TYPE=${KL_TYPE:-"reverse"}          # reverse | forward | jsd (OPSD generalized JSD)
+KL_METHOD=${KL_METHOD:-"monte_carlo"}  # monte_carlo or full_vocab (JSD at beta∈(0,1) requires full_vocab)
+KL_TOKEN_CLIP=${KL_TOKEN_CLIP:-0.06}    # Per-token KL/JSD clip. OPSD 8B uses 0.06; 0 disables.
 TEMPERATURE=${TEMPERATURE:-0.7}         # Softmax temperature
-USE_INITIAL_RESPONSE=${USE_INITIAL_RESPONSE:-"true"}  # Teacher prompt mode: false=rewrite from expert only, true=rewrite using initial response + expert guidance
+BETA=${BETA:-0}                         # JSD mixture coefficient (0=forward KL, 1=reverse KL, 0<β<1=mixture)
+USE_INITIAL_RESPONSE=${USE_INITIAL_RESPONSE:-"false"}  # Teacher prompt mode: false=rewrite from expert only, true=rewrite using initial response + expert guidance
 FORWARD_STAGE2_MODE=${FORWARD_STAGE2_MODE:-"rewrite_all"}  # rewrite_all or reward0_only
 
 # Model Settings
-MODEL_PATH=${MODEL_PATH:-"Qwen/Qwen3-4B-Instruct-2507"}
+MODEL_PATH=${MODEL_PATH:-"Qwen/Qwen3-8B"}
 TEACHER_MODEL_PATH=${TEACHER_MODEL_PATH:-""}  # Empty means same as student
 USE_LORA=${USE_LORA:-true}
 LORA_RANK=${LORA_RANK:-64}
@@ -39,11 +47,10 @@ LORA_ALPHA=${LORA_ALPHA:-128}
 
 # Training Settings
 LEARNING_RATE=${LEARNING_RATE:-2e-5}
-TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-8}
-GRADIENT_ACCUMULATION_STEPS=${GRADIENT_ACCUMULATION_STEPS:-4}
+TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-4}
+GRADIENT_ACCUMULATION_STEPS=${GRADIENT_ACCUMULATION_STEPS:-8}
 TOTAL_EPOCHS=${TOTAL_EPOCHS:-1}  # Outer pipeline epochs
 TRAIN_EPOCHS_PER_ROUND=${TRAIN_EPOCHS_PER_ROUND:-1}  # Trainer epochs for each pipeline epoch
-MAX_LENGTH=${MAX_LENGTH:-36864}
 WARMUP_RATIO=${WARMUP_RATIO:-0.1}
 WEIGHT_DECAY=${WEIGHT_DECAY:-0.005}
 
@@ -53,7 +60,7 @@ CORRECTED_RESPONSES_PATH=${CORRECTED_RESPONSES_PATH:-""}  # Optional legacy two-
 MAX_SAMPLES=${MAX_SAMPLES:-""}  # For testing, leave empty for full data
 
 # Distributed Training
-NGPUS_PER_NODE=${NGPUS_PER_NODE:-4}
+NGPUS_PER_NODE=${NGPUS_PER_NODE:-8}
 NNODES=${NNODES:-1}
 NODE_RANK=${NODE_RANK:-0}
 MASTER_ADDR=${MASTER_ADDR:-"localhost"}
@@ -64,7 +71,10 @@ GEN_TP=${GEN_TP:-1}  # Tensor parallel for generation
 FSDP_STRATEGY=${FSDP_STRATEGY:-"fsdp2"}
 FSDP_SIZE=${FSDP_SIZE:--1}
 SP_SIZE=${SP_SIZE:-1}
-MAX_TOKEN_LEN_PER_GPU=${MAX_TOKEN_LEN_PER_GPU:-40960}
+# TODO forward KL should be higher this is only for reverse KL
+MAX_LENGTH=${MAX_LENGTH:-18432}
+MAX_TOKEN_LEN_PER_GPU=${MAX_TOKEN_LEN_PER_GPU:-49152}
+STAGE2_PROMPT_LENGTH=${STAGE2_PROMPT_LENGTH:-20480}  # Forward-KL stage2 rewrite prompt length; correction mode uses longer prompts
 NUM_WORKERS=${NUM_WORKERS:-4}
 USE_TORCH_COMPILE=${USE_TORCH_COMPILE:-"true"}
 PARAM_OFFLOAD=${PARAM_OFFLOAD:-"false"}
@@ -77,25 +87,38 @@ MODEL_SAVE_DIR=${MODEL_SAVE_DIR:-"/data/data/jiangli/models"}  # Base model save
 WANDB_PROJECT=${WANDB_PROJECT:-"verl-kl-training"}
 WANDB_RUN_NAME=${WANDB_RUN_NAME:-""}  # Base wandb run name; _epochN is appended
 SAVE_MERGED_MODEL=${SAVE_MERGED_MODEL:-"true"}  # Merge LoRA after training
+SAVE_STEPS=${SAVE_STEPS:-100}                   # FSDP ckpt every N optimizer steps (crash recovery)
+KEEP_LAST_N_CHECKPOINTS=${KEEP_LAST_N_CHECKPOINTS:--1}  # -1 = keep all; N>0 = rolling window
 
 # Evaluation Settings
 RUN_EVAL_AFTER_TRAINING=${RUN_EVAL_AFTER_TRAINING:-"true"}
-EVAL_DATASETS=${EVAL_DATASETS:-"aime24,aime25,math500,hmmt25"}
+# EVAL_DATASETS=${EVAL_DATASETS:-"aime24,aime25,math500,hmmt25"} DEFAULT_DATASETS="math500 hmmt25 beyondaime amobench gsm8k"
+EVAL_DATASETS=${EVAL_DATASETS:-"aime24,aime25,math500,hmmt25,beyondaime,amobench,gsm8k"}
 EVAL_DATASETS_DIR=${EVAL_DATASETS_DIR:-"/data/data/jiangli/huggingface/datasets"}
 PASS_K=${PASS_K:-1}
 
 # Paths
+# Layout: recipe/kl_training/run/<this_script>.sh
+#         recipe/kl_training/<run_training.py, run_eval_suite.py>
+#         recipe/open_math_reasoning/<stage1/2 prep, benchmark>
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VERL_ROOT="$(dirname "$(dirname "$SCRIPT_DIR")")"
-RECIPE_DIR="$SCRIPT_DIR"
-PIPELINE_DIR="$(dirname "$SCRIPT_DIR")/open_math_reasoning"
+RECIPE_DIR="$(dirname "$SCRIPT_DIR")"                           # recipe/kl_training
+VERL_ROOT="$(dirname "$(dirname "$RECIPE_DIR")")"               # repo root
+PIPELINE_DIR="$(dirname "$RECIPE_DIR")/open_math_reasoning"     # recipe/open_math_reasoning
 
 # Training data path (for prompts)
-TRAIN_DATA_PATH=${TRAIN_DATA_PATH:-"$VERL_ROOT/data/deepscaleR_train.parquet"}
+TRAIN_DATA_PATH=${TRAIN_DATA_PATH:-"/opt/dlami/nvme/data/DeepScaleR-Cleaned"}
 
 # Model name from the original base model, not from epoch checkpoints
 MODEL_NAME="${MODEL_PATH##*/}"
 PROMPT_MODE_TAG=$( [ "$USE_INITIAL_RESPONSE" = "true" ] && echo "correction" || echo "rewrite" )
+CLIP_TAG="clip$(echo $KL_TOKEN_CLIP | sed 's/\.//')"  # e.g. 0.1 -> clip01, 0.06 -> clip006
+if [ "$KL_TYPE" = "jsd" ]; then
+    BETA_TAG="_beta$(echo $BETA | sed 's/\.//')"
+else
+    BETA_TAG=""
+fi
+EXPERIMENT_TAG="kl_${KL_TYPE}_${KL_METHOD}_${PROMPT_MODE_TAG}_${CLIP_TAG}${BETA_TAG}"
 
 if [ "$KL_TYPE" = "forward" ] && [ "$FORWARD_STAGE2_MODE" != "rewrite_all" ] && [ "$FORWARD_STAGE2_MODE" != "reward0_only" ]; then
     echo "ERROR: FORWARD_STAGE2_MODE must be one of: rewrite_all, reward0_only"
@@ -114,20 +137,22 @@ fi
 
 # Base directories
 GEN_RESULTS_BASE_DIR="$VERL_ROOT/gen_results/${MODEL_NAME}"
+RUN_DATE=${RUN_DATE:-$(date +%Y%m%d)}
+
 if [ -z "$OUTPUT_DIR" ]; then
-    OUTPUT_BASE_DIR="$VERL_ROOT/outputs/${MODEL_NAME}_kl_${KL_TYPE}_${KL_METHOD}_${PROMPT_MODE_TAG}"
+    OUTPUT_BASE_DIR="$VERL_ROOT/outputs/${MODEL_NAME}_${EXPERIMENT_TAG}_${RUN_DATE}"
 else
     OUTPUT_BASE_DIR="$OUTPUT_DIR"
 fi
 
 if [ -z "$MODEL_SAVE_DIR" ] || [ "$MODEL_SAVE_DIR" = "/data/data/jiangli/models" ]; then
-    MODEL_SAVE_BASE_DIR="/data/data/jiangli/models/${MODEL_NAME}_kl_${KL_TYPE}_${KL_METHOD}_${PROMPT_MODE_TAG}"
+    MODEL_SAVE_BASE_DIR="/data/data/jiangli/models/${MODEL_NAME}_${EXPERIMENT_TAG}_${RUN_DATE}"
 else
     MODEL_SAVE_BASE_DIR="$MODEL_SAVE_DIR"
 fi
 
 if [ -z "$WANDB_RUN_NAME" ]; then
-    WANDB_RUN_NAME_BASE="kl_${KL_TYPE}_${KL_METHOD}_${PROMPT_MODE_TAG}"
+    WANDB_RUN_NAME_BASE="${EXPERIMENT_TAG}_${RUN_DATE}"
 else
     WANDB_RUN_NAME_BASE="$WANDB_RUN_NAME"
 fi
@@ -167,6 +192,9 @@ resolve_epoch_data_path() {
     local epoch_dir
     epoch_dir="$(epoch_gen_results_dir "$epoch")"
 
+    # Forward KL uses teacher-rewritten stage2 responses.
+    # Reverse KL and JSD both train on the student's stage1 rollouts
+    # (JSD's closest offline analogue to OPSD's on-policy student samples).
     if [ "$KL_TYPE" = "forward" ]; then
         if [ "$FORWARD_STAGE2_MODE" = "reward0_only" ]; then
             echo "$epoch_dir/deepscaleR_stage2_reward0_${PROMPT_MODE_TAG}_responses.parquet"
@@ -214,7 +242,11 @@ print_base_configuration() {
     echo "  Type:     $KL_TYPE"
     echo "  Method:   $KL_METHOD"
     echo "  Temp:     $TEMPERATURE"
+    echo "  Clip:     $KL_TOKEN_CLIP"
     echo "  Prompt:   $PROMPT_MODE_TAG"
+    if [ "$KL_TYPE" = "jsd" ]; then
+        echo "  Beta:     $BETA"
+    fi
     if [ "$KL_TYPE" = "forward" ]; then
         echo "  Stage2 Mode: $FORWARD_STAGE2_MODE"
     fi
@@ -307,7 +339,7 @@ run_epoch() {
             else
                 echo "  [Stage 1] Generating initial responses..."
                 python3 "$PIPELINE_DIR/stage1_prepare.py" \
-                    --train_file "$TRAIN_DATA_PATH" \
+                    --input_path "$TRAIN_DATA_PATH" \
                     --output_file "$stage1_prompts"
 
                 python3 -m verl.trainer.main_generation_server \
@@ -321,7 +353,8 @@ run_epoch() {
                     actor_rollout_ref.rollout.prompt_length=4096 \
                     actor_rollout_ref.rollout.response_length=16384 \
                     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
-                    actor_rollout_ref.rollout.gpu_memory_utilization=0.95 \
+                    actor_rollout_ref.rollout.gpu_memory_utilization=0.85 \
+                    actor_rollout_ref.rollout.max_num_seqs=64 \
                     actor_rollout_ref.rollout.name=vllm \
                     actor_rollout_ref.rollout.n=1 \
                     data.train_files="['${stage1_prompts}']" \
@@ -363,10 +396,11 @@ run_epoch() {
                 actor_rollout_ref.rollout.temperature=0.6 \
                 actor_rollout_ref.rollout.top_p=0.95 \
                 actor_rollout_ref.rollout.top_k=20 \
-                actor_rollout_ref.rollout.prompt_length=20480 \
+                actor_rollout_ref.rollout.prompt_length=${STAGE2_PROMPT_LENGTH} \
                 actor_rollout_ref.rollout.response_length=16384 \
                 actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
-                actor_rollout_ref.rollout.gpu_memory_utilization=0.95 \
+                actor_rollout_ref.rollout.gpu_memory_utilization=0.85 \
+                actor_rollout_ref.rollout.max_num_seqs=64 \
                 actor_rollout_ref.rollout.name=vllm \
                 actor_rollout_ref.rollout.n=1 \
                 data.train_files="['${stage2_prompts}']" \
@@ -382,7 +416,7 @@ run_epoch() {
             local stage1_prompts="$current_gen_results_dir/deepscaleR_stage1_prompts.parquet"
 
             python3 "$PIPELINE_DIR/stage1_prepare.py" \
-                --train_file "$TRAIN_DATA_PATH" \
+                --input_path "$TRAIN_DATA_PATH" \
                 --output_file "$stage1_prompts"
 
             python3 -m verl.trainer.main_generation_server \
@@ -396,7 +430,8 @@ run_epoch() {
                 actor_rollout_ref.rollout.prompt_length=4096 \
                 actor_rollout_ref.rollout.response_length=16384 \
                 actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
-                actor_rollout_ref.rollout.gpu_memory_utilization=0.95 \
+                actor_rollout_ref.rollout.gpu_memory_utilization=0.85 \
+                actor_rollout_ref.rollout.max_num_seqs=64 \
                 actor_rollout_ref.rollout.name=vllm \
                 actor_rollout_ref.rollout.n=1 \
                 data.train_files="['${stage1_prompts}']" \
@@ -414,6 +449,8 @@ pipeline_total_epochs: $TOTAL_EPOCHS
 trainer_total_epochs: $TRAIN_EPOCHS_PER_ROUND
 kl_type: $KL_TYPE
 kl_method: $KL_METHOD
+beta: $BETA
+kl_token_clip: $KL_TOKEN_CLIP
 temperature: $TEMPERATURE
 prompt_mode: $PROMPT_MODE_TAG
 use_initial_response: $USE_INITIAL_RESPONSE
@@ -463,6 +500,8 @@ EOF
         --n_gpus_per_node $NGPUS_PER_NODE \
         --kl_type $KL_TYPE \
         --kl_method $KL_METHOD \
+        --kl_token_clip $KL_TOKEN_CLIP \
+        --beta $BETA \
         --temperature $TEMPERATURE \
         --student_model_path $current_model_path \
         ${current_teacher_model_path:+--teacher_model_path $current_teacher_model_path} \
@@ -496,6 +535,8 @@ EOF
         --wandb_project $WANDB_PROJECT \
         --wandb_run_name $current_wandb_run_name \
         --save_merged_model $SAVE_MERGED_MODEL \
+        --save_steps $SAVE_STEPS \
+        --max_ckpt_to_keep $KEEP_LAST_N_CHECKPOINTS \
         --run_eval_after_training $RUN_EVAL_AFTER_TRAINING \
         --eval_datasets $EVAL_DATASETS \
         --eval_datasets_dir $EVAL_DATASETS_DIR \
@@ -506,7 +547,91 @@ EOF
     echo "$cmd"
     echo ""
 
-    eval "$cmd" 2>&1 | tee "$current_output_dir/logs/training_$(date +%Y%m%d_%H%M%S).log"
+    (
+        export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
+        eval "$cmd"
+    ) 2>&1 | tee "$current_output_dir/logs/training_$(date +%Y%m%d_%H%M%S).log"
+
+    if [ "$RUN_EVAL_AFTER_TRAINING" = "true" ]; then
+        local eval_model_path="$current_model_save_dir/hf_merged"
+
+        # --- 1. Verify merged model exists & is loadable ---
+        if [ ! -d "$eval_model_path" ] || [ ! -f "$eval_model_path/config.json" ]; then
+            echo "ERROR: eval requested but merged model is missing or incomplete at $eval_model_path"
+            exit 1
+        fi
+
+        # --- 2. Verify each requested eval dataset parquet is on disk ---
+        local _missing_ds=""
+        local IFS_BAK="$IFS"
+        IFS=','
+        for _ds in $EVAL_DATASETS; do
+            local _ds_file="$EVAL_DATASETS_DIR/${_ds}/${_ds}_test.parquet"
+            if ! file_exists_and_nonempty "$_ds_file"; then
+                _missing_ds="$_missing_ds $_ds"
+            fi
+        done
+        IFS="$IFS_BAK"
+        if [ -n "$_missing_ds" ]; then
+            echo "ERROR: missing eval dataset parquet under $EVAL_DATASETS_DIR:$_missing_ds"
+            echo "       Expected layout: \$EVAL_DATASETS_DIR/<name>/<name>_test.parquet"
+            exit 1
+        fi
+
+        # --- 3. Wait for training GPU memory to be released ---
+        # The training subprocess has already exited by this point, so memory
+        # should be freed almost immediately. We still poll defensively for up
+        # to 60s in case any zombie process is holding memory — vLLM will OOM
+        # if the previous FSDP allocator hasn't released its blocks.
+        echo ""
+        echo "=========================================="
+        echo "Waiting for GPU memory release before eval"
+        echo "=========================================="
+        local _wait_max=60
+        local _waited=0
+        while [ "$_waited" -lt "$_wait_max" ]; do
+            local _used_mb
+            _used_mb=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null \
+                       | awk '{s+=$1} END{print s+0}')
+            # Threshold: < 1 GB per GPU on average (8 GPUs ≈ 8 GB total)
+            local _threshold_mb=$((NGPUS_PER_NODE * 1024))
+            if [ "$_used_mb" -lt "$_threshold_mb" ]; then
+                echo "  GPUs released (total ${_used_mb} MB used, threshold ${_threshold_mb} MB)"
+                break
+            fi
+            echo "  GPUs still busy (total ${_used_mb} MB used), waiting..."
+            sleep 5
+            _waited=$((_waited + 5))
+        done
+        if [ "$_waited" -ge "$_wait_max" ]; then
+            echo "WARNING: GPU memory still high after ${_wait_max}s — eval may OOM."
+        fi
+
+        # --- 4. Hand off to benchmark_kl_model.sh ---
+        # benchmark_kl_model.sh derives MODEL_NAME / output_dir / results_file
+        # from the model path. It expects DATASETS as space-separated and
+        # writes to relative paths under the repo root, so we cd there first.
+        local _datasets_space
+        _datasets_space=$(echo "$EVAL_DATASETS" | tr ',' ' ')
+
+        echo ""
+        echo "=========================================="
+        echo "Running evaluation via benchmark_kl_model.sh"
+        echo "  Model:    $eval_model_path"
+        echo "  Datasets: $_datasets_space"
+        echo "=========================================="
+        (
+            cd "$VERL_ROOT"
+            unset PYTORCH_CUDA_ALLOC_CONF
+            NGPUS_PER_NODE="$NGPUS_PER_NODE" \
+            NNODES="$NNODES" \
+            GEN_TP="$GEN_TP" \
+            EVAL_DATASETS_DIR="$EVAL_DATASETS_DIR" \
+            DATASETS="$_datasets_space" \
+            PASS_K="$PASS_K" \
+            bash "$SCRIPT_DIR/benchmark_kl_model.sh" "$eval_model_path"
+        ) 2>&1 | tee "$current_output_dir/logs/eval_$(date +%Y%m%d_%H%M%S).log"
+    fi
 
     echo ""
     echo "Epoch ${epoch} complete"
@@ -542,6 +667,22 @@ mkdir -p "$OUTPUT_BASE_DIR"
 mkdir -p "$MODEL_SAVE_BASE_DIR"
 
 for EPOCH in $(seq 1 "$TOTAL_EPOCHS"); do
+    EPOCH_MODEL_DIR="$(epoch_model_save_dir "$EPOCH")"
+    if [ "$SAVE_MERGED_MODEL" = "true" ]; then
+        EPOCH_DONE_MARKER="$EPOCH_MODEL_DIR/hf_merged/config.json"
+    else
+        EPOCH_DONE_MARKER="$EPOCH_MODEL_DIR/final/config.json"
+    fi
+
+    if [ -f "$EPOCH_DONE_MARKER" ]; then
+        echo ""
+        echo "=========================================="
+        echo "Epoch ${EPOCH}/${TOTAL_EPOCHS} — already complete, skipping"
+        echo "  Found: $EPOCH_DONE_MARKER"
+        echo "=========================================="
+        continue
+    fi
+
     CURRENT_MODEL_PATH="$(resolve_epoch_model_path "$EPOCH")"
     CURRENT_TEACHER_MODEL_PATH="$TEACHER_MODEL_PATH"
     run_epoch "$EPOCH" "$CURRENT_MODEL_PATH" "$CURRENT_TEACHER_MODEL_PATH"
@@ -563,7 +704,7 @@ if [ "$RUN_EVAL_AFTER_TRAINING" = "true" ]; then
 fi
 if [ "$SAVE_MERGED_MODEL" = "true" ]; then
     echo "Merged Model: $FINAL_MODEL_SAVE_DIR/hf_merged"
-    echo "Benchmark: bash $PIPELINE_DIR/benchmark_kl_model.sh $FINAL_MODEL_SAVE_DIR/hf_merged"
+    echo "Benchmark: bash $SCRIPT_DIR/benchmark_kl_model.sh $FINAL_MODEL_SAVE_DIR/hf_merged"
 else
     echo "FSDP Checkpoints: $FINAL_MODEL_SAVE_DIR/global_step_*"
 fi

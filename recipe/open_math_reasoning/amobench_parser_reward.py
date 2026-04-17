@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from math_verify import parse, verify
 from sympy import solve
 
@@ -174,6 +176,11 @@ def verify_variable_answer(pred_extract: str, answer: str, try_list: list[str]) 
 
 
 def compute_score(solution_str, ground_truth) -> float:
+    if isinstance(ground_truth, str):
+        try:
+            ground_truth = json.loads(ground_truth)
+        except json.JSONDecodeError:
+            return 0.0
     if not isinstance(ground_truth, dict):
         return 0.0
 

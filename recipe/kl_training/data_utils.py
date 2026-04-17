@@ -35,11 +35,11 @@ Your task is to rewrite your mathematical solution using the reference solution 
 **Problem:**
 {PROBLEM}
 
-**Your Initial Solution:**
-{INITIAL_RESPONSE}
-
 **Reference Solution:**
 {EXPERT_SOLUTION}
+
+**Your Initial Solution:**
+{INITIAL_RESPONSE}
 
 **Instructions:**
 1. Review the reference solution to understand the target reasoning and method
@@ -109,7 +109,9 @@ class KLTrainingDataset(Dataset):
         return len(self.data)
 
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
-        if self.kl_type == "reverse":
+        # JSD trains on stage1 (student rollout) with reverse-KL style prompts
+        # (student sees just the problem; teacher gets the expert-solution hint).
+        if self.kl_type in ("reverse", "jsd"):
             return self._prepare_reverse_kl_item(idx)
         return self._prepare_forward_kl_item(idx)
 

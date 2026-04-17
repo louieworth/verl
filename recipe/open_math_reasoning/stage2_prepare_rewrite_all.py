@@ -30,11 +30,11 @@ Your task is to rewrite your mathematical solution using the reference solution 
 **Problem:**
 {PROBLEM}
 
-**Your Initial Solution:**
-{INITIAL_RESPONSE}
-
 **Reference Solution:**
 {EXPERT_SOLUTION}
+
+**Your Initial Solution:**
+{INITIAL_RESPONSE}
 
 **Instructions:**
 1. Review the reference solution to understand the target reasoning and method

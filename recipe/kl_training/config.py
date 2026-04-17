@@ -21,9 +21,16 @@ class KLTrainingConfig:
     """Configuration for KL Divergence Training."""
 
     # KL Settings
-    kl_type: Literal["reverse", "forward"] = "reverse"
+    kl_type: Literal["reverse", "forward", "jsd"] = "reverse"
     kl_method: Literal["monte_carlo", "full_vocab"] = "monte_carlo"
     temperature: float = 0.7
+    # Per-token KL clip (OPSD `jsd_token_clip`). Caps each token's KL
+    # contribution to prevent outlier tokens (where teacher >> student)
+    # from dominating the gradient. 0 disables.
+    kl_token_clip: float = 0.1
+    # Mixture coefficient for generalized JSD (only used when kl_type="jsd").
+    # OPSD convention: beta=0 → forward KL, beta=1 → reverse KL, beta∈(0,1) → JSD mixture.
+    beta: float = 0.0
 
     # Model Settings
     student_model_path: str = "Qwen/Qwen3-1.7B"
@@ -81,10 +88,11 @@ class KLTrainingConfig:
     output_dir: str = "outputs/kl_training"
     model_save_dir: str = "/data/data/jiangli/models"  # Models saved here to avoid /home space
     gen_results_dir: str = ""  # Intermediate generation files (auto-generated if empty)
-    save_steps: int = 500
+    save_steps: int = 100
     logging_steps: int = 10
     eval_steps: int = 500
     save_merged_model: bool = True  # Merge LoRA adapters after training
+    max_ckpt_to_keep: int = -1  # FSDP checkpoint retention. -1 (or 0) = keep all, N>0 = rolling window
 
     # Evaluation Settings
     eval_datasets: list = field(default_factory=lambda: ["aime24", "aime25", "math500", "hmmt25"])

@@ -43,7 +43,8 @@ logger = logging.getLogger(__name__)
 
 
 def build_eval_tag(config: KLTrainingConfig) -> str:
-    return f"kl_{config.kl_type}_{config.kl_method}_{config.prompt_mode_tag}"
+    clip_tag = f"clip{str(config.kl_token_clip).replace('.', '')}"
+    return f"kl_{config.kl_type}_{config.kl_method}_{config.prompt_mode_tag}_{clip_tag}"
 
 
 def build_eval_model_name(config: KLTrainingConfig) -> str:
@@ -132,6 +133,13 @@ class KLTrainer:
         return tokenizer
 
     def _create_dataloader(self):
+        # Shard data by DP rank, not global rank: under Ulysses SP, ranks in
+        # the same SP group must see identical inputs, otherwise the SP
+        # all-to-all in attention deadlocks (mesh layout is row-major
+        # (dp, sp), so dp_rank = global_rank // sp_size).
+        sp_size = self.config.ulysses_sequence_parallel_size
+        dp_size = self.world_size // sp_size
+        dp_rank = self.rank // sp_size
         return create_kl_dataloader(
             data_path=self.config.data_path,
             tokenizer=self.tokenizer,
@@ -142,8 +150,8 @@ class KLTrainer:
             corrected_responses_path=self.config.corrected_responses_path,
             use_initial_response=self.config.use_initial_response,
             num_workers=self.config.num_workers,
-            local_rank=self.rank,
-            world_size=self.world_size,
+            local_rank=dp_rank,
+            world_size=dp_size,
         )
 
     def _build_model_config(self, model_path: str, *, trainable: bool) -> HFModelConfig:
@@ -225,6 +233,10 @@ class KLTrainer:
         teacher_model_path = self.config.teacher_model_path or self.config.student_model_path
         return self._build_worker(teacher_model_path, trainable=False)
 
+    def _needs_logits(self) -> bool:
+        """Only full_vocab kl_method needs the full logits tensor; MC (including JSD MC) is logprob-only."""
+        return self.config.kl_method == "full_vocab"
+
     def _common_meta(self, *, return_logits: bool) -> dict[str, Any]:
         return {
             "pad_mode": DatasetPadMode.NO_PADDING,
@@ -246,7 +258,7 @@ class KLTrainer:
                 "loss_mask": batch["teacher_loss_mask"],
                 "temperature": torch.full((batch_size,), self.config.temperature, dtype=torch.float32),
             },
-            non_tensor_dict=self._common_meta(return_logits=self.config.kl_method == "full_vocab"),
+            non_tensor_dict=self._common_meta(return_logits=self._needs_logits()),
         )
 
     def _make_student_batch(self, batch: dict[str, torch.Tensor], teacher_model_output: dict[str, torch.Tensor]) -> TensorDict:
@@ -262,7 +274,7 @@ class KLTrainer:
         if self.config.kl_method == "full_vocab":
             tensor_dict["teacher_logits"] = teacher_model_output["logits"]
 
-        meta = self._common_meta(return_logits=self.config.kl_method == "full_vocab")
+        meta = self._common_meta(return_logits=self._needs_logits())
         meta["grad_accum_steps"] = self.config.gradient_accumulation_steps
         return tu.get_tensordict(tensor_dict=tensor_dict, non_tensor_dict=meta)
 
@@ -279,8 +291,14 @@ class KLTrainer:
             selected_rows.append(selected)
             max_len = max(max_len, selected.shape[0])
 
-        if max_len == 0:
-            raise ValueError("No response tokens remain in the current micro-batch.")
+        # If no row has any response tokens, fall back to a 1-token zero
+        # padded tensor with an all-zero mask. Raising here would only kill the
+        # offending rank and deadlock the rest of the FSDP collective; instead
+        # the caller produces a zero loss that still flows through autograd so
+        # every rank stays in lockstep.
+        empty = max_len == 0
+        if empty:
+            max_len = 1
 
         padded = tensor_rows[0].new_zeros((len(selected_rows), max_len, *trailing_shape))
         padded_mask = torch.zeros((len(selected_rows), max_len), dtype=torch.float32, device=padded.device)
@@ -307,24 +325,95 @@ class KLTrainer:
         student_log_probs, mask = self._masked_nested_to_padded(model_output["log_probs"], data["loss_mask"])
         teacher_log_probs, teacher_mask = self._masked_nested_to_padded(data["teacher_log_probs"], data["teacher_loss_mask"])
 
+        # When this rank's micro-batch has no valid response tokens we still
+        # have to participate in every FSDP collective, otherwise the other
+        # ranks deadlock in backward. Return a zero loss that keeps the
+        # autograd link to model_output so backward fires reduce-scatter for
+        # all params, with zero gradient contribution.
+        if mask.sum() == 0:
+            zero_loss = model_output["log_probs"].values().sum() * 0.0
+            metrics = {
+                "kl_num": 0.0,
+                "student_nll_num": 0.0,
+                "teacher_nll_num": 0.0,
+                "response_tokens": 0.0,
+            }
+            return zero_loss, metrics
+
         student_counts = mask.sum(dim=1)
         teacher_counts = teacher_mask.sum(dim=1)
         if not torch.equal(student_counts, teacher_counts):
             raise ValueError("Student and teacher response lengths diverged inside the KL loss.")
 
-        if self.config.kl_method == "full_vocab":
-            student_logits, _ = self._masked_nested_to_padded(model_output["logits"], data["loss_mask"])
-            teacher_logits, _ = self._masked_nested_to_padded(data["teacher_logits"], data["teacher_loss_mask"])
-            kl_per_position = compute_kl_divergence(
-                student_logits,
-                teacher_logits,
-                mask,
-                kl_type=self.config.kl_type,
-                kl_method="full_vocab",
-                is_logprobs=False,
-                reduction="none",
-                temperature=self.config.temperature,
-            )
+        if self._needs_logits():
+            from .kl_utils import _forward_kl_chunk, _generalized_jsd_chunk, _reverse_kl_chunk
+            # Process logits one sample at a time, freeing each row's logits
+            # immediately after use to keep peak memory low on A100-40GB.
+            student_logits_nested = model_output["logits"]
+            teacher_logits_nested = data["teacher_logits"]
+            student_rows = list(student_logits_nested.unbind())
+            teacher_rows = list(teacher_logits_nested.unbind())
+            student_mask_rows = list(data["loss_mask"].unbind())
+            teacher_mask_rows = list(data["teacher_loss_mask"].unbind())
+            # Release the original nested tensors so their backing storage
+            # can be freed as we consume individual rows below.
+            del student_logits_nested, teacher_logits_nested
+            if "logits" in model_output:
+                del model_output["logits"]
+            if "teacher_logits" in data.keys():
+                data.pop("teacher_logits")
+
+            kl_chunks = []
+            chunk_size = 512
+            T = self.config.temperature
+
+            for i, (s_logits, t_logits, s_mask, t_mask) in enumerate(zip(
+                student_rows, teacher_rows, student_mask_rows, teacher_mask_rows, strict=True
+            )):
+                s_resp = s_logits[s_mask.to(torch.bool)]
+                t_resp = t_logits[t_mask.to(torch.bool)]
+                # Free this row's full logits immediately
+                student_rows[i] = None
+                teacher_rows[i] = None
+                del s_logits, t_logits
+
+                common = min(s_resp.shape[0], t_resp.shape[0])
+                if common == 0:
+                    kl_chunks.append(s_resp.new_zeros(1))
+                    del s_resp, t_resp
+                    continue
+                s_resp = s_resp[:common]
+                t_resp = t_resp[:common]
+                if T != 1.0:
+                    s_resp = s_resp / T
+                    t_resp = t_resp / T
+                sample_kl = []
+                for start in range(0, common, chunk_size):
+                    end = min(start + chunk_size, common)
+                    if self.config.kl_type == "reverse":
+                        sample_kl.append(_reverse_kl_chunk(s_resp[start:end], t_resp[start:end]))
+                    elif self.config.kl_type == "forward":
+                        sample_kl.append(_forward_kl_chunk(t_resp[start:end], s_resp[start:end]))
+                    else:  # jsd
+                        sample_kl.append(
+                            _generalized_jsd_chunk(
+                                s_resp[start:end], t_resp[start:end], beta=self.config.beta
+                            )
+                        )
+                kl_chunks.append(torch.cat(sample_kl))
+                del s_resp, t_resp, sample_kl
+
+            del student_rows, teacher_rows
+
+            max_len = max(c.shape[0] for c in kl_chunks)
+            if max_len == 0:
+                max_len = 1
+            kl_per_position = mask.new_zeros(len(kl_chunks), max_len)
+            for idx, c in enumerate(kl_chunks):
+                kl_per_position[idx, :c.shape[0]] = c
+            mask = mask[:, :max_len]
+            student_log_probs = student_log_probs[:, :max_len]
+            teacher_log_probs = teacher_log_probs[:, :max_len]
         else:
             kl_per_position = compute_kl_divergence(
                 student_log_probs,
@@ -334,8 +423,30 @@ class KLTrainer:
                 kl_method="monte_carlo",
                 is_logprobs=True,
                 reduction="none",
+                beta=self.config.beta,
             )
 
+        # Collect pre-clip per-token KL statistics for tuning kl_token_clip.
+        # Quantiles are computed on the local DP rank and averaged across
+        # micro-batches in _summarize_step_output; clip_num is additive
+        # (summable across micro-batches) and becomes clip_frac after
+        # dividing by response_tokens.
+        with torch.no_grad():
+            valid_kl = kl_per_position[mask.to(torch.bool)].float()
+            if valid_kl.numel() > 0:
+                kl_p50 = valid_kl.quantile(0.5)
+                kl_p95 = valid_kl.quantile(0.95)
+                kl_p99 = valid_kl.quantile(0.99)
+                kl_max = valid_kl.max()
+            else:
+                kl_p50 = kl_p95 = kl_p99 = kl_max = torch.zeros((), device=kl_per_position.device)
+            clip_threshold = self.config.kl_token_clip or float("inf")
+            clip_num = (valid_kl >= clip_threshold).sum() if valid_kl.numel() > 0 else torch.zeros(
+                (), dtype=torch.long, device=kl_per_position.device
+            )
+
+        if self.config.kl_token_clip and self.config.kl_token_clip > 0:
+            kl_per_position = kl_per_position.clamp(max=self.config.kl_token_clip)
         kl_num = (kl_per_position * mask).sum()
         student_nll_num = (-student_log_probs * mask).sum()
         teacher_nll_num = (-teacher_log_probs * mask).sum()
@@ -346,20 +457,23 @@ class KLTrainer:
         kl_loss = kl_num / max(batch_num_tokens, 1.0) * dp_size
         loss = kl_loss / float(tu.get_non_tensor_data(data, "grad_accum_steps", 1))
 
-        kl_num_metric = kl_num.detach().clone()
-        student_nll_num_metric = student_nll_num.detach().clone()
-        teacher_nll_num_metric = teacher_nll_num.detach().clone()
-        response_tokens_metric = response_tokens.detach().clone()
-        self._all_reduce_in_place(
-            [kl_num_metric, student_nll_num_metric, teacher_nll_num_metric, response_tokens_metric],
-            dp_group,
-        )
-
+        # Metrics are reported as local-rank values (no per-micro-batch NCCL
+        # all_reduce). With dynamic batching each rank sees ~similar token
+        # counts, so the logging rank's ratios (kl_loss = kl_num /
+        # response_tokens, clip_frac = clip_num / response_tokens) are within
+        # ~1% of the global value. Removing the all_reduce eliminates one NCCL
+        # collective per micro-batch, which dominated GPU idle time on the
+        # full_vocab path.
         metrics = {
-            "kl_num": kl_num_metric.float().item(),
-            "student_nll_num": student_nll_num_metric.float().item(),
-            "teacher_nll_num": teacher_nll_num_metric.float().item(),
-            "response_tokens": response_tokens_metric.float().item(),
+            "kl_num": kl_num.detach().float().item(),
+            "student_nll_num": student_nll_num.detach().float().item(),
+            "teacher_nll_num": teacher_nll_num.detach().float().item(),
+            "response_tokens": response_tokens.detach().float().item(),
+            "clip_num": clip_num.detach().float().item(),
+            "kl_p50": kl_p50.float().item(),
+            "kl_p95": kl_p95.float().item(),
+            "kl_p99": kl_p99.float().item(),
+            "kl_max": kl_max.float().item(),
         }
         return loss, metrics
 
@@ -371,20 +485,31 @@ class KLTrainer:
         teacher_nll_num = float(sum(metrics.get("teacher_nll_num", [])))
         response_tokens = float(sum(metrics.get("response_tokens", [])))
         response_tokens = max(response_tokens, 1.0)
+        clip_num = float(sum(metrics.get("clip_num", [])))
+
+        def _mean(key: str) -> float:
+            values = metrics.get(key, [])
+            return float(sum(values) / len(values)) if values else 0.0
 
         return {
             "kl_loss": kl_num / response_tokens,
             "student_perplexity": math.exp(student_nll_num / response_tokens),
             "teacher_perplexity": math.exp(teacher_nll_num / response_tokens),
             "response_tokens": response_tokens,
+            "clip_frac": clip_num / response_tokens,
+            "kl_p50": _mean("kl_p50"),
+            "kl_p95": _mean("kl_p95"),
+            "kl_p99": _mean("kl_p99"),
+            "kl_max": max(metrics.get("kl_max", [0.0])) if metrics.get("kl_max") else 0.0,
         }
 
     def _save_checkpoint(self):
         ckpt_dir = os.path.join(self.config.model_save_dir, f"global_step_{self.global_step}")
+        max_keep = self.config.max_ckpt_to_keep if self.config.max_ckpt_to_keep > 0 else None
         self.student_engine.save_checkpoint(
             local_path=ckpt_dir,
             global_step=self.global_step,
-            max_ckpt_to_keep=None,
+            max_ckpt_to_keep=max_keep,
         )
         logger.info("Checkpoint saved to %s", ckpt_dir)
 
@@ -393,6 +518,36 @@ class KLTrainer:
         if not ckpt_dirs:
             raise FileNotFoundError(f"No FSDP checkpoints found under {self.config.model_save_dir}")
         return max(ckpt_dirs, key=lambda path: int(path.rsplit("_", 1)[-1]))
+
+    def _maybe_resume_from_checkpoint(self) -> int:
+        """Load latest FSDP checkpoint if present. Returns resumed global_step (0 if fresh)."""
+        ckpt_dirs = glob.glob(os.path.join(self.config.model_save_dir, "global_step_*"))
+        if not ckpt_dirs:
+            if self.rank == 0:
+                print(
+                    f"[RESUME] No checkpoint found under {self.config.model_save_dir} — "
+                    f"training from scratch (global_step=0)",
+                    flush=True,
+                )
+            return 0
+        latest = max(ckpt_dirs, key=lambda path: int(path.rsplit("_", 1)[-1]))
+        step = int(latest.rsplit("_", 1)[-1])
+        if self.rank == 0:
+            print(
+                "\n" + "=" * 70 + "\n"
+                f"[RESUME] Loading FSDP checkpoint\n"
+                f"[RESUME]   path:        {latest}\n"
+                f"[RESUME]   global_step: {step}\n"
+                f"[RESUME]   world_size:  {self.world_size}\n"
+                + "=" * 70,
+                flush=True,
+            )
+        logger.info("Resuming from checkpoint %s (global_step=%s)", latest, step)
+        self.student_engine.load_checkpoint(local_path=latest, del_local_after_load=False)
+        self.global_step = step
+        if self.rank == 0:
+            print(f"[RESUME] Checkpoint loaded — resuming training at global_step={step}\n", flush=True)
+        return step
 
     def _broadcast_rank0_error(self, error_message: str | None) -> str | None:
         error_holder = [error_message]
@@ -437,7 +592,7 @@ class KLTrainer:
         if exported_error is not None:
             raise RuntimeError(f"FSDP checkpoint export failed on rank 0: {exported_error}") from rank0_exception
 
-    def train_epoch(self) -> dict[str, float]:
+    def train_epoch(self, skip_batches: int = 0) -> dict[str, float]:
         sampler = getattr(self.train_dataloader, "sampler", None)
         if isinstance(sampler, DistributedSampler):
             sampler.set_epoch(self.epoch)
@@ -459,6 +614,8 @@ class KLTrainer:
 
         with self.student_engine.train_mode():
             for batch_idx, batch in enumerate(progress_bar):
+                if batch_idx < skip_batches:
+                    continue
                 teacher_batch = self._make_teacher_batch(batch)
                 with self.teacher_engine.eval_mode():
                     teacher_output = self.teacher_engine.forward_backward_batch(
@@ -506,6 +663,12 @@ class KLTrainer:
                                 "train/step_time_sec": step_time,
                                 "train/epoch": self.epoch,
                                 "train/global_step": self.global_step,
+                                "train/kl_p50": step_metrics["kl_p50"],
+                                "train/kl_p95": step_metrics["kl_p95"],
+                                "train/kl_p99": step_metrics["kl_p99"],
+                                "train/kl_max": step_metrics["kl_max"],
+                                "train/clip_frac": step_metrics["clip_frac"],
+                                "train/kl_token_clip": self.config.kl_token_clip,
                             }
                         )
 
@@ -545,9 +708,25 @@ class KLTrainer:
         logger.info("Total epochs: %s", self.config.total_epochs)
         logger.info("Total optimizer steps: %s", self.total_training_steps)
 
-        for epoch in range(self.config.total_epochs):
+        resumed_step = self._maybe_resume_from_checkpoint()
+        batches_per_epoch = len(self.train_dataloader)
+        grad_accum = self.config.gradient_accumulation_steps
+        optim_steps_per_epoch = max(1, math.ceil(batches_per_epoch / grad_accum))
+        start_epoch = resumed_step // optim_steps_per_epoch
+        steps_done_in_epoch = resumed_step % optim_steps_per_epoch
+        initial_skip_batches = steps_done_in_epoch * grad_accum
+        if resumed_step > 0:
+            logger.info(
+                "Resume plan: start_epoch=%s, skip_batches=%s (optim_steps_per_epoch=%s)",
+                start_epoch,
+                initial_skip_batches,
+                optim_steps_per_epoch,
+            )
+
+        for epoch in range(start_epoch, self.config.total_epochs):
             self.epoch = epoch
-            epoch_metrics = self.train_epoch()
+            skip_batches = initial_skip_batches if epoch == start_epoch else 0
+            epoch_metrics = self.train_epoch(skip_batches=skip_batches)
             if self.is_logging:
                 logger.info("Epoch %s metrics: %s", epoch + 1, epoch_metrics)
                 if HAS_WANDB:
@@ -568,8 +747,8 @@ class KLTrainer:
         if self.config.save_merged_model or self.config.run_eval_after_training:
             self._export_hf_model()
 
-        if self.config.run_eval_after_training:
-            self.run_evaluation()
+        # Evaluation is launched from the shell driver after this process exits,
+        # so all FSDP/training state is released before vLLM claims the GPUs.
 
     def run_evaluation(self):
         if not self.is_logging:

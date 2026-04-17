@@ -68,20 +68,32 @@ async def start_server(config):
     return server_handles, server_addresses
 
 
-async def submit_request(server_address, **chat_complete_request):
-    try:
-        extra_headers = chat_complete_request.pop("extra_headers", {})
-        timeout = aiohttp.ClientTimeout(total=None)
-        session = aiohttp.ClientSession(timeout=timeout)
-        async with session.post(
-            url=f"http://{server_address}/v1/chat/completions",
-            headers={"Authorization": "Bearer token-abc123", **extra_headers},
-            json=chat_complete_request,
-        ) as resp:
-            data = await resp.json()
-            return ChatCompletion(**data)
-    finally:
-        await session.close()
+async def submit_request(server_address, max_retries=5, retry_base_delay=2.0, **chat_complete_request):
+    extra_headers = chat_complete_request.pop("extra_headers", {})
+    for attempt in range(max_retries + 1):
+        try:
+            timeout = aiohttp.ClientTimeout(total=None)
+            session = aiohttp.ClientSession(timeout=timeout)
+            try:
+                async with session.post(
+                    url=f"http://{server_address}/v1/chat/completions",
+                    headers={"Authorization": "Bearer token-abc123", **extra_headers},
+                    json=chat_complete_request,
+                ) as resp:
+                    data = await resp.json()
+                    if resp.status != 200:
+                        error_msg = data.get("error", {}).get("message", str(data))
+                        raise RuntimeError(f"Server returned {resp.status}: {error_msg}")
+                    return ChatCompletion(**data)
+            finally:
+                await session.close()
+        except Exception as e:
+            if attempt < max_retries:
+                delay = retry_base_delay * (2 ** attempt)
+                print(f"[Retry {attempt + 1}/{max_retries}] Request to {server_address} failed: {e}. Retrying in {delay:.0f}s...")
+                await asyncio.sleep(delay)
+            else:
+                raise
 
 
 async def submit_indexed_request(request_index: int, server_address: str, **chat_complete_request):
