@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 set -euxo pipefail
 
+# Ray needs a local filesystem for sockets, not Lustre
+export RAY_TMPDIR="${RAY_TMPDIR:-${SLURM_TMPDIR:-/tmp}}"
+
 # Files and paths
-DATA_ROOT="${SINGLE_WISE_DPO_DATA_ROOT:-/data/data/jiangli/data/pens}"
+DATA_ROOT="${SINGLE_WISE_DPO_DATA_ROOT:-/home/lijiang3/projects/def-y7ding/lijiang3/hf_cache/data}"
 INPUT_VARIANT="${SINGLE_WISE_DPO_INPUT_VARIANT:-click_hist}"
 SAMPLE_VARIANT="${SINGLE_WISE_DPO_SAMPLE_VARIANT:-all}"
 LOSS_TYPE="${POINTWISE_DPO_LOSS_TYPE:-${SINGLE_WISE_DPO_LOSS_TYPE:-single_wise_dpo}}"
@@ -11,12 +14,12 @@ HAS_EXPLICIT_TRAIN_FILE=false
 if [[ -n "${TRAIN_FILE}" ]]; then
   HAS_EXPLICIT_TRAIN_FILE=true
 fi
-MODEL_DIR="${SINGLE_WISE_DPO_MODEL_DIR:-/data/data/jiangli/huggingface/hub/models--Qwen--Qwen3.5-4B/snapshots/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a}"
+MODEL_DIR="${SINGLE_WISE_DPO_MODEL_DIR:-/home/lijiang3/projects/def-y7ding/lijiang3/hf_cache/hub/models--Qwen--Qwen3-8B/snapshots/b968826d9c46dd6066d109eabc6255188de91218}"
 TOKENIZER_PATH="${SINGLE_WISE_DPO_TOKENIZER_PATH:-${MODEL_DIR}}"
 REFERENCE_MODEL_DIR="${SINGLE_WISE_DPO_REFERENCE_MODEL_DIR:-}"
 PROJECT_NAME="${SINGLE_WISE_DPO_PROJECT_NAME:-PENS}"
 USE_LORA="${SINGLE_WISE_DPO_USE_LORA:-true}"
-CKPT_ROOT="${SINGLE_WISE_DPO_CKPT_ROOT:-/data/data/jiangli/ckpt/PENS}"
+CKPT_ROOT="${SINGLE_WISE_DPO_CKPT_ROOT:-/home/lijiang3/projects/def-y7ding/lijiang3/hf_cache/models/ckpt/PENS}"
 PYTHON_BIN="${SINGLE_WISE_DPO_PYTHON_BIN:-python3}"
 EXPORT_HF_MERGED="${SINGLE_WISE_DPO_EXPORT_HF_MERGED:-true}"
 EXPORT_HF_MERGED_DTYPE="${SINGLE_WISE_DPO_EXPORT_HF_MERGED_DTYPE:-bfloat16}"
@@ -29,9 +32,9 @@ RESPONSE_KEY="${SINGLE_WISE_DPO_RESPONSE_KEY:-response}"
 LABEL_KEY="${SINGLE_WISE_DPO_LABEL_KEY:-label}"
 S_DWELL_KEY="${SINGLE_WISE_DPO_S_DWELL_KEY:-s_dwell}"
 P_CTR_KEY="${SINGLE_WISE_DPO_P_CTR_KEY:-p_ctr}"
-TRAIN_BATCH_SIZE="${SINGLE_WISE_DPO_TRAIN_BATCH_SIZE:-128}"
-MAX_PROMPT_LENGTH="${SINGLE_WISE_DPO_MAX_PROMPT_LENGTH:-3072}"
-MAX_RESPONSE_LENGTH="${SINGLE_WISE_DPO_MAX_RESPONSE_LENGTH:-32}"
+TRAIN_BATCH_SIZE="${SINGLE_WISE_DPO_TRAIN_BATCH_SIZE:-256}"
+MAX_PROMPT_LENGTH="${SINGLE_WISE_DPO_MAX_PROMPT_LENGTH:-8192}"
+MAX_RESPONSE_LENGTH="${SINGLE_WISE_DPO_MAX_RESPONSE_LENGTH:-48}"
 PROMPT_TRUNCATION="${SINGLE_WISE_DPO_PROMPT_TRUNCATION:-}"
 DATALOADER_NUM_WORKERS="${SINGLE_WISE_DPO_DATALOADER_NUM_WORKERS:-8}"
 
@@ -39,19 +42,29 @@ DATALOADER_NUM_WORKERS="${SINGLE_WISE_DPO_DATALOADER_NUM_WORKERS:-8}"
 BETA="${SINGLE_WISE_DPO_BETA:-0.5}"
 ALPHA_TAU="${SINGLE_WISE_DPO_ALPHA_TAU:-0.2}"
 ALPHA_K="${SINGLE_WISE_DPO_ALPHA_K:-10.0}"
+ALPHA_MAX="${SINGLE_WISE_DPO_ALPHA_MAX:-1.0}"
 LAMBDA_MAX="${SINGLE_WISE_DPO_LAMBDA_MAX:-2.0}"
 LAMBDA_GAMMA="${SINGLE_WISE_DPO_LAMBDA_GAMMA:-2.0}"
+AVERAGE_LOG_PROB="${SINGLE_WISE_DPO_AVERAGE_LOG_PROB:-false}"
+
+# Optimizer / LR schedule
+ACTOR_LR="${SINGLE_WISE_DPO_ACTOR_LR:-1e-6}"
+ACTOR_LR_SCHEDULER_TYPE="${SINGLE_WISE_DPO_ACTOR_LR_SCHEDULER_TYPE:-constant}"
+ACTOR_LR_WARMUP_STEPS_RATIO="${SINGLE_WISE_DPO_ACTOR_LR_WARMUP_STEPS_RATIO:-0.0}"
+ACTOR_LR_MIN_RATIO="${SINGLE_WISE_DPO_ACTOR_LR_MIN_RATIO:-0.1}"
+ACTOR_LR_NUM_CYCLES="${SINGLE_WISE_DPO_ACTOR_LR_NUM_CYCLES:-0.5}"
+ACTOR_WEIGHT_DECAY="${SINGLE_WISE_DPO_ACTOR_WEIGHT_DECAY:-0.01}"
 
 # Model and parallelism
-NNODES="${SINGLE_WISE_DPO_NNODES:-1}"
-N_GPUS_PER_NODE="${SINGLE_WISE_DPO_N_GPUS_PER_NODE:-2}"
+NNODES="${SINGLE_WISE_DPO_NNODES:-4}"
+N_GPUS_PER_NODE="${SINGLE_WISE_DPO_N_GPUS_PER_NODE:-4}"
 ROLLOUT_TP_SIZE="${SINGLE_WISE_DPO_ROLLOUT_TP_SIZE:-1}"
 ATTN_IMPLEMENTATION="${SINGLE_WISE_DPO_ATTN_IMPLEMENTATION:-flash_attention_2}"
 MODEL_DTYPE="${SINGLE_WISE_DPO_MODEL_DTYPE:-bf16}"
 USE_REMOVE_PADDING="${SINGLE_WISE_DPO_USE_REMOVE_PADDING:-false}"
 ALLOW_UNSUPPORTED_REMOVE_PADDING="${SINGLE_WISE_DPO_ALLOW_UNSUPPORTED_REMOVE_PADDING:-true}"
-USE_DYNAMIC_BSZ="${SINGLE_WISE_DPO_USE_DYNAMIC_BSZ:-false}"
-MAX_TOKEN_LEN_PER_GPU="${SINGLE_WISE_DPO_MAX_TOKEN_LEN_PER_GPU:-16384}"
+USE_DYNAMIC_BSZ="${SINGLE_WISE_DPO_USE_DYNAMIC_BSZ:-true}"
+MAX_TOKEN_LEN_PER_GPU="${SINGLE_WISE_DPO_MAX_TOKEN_LEN_PER_GPU:-32768}"
 LORA_RANK="${SINGLE_WISE_DPO_LORA_RANK:-64}"
 LORA_ALPHA="${SINGLE_WISE_DPO_LORA_ALPHA:-128}"
 # LORA_TARGET_MODULES="${SINGLE_WISE_DPO_LORA_TARGET_MODULES:-all-linear}"
@@ -61,11 +74,17 @@ LORA_TARGET_PARAMETERS="${SINGLE_WISE_DPO_LORA_TARGET_PARAMETERS:-}"
 LORA_EXCLUDE_MODULES="${SINGLE_WISE_DPO_LORA_EXCLUDE_MODULES:-}"
 
 # Training and logging
-MICRO_BATCH_SIZE="${SINGLE_WISE_DPO_MICRO_BATCH_SIZE:-16}"
+MICRO_BATCH_SIZE="${SINGLE_WISE_DPO_MICRO_BATCH_SIZE:-8}"
 TOTAL_EPOCHS="${SINGLE_WISE_DPO_TOTAL_EPOCHS:-1}"
 LOG_FREQ="${SINGLE_WISE_DPO_LOG_FREQ:-10}"
 SAVE_FREQ="${SINGLE_WISE_DPO_SAVE_FREQ:--1}"
 SAVE_FREQ_EPOCHS="${SINGLE_WISE_DPO_SAVE_FREQ_EPOCHS:-1}"
+# Rolling-ckpt policy: when enabled, step-saves keep only the most recent one
+# (previous rolling ckpt is deleted on each new step-save); epoch-saves are
+# always preserved. Pair with RESUME_MODE=auto for resilient pre-emption recovery.
+KEEP_ONLY_LATEST_ROLLING_CKPT="${SINGLE_WISE_DPO_KEEP_ONLY_LATEST_ROLLING_CKPT:-false}"
+MAX_ACTOR_CKPT_TO_KEEP="${SINGLE_WISE_DPO_MAX_ACTOR_CKPT_TO_KEEP:-}"
+RESUME_MODE="${SINGLE_WISE_DPO_RESUME_MODE:-auto}"
 USE_LENGTH_BUCKET_SAMPLER="${SINGLE_WISE_DPO_USE_LENGTH_BUCKET_SAMPLER:-}"
 LENGTH_BUCKET_SIZE_MULTIPLIER="${SINGLE_WISE_DPO_LENGTH_BUCKET_SIZE_MULTIPLIER:-50}"
 LENGTH_ESTIMATION_MODE="${SINGLE_WISE_DPO_LENGTH_ESTIMATION_MODE:-char}"
@@ -77,8 +96,8 @@ REFERENCE_LOGPS_ALLOW_CROSS_NAMESPACE_REUSE="${SINGLE_WISE_DPO_REFERENCE_LOGPS_A
 REFERENCE_LOGPS_ALLOW_SAMPLE_ID_REUSE="${SINGLE_WISE_DPO_REFERENCE_LOGPS_ALLOW_SAMPLE_ID_REUSE:-true}"
 REFERENCE_LOGPS_NUM_WORKERS="${SINGLE_WISE_DPO_REFERENCE_LOGPS_NUM_WORKERS:-0}"
 REFERENCE_LOGPS_ROWS_PER_TASK="${SINGLE_WISE_DPO_REFERENCE_LOGPS_ROWS_PER_TASK:-2048}"
-REFERENCE_LOGPS_MAX_BATCH_SIZE="${SINGLE_WISE_DPO_REFERENCE_LOGPS_MAX_BATCH_SIZE:-2}"
-REFERENCE_LOGPS_MAX_BATCHED_TOKENS="${SINGLE_WISE_DPO_REFERENCE_LOGPS_MAX_BATCHED_TOKENS:-8192}"
+REFERENCE_LOGPS_MAX_BATCH_SIZE="${SINGLE_WISE_DPO_REFERENCE_LOGPS_MAX_BATCH_SIZE:-4}"
+REFERENCE_LOGPS_MAX_BATCHED_TOKENS="${SINGLE_WISE_DPO_REFERENCE_LOGPS_MAX_BATCHED_TOKENS:-16384}"
 
 LOSS_TYPE_NORMALIZED="$(printf '%s' "${LOSS_TYPE}" | tr '[:upper:]' '[:lower:]')"
 case "${LOSS_TYPE_NORMALIZED}" in
@@ -91,7 +110,7 @@ case "${LOSS_TYPE_NORMALIZED}" in
     ;;
   prospect_dpo)
     CONFIG_NAME="dpo_prospect_dpo"
-    DEFAULT_PROMPT_TRUNCATION="left"
+    DEFAULT_PROMPT_TRUNCATION="right"
     DEFAULT_USE_LENGTH_BUCKET_SAMPLER="false"
     USE_SINGLE_WISE_LENGTH_BUCKET_CONFIG=false
     REQUIRE_PROSPECT_COLUMNS=true
@@ -175,13 +194,39 @@ sanitize_name_component() {
   printf '%s' "${value}"
 }
 
+# Walk up past generic leaf dirs (hf_merged, actor, global_step_N) until we
+# hit a meaningful experiment identifier. Without this, every SFT warmup path
+# ending in /hf_merged collapses to the slug "hf_merged", so switching base
+# models mid-run (e.g. Qwen3-4B base -> Qwen3-4B-Instruct-2507) lands in the
+# same CKPT_DIR and `resume_mode=auto` loads an adapter trained on the wrong
+# base. Observed 2026-04-22: that collision is what broke prospect-DPO 5341.
+_walk_up_to_meaningful_name() {
+  local path="${1%/}"
+  local candidate="$(basename "${path}")"
+  while [[ -n "${candidate}" ]]; do
+    case "${candidate}" in
+      hf_merged|hf_merged_final|hf_merged_fixed|huggingface|actor|hf_model|global_step_*)
+        path="$(dirname "${path}")"
+        if [[ -z "${path}" || "${path}" == "/" ]]; then
+          break
+        fi
+        candidate="$(basename "${path}")"
+        ;;
+      *)
+        break
+        ;;
+    esac
+  done
+  printf '%s' "${candidate}"
+}
+
 model_slug() {
   local model_path="${1%/}"
   local candidate
   if [[ "${model_path}" == */snapshots/* ]]; then
     candidate="$(basename "$(dirname "$(dirname "${model_path}")")")"
   else
-    candidate="$(basename "${model_path}")"
+    candidate="$(_walk_up_to_meaningful_name "${model_path}")"
   fi
 
   if [[ "${candidate}" == models--* ]]; then
@@ -198,7 +243,7 @@ reference_model_slug() {
   if [[ "${model_path}" == */snapshots/* ]]; then
     candidate="$(basename "$(dirname "$(dirname "${model_path}")")")"
   else
-    candidate="$(basename "${model_path}")"
+    candidate="$(_walk_up_to_meaningful_name "${model_path}")"
   fi
   candidate="${candidate#models--}"
   candidate="${candidate//--/_}"
@@ -430,7 +475,10 @@ fi
 
 REFERENCE_MODEL_EFFECTIVE_DIR="${REFERENCE_MODEL_DIR:-${MODEL_DIR}}"
 REFERENCE_MODEL_SLUG="$(reference_model_slug "${REFERENCE_MODEL_EFFECTIVE_DIR}")"
-DEFAULT_EXPERIMENT_NAME="${LOSS_TYPE_NORMALIZED}_${INPUT_VARIANT}_${SAMPLE_VARIANT}_${FINETUNE_VARIANT}_${MODEL_SLUG}"
+# Timestamp the experiment/save path so re-runs never clobber or silently
+# resume from a stale ckpt. Override SINGLE_WISE_DPO_RUN_TIMESTAMP to pin.
+SINGLE_WISE_DPO_RUN_TIMESTAMP="${SINGLE_WISE_DPO_RUN_TIMESTAMP:-$(date +%Y%m%d_%H%M%S)}"
+DEFAULT_EXPERIMENT_NAME="${LOSS_TYPE_NORMALIZED}_${INPUT_VARIANT}_${SAMPLE_VARIANT}_${FINETUNE_VARIANT}_${MODEL_SLUG}_${SINGLE_WISE_DPO_RUN_TIMESTAMP}"
 EXPERIMENT_NAME="${SINGLE_WISE_DPO_EXPERIMENT_NAME:-${DEFAULT_EXPERIMENT_NAME}}"
 CKPT_DIR="${SINGLE_WISE_DPO_CKPT_DIR:-${CKPT_ROOT}/${EXPERIMENT_NAME}}"
 
@@ -501,9 +549,11 @@ if [[ "${LOSS_TYPE_NORMALIZED}" == "prospect_dpo" ]]; then
   extra_args+=("data.p_ctr_key=${P_CTR_KEY}")
   extra_args+=("algorithm.prospect_dpo_alpha_tau=${ALPHA_TAU}")
   extra_args+=("algorithm.prospect_dpo_alpha_k=${ALPHA_K}")
+  extra_args+=("algorithm.prospect_dpo_alpha_max=${ALPHA_MAX}")
   extra_args+=("algorithm.prospect_dpo_lambda_max=${LAMBDA_MAX}")
   extra_args+=("algorithm.prospect_dpo_lambda_gamma=${LAMBDA_GAMMA}")
 fi
+extra_args+=("algorithm.average_log_prob=${AVERAGE_LOG_PROB}")
 
 cmd=(
   "${PYTHON_BIN}"
@@ -523,6 +573,12 @@ cmd=(
   "algorithm.dpo_beta=${BETA}"
   "algorithm.dpo_loss_type=${LOSS_TYPE_NORMALIZED}"
   "algorithm.reference_free=false"
+  "actor_rollout_ref.actor.optim.lr=${ACTOR_LR}"
+  "actor_rollout_ref.actor.optim.lr_scheduler_type=${ACTOR_LR_SCHEDULER_TYPE}"
+  "actor_rollout_ref.actor.optim.lr_warmup_steps_ratio=${ACTOR_LR_WARMUP_STEPS_RATIO}"
+  "actor_rollout_ref.actor.optim.min_lr_ratio=${ACTOR_LR_MIN_RATIO}"
+  "actor_rollout_ref.actor.optim.num_cycles=${ACTOR_LR_NUM_CYCLES}"
+  "actor_rollout_ref.actor.optim.weight_decay=${ACTOR_WEIGHT_DECAY}"
   "data.prompt_key=${PROMPT_KEY}"
   "data.response_key=${RESPONSE_KEY}"
   "data.label_key=${LABEL_KEY}"
@@ -543,8 +599,13 @@ cmd=(
   "trainer.n_gpus_per_node=${N_GPUS_PER_NODE}"
   "trainer.default_local_dir=${CKPT_DIR}"
   "trainer.save_freq=${SAVE_FREQ}"
+  "trainer.resume_mode=${RESUME_MODE}"
   "+trainer.log_freq=${LOG_FREQ}"
+  "+trainer.keep_only_latest_rolling_ckpt=${KEEP_ONLY_LATEST_ROLLING_CKPT}"
 )
+if [[ -n "${MAX_ACTOR_CKPT_TO_KEEP}" ]]; then
+  cmd+=("+trainer.max_actor_ckpt_to_keep=${MAX_ACTOR_CKPT_TO_KEEP}")
+fi
 
 if [[ "${USE_SINGLE_WISE_LENGTH_BUCKET_CONFIG}" == "true" ]]; then
   cmd+=(

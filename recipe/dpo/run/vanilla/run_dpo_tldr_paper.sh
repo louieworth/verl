@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euxo pipefail
 
-TRAIN_FILE="${DPO_TLDR_TRAIN_FILE:-/data/data/jiangli/parquet/dpo_tldr/train.parquet}"
-VAL_FILE="${DPO_TLDR_VAL_FILE:-/data/data/jiangli/parquet/dpo_tldr/val.parquet}"
+TRAIN_FILE="${DPO_TLDR_TRAIN_FILE:-/home/lijiang3/projects/def-y7ding/lijiang3/hf_cache/data/dpo_tldr/train.parquet}"
+VAL_FILE="${DPO_TLDR_VAL_FILE:-/home/lijiang3/projects/def-y7ding/lijiang3/hf_cache/data/dpo_tldr/val.parquet}"
 MODEL_DIR="${DPO_TLDR_MODEL_DIR:-Qwen/Qwen3.5-0.8B}"
 TOKENIZER_PATH="${DPO_TLDR_TOKENIZER_PATH:-${MODEL_DIR}}"
 NNODES="${DPO_TLDR_NNODES:-1}"
@@ -14,7 +14,7 @@ USE_REMOVE_PADDING="${DPO_TLDR_USE_REMOVE_PADDING:-false}"
 DYNAMIC_MAX_TOKEN_LEN_PER_GPU="${DPO_TLDR_MAX_TOKEN_LEN_PER_GPU:-8096}"
 PROJECT_NAME="${DPO_TLDR_PROJECT_NAME:-PENS}"
 EXPERIMENT_NAME="${DPO_TLDR_EXPERIMENT_NAME:-dpo_tldr_qwen3_5_0_8b}"
-CKPT_ROOT="${DPO_TLDR_CKPT_ROOT:-/data/data/jiangli/ckpt/PENS}"
+CKPT_ROOT="${DPO_TLDR_CKPT_ROOT:-/home/lijiang3/projects/def-y7ding/lijiang3/hf_cache/models/ckpt/PENS}"
 CKPT_DIR="${DPO_TLDR_CKPT_DIR:-${CKPT_ROOT}/${EXPERIMENT_NAME}}"
 
 mkdir -p "${CKPT_DIR}"

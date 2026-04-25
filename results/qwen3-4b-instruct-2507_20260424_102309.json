@@ -1,0 +1,92 @@
+{
+  "prospect_dpo_click_hist_all_lora_qwen3-4b-instruct-2507_20260424_102309_global_step_1000_hf_merged__thinkOFF__20260425": {
+    "backend": "rouge",
+    "count": 20465,
+    "joined_count": 20554,
+    "skipped_count": 89,
+    "rouge_1_f1": 0.22285422458968174,
+    "rouge_2_f1": 0.06903275963246697,
+    "rouge_l_f1": 0.18779179978284868,
+    "non_empty_prediction_count": 20465,
+    "parse_status_counts": {
+      "boxed": 20465,
+      "empty": 89
+    },
+    "model_path": "/scratch/lijiang3/ckpt/PENS/prospect_dpo_click_hist_all_lora_qwen3-4b-instruct-2507_20260424_102309/global_step_1000/actor/hf_merged",
+    "raw_generation_file": "/project/6093645/lijiang3/verl/gen_results/prospect_dpo_click_hist_all_lora_qwen3-4b-instruct-2507_20260424_102309_global_step_1000_hf_merged_thinkOFF_20260425.parquet",
+    "thinking_mode": false,
+    "date": "20260425"
+  },
+  "prospect_dpo_click_hist_all_lora_qwen3-4b-instruct-2507_20260424_102309_global_step_2000_hf_merged__thinkOFF__20260425": {
+    "backend": "rouge",
+    "count": 20465,
+    "joined_count": 20554,
+    "skipped_count": 89,
+    "rouge_1_f1": 0.2228098929015495,
+    "rouge_2_f1": 0.0687219143112784,
+    "rouge_l_f1": 0.18739606142389165,
+    "non_empty_prediction_count": 20465,
+    "parse_status_counts": {
+      "boxed": 20465,
+      "empty": 89
+    },
+    "model_path": "/scratch/lijiang3/ckpt/PENS/prospect_dpo_click_hist_all_lora_qwen3-4b-instruct-2507_20260424_102309/global_step_2000/actor/hf_merged",
+    "raw_generation_file": "/project/6093645/lijiang3/verl/gen_results/prospect_dpo_click_hist_all_lora_qwen3-4b-instruct-2507_20260424_102309_global_step_2000_hf_merged_thinkOFF_20260425.parquet",
+    "thinking_mode": false,
+    "date": "20260425"
+  },
+  "prospect_dpo_click_hist_all_lora_qwen3-4b-instruct-2507_20260424_102309_global_step_4000_hf_merged__thinkOFF__20260425": {
+    "backend": "rouge",
+    "count": 20465,
+    "joined_count": 20554,
+    "skipped_count": 89,
+    "rouge_1_f1": 0.22288952785069274,
+    "rouge_2_f1": 0.06876657811767148,
+    "rouge_l_f1": 0.1875937264265524,
+    "non_empty_prediction_count": 20465,
+    "parse_status_counts": {
+      "boxed": 20465,
+      "empty": 89
+    },
+    "model_path": "/scratch/lijiang3/ckpt/PENS/prospect_dpo_click_hist_all_lora_qwen3-4b-instruct-2507_20260424_102309/global_step_4000/actor/hf_merged",
+    "raw_generation_file": "/project/6093645/lijiang3/verl/gen_results/prospect_dpo_click_hist_all_lora_qwen3-4b-instruct-2507_20260424_102309_global_step_4000_hf_merged_thinkOFF_20260425.parquet",
+    "thinking_mode": false,
+    "date": "20260425"
+  },
+  "prospect_dpo_click_hist_all_lora_qwen3-4b-instruct-2507_20260424_102309_global_step_4600_hf_merged__thinkOFF__20260425": {
+    "backend": "rouge",
+    "count": 20465,
+    "joined_count": 20554,
+    "skipped_count": 89,
+    "rouge_1_f1": 0.22288144138903462,
+    "rouge_2_f1": 0.06885956610045733,
+    "rouge_l_f1": 0.18763178700175,
+    "non_empty_prediction_count": 20465,
+    "parse_status_counts": {
+      "boxed": 20465,
+      "empty": 89
+    },
+    "model_path": "/scratch/lijiang3/ckpt/PENS/prospect_dpo_click_hist_all_lora_qwen3-4b-instruct-2507_20260424_102309/global_step_4600/actor/hf_merged",
+    "raw_generation_file": "/project/6093645/lijiang3/verl/gen_results/prospect_dpo_click_hist_all_lora_qwen3-4b-instruct-2507_20260424_102309_global_step_4600_hf_merged_thinkOFF_20260425.parquet",
+    "thinking_mode": false,
+    "date": "20260425"
+  },
+  "prospect_dpo_click_hist_all_lora_qwen3-4b-instruct-2507_20260424_102309_global_step_200_hf_merged__thinkOFF__20260425": {
+    "backend": "rouge",
+    "count": 20465,
+    "joined_count": 20554,
+    "skipped_count": 89,
+    "rouge_1_f1": 0.221991343384942,
+    "rouge_2_f1": 0.06863105487546962,
+    "rouge_l_f1": 0.187297385226163,
+    "non_empty_prediction_count": 20465,
+    "parse_status_counts": {
+      "boxed": 20465,
+      "empty": 89
+    },
+    "model_path": "/scratch/lijiang3/ckpt/PENS/prospect_dpo_click_hist_all_lora_qwen3-4b-instruct-2507_20260424_102309/global_step_200/actor/hf_merged",
+    "raw_generation_file": "/project/6093645/lijiang3/verl/gen_results/prospect_dpo_click_hist_all_lora_qwen3-4b-instruct-2507_20260424_102309_global_step_200_hf_merged_thinkOFF_20260425.parquet",
+    "thinking_mode": false,
+    "date": "20260425"
+  }
+}

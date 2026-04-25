@@ -5,9 +5,9 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 cd "${REPO_ROOT}"
 
 PYTHON_BIN="${PYTHON_BIN:-python3}"
-NEWS_FILE="${NEWS_FILE:-/data/data/jiangli/data/pens/extract/news.tsv}"
-TRAIN_FILE="${TRAIN_FILE:-/data/data/jiangli/data/pens/extract/train_unique_balance.tsv}"
-OUTPUT_ROOT="${OUTPUT_ROOT:-/data/data/jiangli/data/pens}"
+NEWS_FILE="${NEWS_FILE:-/home/lijiang3/projects/def-y7ding/lijiang3/hf_cache/data/Microsoft-PeNS/PENS/news.tsv}"
+TRAIN_FILE="${TRAIN_FILE:-/home/lijiang3/projects/def-y7ding/lijiang3/hf_cache/data/Microsoft-PeNS/PENS/train_unique_balance.tsv}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-/home/lijiang3/projects/def-y7ding/lijiang3/hf_cache/data}"
 COMPRESSION="${COMPRESSION:-snappy}"
 WRITE_BATCH_SIZE="${WRITE_BATCH_SIZE:-10000}"
 MAX_INPUT_ROWS="${MAX_INPUT_ROWS:-}"
@@ -24,7 +24,8 @@ if [[ -n "${MAX_INPUT_ROWS}" ]]; then
   COMMON_ARGS+=(--max-input-rows "${MAX_INPUT_ROWS}")
 fi
 
-PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+_SITE_PATHS="$("${PYTHON_BIN}" -c "import sys; print(':'.join(p for p in sys.path if p))")"
+PYTHONPATH="${REPO_ROOT}:${_SITE_PATHS}${PYTHONPATH:+:${PYTHONPATH}}" \
   "${PYTHON_BIN}" -m recipe.dpo.data.prepare_pens_singlewise_dpo "${COMMON_ARGS[@]}" --sample-mode positive_only
-PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+PYTHONPATH="${REPO_ROOT}:${_SITE_PATHS}${PYTHONPATH:+:${PYTHONPATH}}" \
   "${PYTHON_BIN}" -m recipe.dpo.data.prepare_pens_singlewise_dpo "${COMMON_ARGS[@]}" --sample-mode negative_only

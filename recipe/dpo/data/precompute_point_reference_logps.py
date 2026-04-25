@@ -143,6 +143,7 @@ def flush_pending_batch(
     model,
     device: torch.device,
     autocast_dtype: torch.dtype,
+    average_log_prob: bool = False,
 ) -> tuple[list[int], np.ndarray]:
     batch_indices = [idx for idx, _ in pending]
     batch_samples = [sample for _, sample in pending]
@@ -176,7 +177,7 @@ def flush_pending_batch(
         logits = outputs.logits
         if logits.dtype not in (torch.float16, torch.bfloat16, torch.float32):
             logits = logits.float()
-        sequence_logps = get_batch_logps(logits, batch["labels"], average_log_prob=False)
+        sequence_logps = get_batch_logps(logits, batch["labels"], average_log_prob=average_log_prob)
     return batch_indices, sequence_logps.detach().cpu().numpy().astype(np.float32, copy=False)
 
 
@@ -191,6 +192,7 @@ def compute_reference_logps_for_table(
     autocast_dtype: torch.dtype,
     max_batch_size: int,
     max_batched_tokens: int,
+    average_log_prob: bool = False,
 ) -> np.ndarray:
     prompts = table.column(prompt_key).to_pylist()
     responses = table.column(response_key).to_pylist()
@@ -219,6 +221,7 @@ def compute_reference_logps_for_table(
                 model=model,
                 device=device,
                 autocast_dtype=autocast_dtype,
+                average_log_prob=average_log_prob,
             )
             reference_logps[np.asarray(batch_indices, dtype=np.int64)] = batch_reference_logps
             pending.clear()
@@ -233,6 +236,7 @@ def compute_reference_logps_for_table(
             model=model,
             device=device,
             autocast_dtype=autocast_dtype,
+            average_log_prob=average_log_prob,
         )
         reference_logps[np.asarray(batch_indices, dtype=np.int64)] = batch_reference_logps
 

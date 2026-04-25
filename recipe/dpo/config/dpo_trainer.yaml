@@ -39,8 +39,10 @@ algorithm:
   simpo_gamma: 0.5
   prospect_dpo_alpha_tau: 0.2
   prospect_dpo_alpha_k: 10.0
+  prospect_dpo_alpha_max: 1.0
   prospect_dpo_lambda_max: 2.0
   prospect_dpo_lambda_gamma: 2.0
+  average_log_prob: false
 
 critic:
   enable: false

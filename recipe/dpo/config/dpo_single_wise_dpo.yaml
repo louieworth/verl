@@ -37,6 +37,7 @@ algorithm:
   dpo_loss_type: single_wise_dpo
   dpo_label_smoothing: 0.0
   simpo_gamma: 0.5
+  average_log_prob: false       # set true for SimPO-style length-normalized logps (also applied to ref logps cache)
 
 critic:
   enable: false

@@ -23,21 +23,18 @@ from recipe.dpo.data.prepare_pens_singlewise_dpo import (
 
 csv.field_size_limit(min(sys.maxsize, 2**31 - 1))
 
-STRICT_JSON_OUTPUT = '{"headline":"<personalized headline>"}'
+BOXED_OUTPUT_TEMPLATE = "\\boxed{<personalized headline>}"
 
 OUTPUT_RULES_BLOCK = (
-    "Use exactly the following output format:\n"
-    "```json\n"
-    f"{STRICT_JSON_OUTPUT}\n"
-    "```"
+    "Output the headline wrapped exactly in \\boxed{...}, with no extra text before or after.\n"
+    f"Example: {BOXED_OUTPUT_TEMPLATE}"
 )
 
 EVAL_PROMPT_INSTRUCTION = (
     "Generate a personalized news headline for this user based on the user's reading interests "
     "and the candidate news article.\n"
     "The click history only contains clicked news titles.\n"
-    f"{OUTPUT_RULES_BLOCK}\n"
-    "Do not add any explanation outside the JSON block."
+    f"{OUTPUT_RULES_BLOCK}"
 )
 
 

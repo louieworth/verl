@@ -39,8 +39,10 @@ algorithm:
   simpo_gamma: 0.5
   prospect_dpo_alpha_tau: 0.2
   prospect_dpo_alpha_k: 10.0
+  prospect_dpo_alpha_max: 1.0   # symmetry knob: 1.0 = legacy (α∈(0,1)); 2.0 = α∈[1,2] symmetric with λ
   prospect_dpo_lambda_max: 2.0
   prospect_dpo_lambda_gamma: 2.0
+  average_log_prob: false       # set true for SimPO-style length-normalized logps (also applied to ref logps cache)
 
 critic:
   enable: false

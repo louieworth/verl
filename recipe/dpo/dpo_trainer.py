@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import os
+import shutil
 import time
 from collections import defaultdict
 from pprint import pprint
@@ -117,6 +118,8 @@ class RayDPOTrainer:
         return True
 
     def _use_average_log_prob(self) -> bool:
+        if bool(self.config.algorithm.get("average_log_prob", False)):
+            return True
         return use_average_sequence_log_probs(self.loss_type)
 
     def _create_dataloader(self, train_dataset, val_dataset, collate_fn, train_sampler):
@@ -292,7 +295,7 @@ class RayDPOTrainer:
         return compute_sequence_log_probs(
             ref_output.batch["ref_log_prob"],
             response_mask,
-            average_log_prob=False,
+            average_log_prob=self._use_average_log_prob(),
         )
 
     def _get_point_reference_log_probs(self, batch: DataProto) -> torch.Tensor:
@@ -317,7 +320,7 @@ class RayDPOTrainer:
         return compute_sequence_log_probs(
             policy_output.batch["old_log_probs"],
             response_mask,
-            average_log_prob=False,
+            average_log_prob=self._use_average_log_prob(),
         )
 
     def _validate(self) -> dict[str, float]:
@@ -342,6 +345,7 @@ class RayDPOTrainer:
                         alpha_k=self.config.algorithm.get("prospect_dpo_alpha_k", 10.0),
                         lambda_max=self.config.algorithm.get("prospect_dpo_lambda_max", 2.0),
                         lambda_gamma=self.config.algorithm.get("prospect_dpo_lambda_gamma", 2.0),
+                        alpha_max=self.config.algorithm.get("prospect_dpo_alpha_max", 1.0),
                     )
                     metrics["val/prospect_dpo_loss_pos"].append(stats["positive_loss"].item())
                     metrics["val/prospect_dpo_loss_neg"].append(stats["negative_loss"].item())
@@ -433,12 +437,15 @@ class RayDPOTrainer:
                             alpha_k=self.config.algorithm.get("prospect_dpo_alpha_k", 10.0),
                             lambda_max=self.config.algorithm.get("prospect_dpo_lambda_max", 2.0),
                             lambda_gamma=self.config.algorithm.get("prospect_dpo_lambda_gamma", 2.0),
+                            alpha_max=self.config.algorithm.get("prospect_dpo_alpha_max", 1.0),
+                            average_log_prob=self._use_average_log_prob(),
                             reference_logps=reference_logps,
                         )
                     else:
                         dpo_update_batch = build_single_wise_dpo_update_proto(
                             batch=batch,
                             beta=self.config.algorithm.dpo_beta,
+                            average_log_prob=self._use_average_log_prob(),
                             reference_logps=reference_logps,
                         )
                 else:
@@ -474,6 +481,26 @@ class RayDPOTrainer:
                 )
                 if should_save_by_step or should_save_by_epoch:
                     self._save_checkpoint()
+                    # When keep_only_latest_rolling_ckpt is enabled, treat interval
+                    # (step) saves as rolling: delete the previous rolling ckpt so
+                    # only the most recent one survives. Epoch-end saves are always
+                    # preserved (the epoch boundary resets the rolling tracker).
+                    if self.config.trainer.get("keep_only_latest_rolling_ckpt", False):
+                        prev_rolling = getattr(self, "_last_rolling_step", None)
+                        if should_save_by_epoch:
+                            self._last_rolling_step = None
+                        elif should_save_by_step:
+                            if (
+                                prev_rolling is not None
+                                and prev_rolling != self.global_steps
+                            ):
+                                old = os.path.join(
+                                    self.config.trainer.default_local_dir,
+                                    f"global_step_{prev_rolling}",
+                                )
+                                if os.path.isdir(old):
+                                    shutil.rmtree(old, ignore_errors=True)
+                            self._last_rolling_step = self.global_steps
 
                 test_freq = self.config.trainer.get("test_freq", -1)
                 if test_freq > 0 and self.global_steps % test_freq == 0:

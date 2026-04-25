@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PENS_URL="${PENS_URL:-https://mind201910small.blob.core.windows.net/release/PENS.tar.gz}"
-PENS_ROOT="${PENS_ROOT:-/data/data/jiangli/datasets/PENS}"
+PENS_ROOT="${PENS_ROOT:-/home/lijiang3/projects/def-y7ding/lijiang3/hf_cache/data/PENS}"
 PENS_ARCHIVE="${PENS_ARCHIVE:-${PENS_ROOT}/PENS.tar.gz}"
 PENS_EXTRACT="${PENS_EXTRACT:-true}"
 

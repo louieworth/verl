@@ -37,7 +37,11 @@ from vllm.outputs import RequestOutput
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.network_utils import get_tcp_uri, zmq_socket_ctx
 from vllm.v1.engine.async_llm import AsyncLLM
-from vllm.v1.engine.utils import CoreEngine, CoreEngineProcManager, get_engine_zmq_addresses, wait_for_engine_startup
+from vllm.v1.engine.utils import CoreEngine, CoreEngineProcManager, wait_for_engine_startup
+try:
+    from vllm.v1.engine.utils import get_engine_zmq_addresses
+except ImportError:
+    get_engine_zmq_addresses = None
 from vllm.v1.executor import Executor
 
 from verl.utils.config import omega_conf_to_dataclass
@@ -86,10 +90,13 @@ def _register_missing_qwen3_5_causallm() -> None:
     """Register text-only Qwen3.5 CausalLM with hybrid metadata for vLLM."""
 
     from vllm.model_executor.models.registry import ModelRegistry
-    from vllm.model_executor.models.qwen3_5 import (
-        Qwen3_5ForCausalLM,
-        Qwen3_5ForConditionalGeneration,
-    )
+    try:
+        from vllm.model_executor.models.qwen3_5 import (
+            Qwen3_5ForCausalLM,
+            Qwen3_5ForConditionalGeneration,
+        )
+    except ModuleNotFoundError:
+        return
 
     def _get_text_only_mrope_input_positions(self, input_tokens, mm_features):
         if mm_features:

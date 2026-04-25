@@ -29,12 +29,21 @@ class RecipeDPOActor(DataParallelPPOActor):
             return self._update_policy_prospect_dpo(data)
         return self._update_policy_single_wise_dpo(data)
 
-    def _compute_point_policy_logps(self, inputs: dict[str, torch.Tensor], response_mask: torch.Tensor) -> torch.Tensor:
+    def _compute_point_policy_logps(
+        self,
+        inputs: dict[str, torch.Tensor],
+        response_mask: torch.Tensor,
+        average_log_prob: bool = False,
+    ) -> torch.Tensor:
         # Reuse the shared actor forward so point-wise offline DPO benefits from
         # the same response-only logprob path and remove-padding optimization.
         outputs = self._forward_micro_batch(inputs, temperature=1.0, calculate_entropy=False)
         token_logps = outputs["log_probs"]
-        return (token_logps * response_mask.to(token_logps.dtype)).sum(dim=-1)
+        mask = response_mask.to(token_logps.dtype)
+        logp_sum = (token_logps * mask).sum(dim=-1)
+        if average_log_prob:
+            return logp_sum / mask.sum(dim=-1).clamp(min=1.0)
+        return logp_sum
 
     def _iter_pointwise_micro_batches(self, data: DataProto) -> list[DataProto]:
         if self.config.use_dynamic_bsz:
@@ -75,8 +84,10 @@ class RecipeDPOActor(DataParallelPPOActor):
         beta = data.meta_info.get("dpo_beta", 0.1)
         alpha_tau = data.meta_info.get("prospect_dpo_alpha_tau", 0.2)
         alpha_k = data.meta_info.get("prospect_dpo_alpha_k", 10.0)
+        alpha_max = data.meta_info.get("prospect_dpo_alpha_max", 1.0)
         lambda_max = data.meta_info.get("prospect_dpo_lambda_max", 2.0)
         lambda_gamma = data.meta_info.get("prospect_dpo_lambda_gamma", 2.0)
+        average_log_prob = bool(data.meta_info.get("average_log_prob", False))
 
         batch_size = data.batch["input_ids"].shape[0]
         if batch_size == 0:
@@ -102,7 +113,9 @@ class RecipeDPOActor(DataParallelPPOActor):
             loss_weight = sample_labels.shape[0] / batch_size
 
             with torch.autocast(device_type=self.device_name, dtype=self.param_dtype):
-                policy_logps = self._compute_point_policy_logps(inputs, inputs["response_mask"])
+                policy_logps = self._compute_point_policy_logps(
+                    inputs, inputs["response_mask"], average_log_prob=average_log_prob
+                )
                 loss, stats = compute_prospect_dpo_loss(
                     policy_logps=policy_logps,
                     reference_logps=micro_ref_logps,
@@ -114,6 +127,7 @@ class RecipeDPOActor(DataParallelPPOActor):
                     alpha_k=alpha_k,
                     lambda_max=lambda_max,
                     lambda_gamma=lambda_gamma,
+                    alpha_max=alpha_max,
                 )
                 scaled_loss = loss * loss_weight
 
@@ -162,6 +176,7 @@ class RecipeDPOActor(DataParallelPPOActor):
             raise KeyError(f"Missing required single-wise DPO batch keys: {missing_keys}")
 
         beta = data.meta_info.get("dpo_beta", 0.1)
+        average_log_prob = bool(data.meta_info.get("average_log_prob", False))
 
         batch_size = data.batch["input_ids"].shape[0]
         if batch_size == 0:
@@ -185,7 +200,9 @@ class RecipeDPOActor(DataParallelPPOActor):
             loss_weight = sample_labels.shape[0] / batch_size
 
             with torch.autocast(device_type=self.device_name, dtype=self.param_dtype):
-                policy_logps = self._compute_point_policy_logps(inputs, inputs["response_mask"])
+                policy_logps = self._compute_point_policy_logps(
+                    inputs, inputs["response_mask"], average_log_prob=average_log_prob
+                )
                 loss, stats = compute_single_wise_dpo_loss(
                     policy_logps=policy_logps,
                     reference_logps=micro_ref_logps,

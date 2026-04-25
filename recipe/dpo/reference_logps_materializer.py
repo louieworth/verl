@@ -30,6 +30,8 @@ except ImportError:  # pragma: no cover
 def maybe_tqdm(iterable, *, desc: str, total: int | None = None, unit: str = "it"):
     if tqdm is None:
         return iterable
+    if iterable is None:
+        return tqdm(total=total, desc=desc, unit=unit, dynamic_ncols=True)
     return tqdm(iterable, desc=desc, total=total, unit=unit, dynamic_ncols=True)
 
 
@@ -86,6 +88,7 @@ def _reference_namespace(config: DictConfig) -> str:
             "flash_attention_2",
         ),
         "trust_remote_code": bool(config.actor_rollout_ref.model.get("trust_remote_code", False)),
+        "average_log_prob": bool(config.algorithm.get("average_log_prob", False)),
     }
     return _stable_fingerprint(payload)
 
@@ -280,6 +283,7 @@ class ReferenceLogpsWorker:
         self.model.eval().to(self.device)
         self.max_batch_size = worker_config["max_batch_size"]
         self.max_batched_tokens = worker_config["max_batched_tokens"]
+        self.average_log_prob = bool(worker_config.get("average_log_prob", False))
 
     def compute(self, prompts: list[Any], responses: list[Any]) -> list[float]:
         table = pa.table(
@@ -298,6 +302,7 @@ class ReferenceLogpsWorker:
             autocast_dtype=self.model_dtype,
             max_batch_size=self.max_batch_size,
             max_batched_tokens=self.max_batched_tokens,
+            average_log_prob=self.average_log_prob,
         )
         return logps.tolist()
 
@@ -387,6 +392,7 @@ class LocalReferenceLogpsRunner:
         self.model.eval().to(self.device)
         self.max_batch_size = int(config.data.get("reference_logps_max_batch_size", 8))
         self.max_batched_tokens = int(config.data.get("reference_logps_max_batched_tokens", 24576))
+        self.average_log_prob = bool(config.algorithm.get("average_log_prob", False))
 
     def compute(self, prompts: list[Any], responses: list[Any]) -> np.ndarray:
         table = pa.table(
@@ -405,6 +411,7 @@ class LocalReferenceLogpsRunner:
             autocast_dtype=self.model_dtype,
             max_batch_size=self.max_batch_size,
             max_batched_tokens=self.max_batched_tokens,
+            average_log_prob=self.average_log_prob,
         )
 
 
@@ -435,6 +442,7 @@ def _build_worker_pool(config: DictConfig) -> ReferenceWorkerPool | None:
         "trust_remote_code": bool(config.actor_rollout_ref.model.get("trust_remote_code", False)),
         "max_batch_size": int(config.data.get("reference_logps_max_batch_size", 8)),
         "max_batched_tokens": int(config.data.get("reference_logps_max_batched_tokens", 24576)),
+        "average_log_prob": bool(config.algorithm.get("average_log_prob", False)),
         "device": "cuda",
     }
     workers = [ReferenceLogpsWorker.remote(worker_config) for _ in range(num_workers)]
@@ -568,17 +576,17 @@ def _materialize_output(
 
     writer: pq.ParquetWriter | None = None
     progress = maybe_tqdm(
-        range(parquet.num_row_groups),
+        None,
         desc=f"Precomputing ref logps {os.path.basename(path)}",
-        total=parquet.num_row_groups,
-        unit="group",
+        total=total_rows,
+        unit="row",
     )
     rows_done = 0
     rows_reused = 0
     rows_computed = 0
 
     try:
-        for row_group_idx in progress:
+        for row_group_idx in range(parquet.num_row_groups):
             table = parquet.read_row_group(row_group_idx)
             if reference_logps_key in table.column_names:
                 column_idx = table.column_names.index(reference_logps_key)
@@ -624,8 +632,9 @@ def _materialize_output(
                 )
             writer.write_table(table)
             rows_done += table.num_rows
-            if hasattr(progress, "set_postfix"):
-                postfix = {"rows": f"{rows_done}/{total_rows}", "workers": worker_count}
+            if progress is not None:
+                progress.update(table.num_rows)
+                postfix = {"groups": f"{row_group_idx + 1}/{parquet.num_row_groups}", "workers": worker_count}
                 if sample_id_lookup is not None:
                     postfix["reused"] = rows_reused
                     postfix["computed"] = rows_computed

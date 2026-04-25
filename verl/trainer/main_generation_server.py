@@ -16,6 +16,17 @@ Generate responses given a dataset of prompts
 """
 
 import os
+import sys as _sys
+
+try:
+    import pyarrow  # noqa: F401
+    import pyarrow.parquet  # noqa: F401
+except ModuleNotFoundError:
+    _extra = "/cvmfs/soft.computecanada.ca/easybuild/software/2023/x86-64-v3/Compiler/gcccore/arrow/19.0.1/lib/python3.12/site-packages"
+    if _extra not in _sys.path:
+        _sys.path.insert(0, _extra)
+    import pyarrow  # noqa: F401
+    import pyarrow.parquet  # noqa: F401
 
 import aiohttp
 import hydra
@@ -74,6 +85,17 @@ async def submit_request(session: aiohttp.ClientSession, server_address, **chat_
         json=chat_complete_request,
     ) as resp:
         data = await resp.json()
+        # Handle request-level errors (e.g. context length exceeded) without
+        # crashing the whole batch. Returning None lets the caller record an
+        # empty response for this row and continue.
+        if "error" in data or "choices" not in data:
+            err_msg = ""
+            if isinstance(data.get("error"), dict):
+                err_msg = data["error"].get("message", "")
+            else:
+                err_msg = str(data.get("error", data))
+            print(f"[submit_request] skipping failed request: {err_msg[:200]}")
+            return None
         return ChatCompletion(**data)
 
 
@@ -216,6 +238,40 @@ def main(config):
         "max_tokens": config.actor_rollout_ref.rollout.response_length,
     }
 
+    # Optional anti-repetition knobs. Stored under data.* (free OmegaConf dict)
+    # because RolloutConfig is a strict dataclass. vllm_async_server hardcodes
+    # repetition_penalty=1.0 at server init; passing it per-request overrides
+    # that default. See sample payload in /v1/chat/completions docs.
+    _rp = OmegaConf.select(config, "data.repetition_penalty", default=None)
+    if _rp is not None and float(_rp) != 1.0:
+        sampling_params["repetition_penalty"] = float(_rp)
+    _fp = OmegaConf.select(config, "data.frequency_penalty", default=None)
+    if _fp is not None and float(_fp) != 0.0:
+        sampling_params["frequency_penalty"] = float(_fp)
+    _pp = OmegaConf.select(config, "data.presence_penalty", default=None)
+    if _pp is not None and float(_pp) != 0.0:
+        sampling_params["presence_penalty"] = float(_pp)
+    if any(k in sampling_params for k in ("repetition_penalty", "frequency_penalty", "presence_penalty")):
+        print(
+            "Per-request anti-repetition: "
+            f"repetition_penalty={sampling_params.get('repetition_penalty', 1.0)}, "
+            f"frequency_penalty={sampling_params.get('frequency_penalty', 0.0)}, "
+            f"presence_penalty={sampling_params.get('presence_penalty', 0.0)}"
+        )
+
+    # Per-request chat_template_kwargs (e.g. {"enable_thinking": false} for Qwen3).
+    # This bypasses vLLM server-init `default_chat_template_kwargs`, which doesn't
+    # exist on vLLM <0.13. The kwarg is forwarded as a top-level field in the
+    # /v1/chat/completions request body — supported on vLLM 0.12+.
+    # Stored under data.* (free OmegaConf dict) because RolloutConfig is a strict
+    # dataclass and refuses unknown keys.
+    _ctk = OmegaConf.select(config, "data.chat_template_kwargs", default=None)
+    if _ctk is not None:
+        _ctk = OmegaConf.to_container(_ctk, resolve=True) if not isinstance(_ctk, dict) else _ctk
+        if _ctk:
+            sampling_params["chat_template_kwargs"] = _ctk
+            print(f"Per-request chat_template_kwargs: {_ctk}")
+
     from omegaconf import ListConfig
 
     train_files = config.data.train_files
@@ -226,7 +282,8 @@ def main(config):
 
     datasets = []
     for train_file in train_files:
-        dataset = pd.read_parquet(train_file)
+        import pyarrow.parquet as _pq
+        dataset = _pq.read_table(train_file).to_pandas()
         datasets.append(dataset)
 
     # concat dataset
@@ -258,8 +315,12 @@ def main(config):
 
     results = list(itertools.chain.from_iterable(gen_results))
 
-    # extract content from results
-    results = np.array([result.choices[0].message.content for result in results])
+    # extract content from results; None means the request failed (e.g. context
+    # length exceeded) — record an empty string so the row is kept for alignment.
+    num_failed = sum(1 for r in results if r is None)
+    if num_failed:
+        print(f"[main] {num_failed}/{len(results)} requests failed and were recorded as empty responses")
+    results = np.array([("" if result is None else result.choices[0].message.content) for result in results])
     results = np.reshape(results, (-1, n_samples))
 
     assert results.shape == (len(chat_lst), n_samples)

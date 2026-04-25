@@ -116,9 +116,16 @@ def compute_prospect_dpo_alpha(
     s_dwell: torch.Tensor,
     alpha_tau: float,
     alpha_k: float,
+    alpha_max: float = 1.0,
 ) -> torch.Tensor:
+    # α_max=1.0 reproduces the original α ∈ (0, 1) behavior (positive gradient attenuated).
+    # α_max>1.0 makes α ∈ [1, α_max], which is symmetric with λ ∈ [1, λ_max] and
+    # lets every positive sample contribute ≥ the vanilla DPO gradient.
     s_dwell = s_dwell.float().clamp(0.0, 1.0)
-    return torch.sigmoid(alpha_k * (s_dwell - alpha_tau))
+    gate = torch.sigmoid(alpha_k * (s_dwell - alpha_tau))
+    if alpha_max == 1.0:
+        return gate
+    return 1.0 + (alpha_max - 1.0) * gate
 
 
 def compute_prospect_dpo_lambda(
@@ -141,6 +148,7 @@ def compute_prospect_dpo_loss(
     alpha_k: float,
     lambda_max: float,
     lambda_gamma: float,
+    alpha_max: float = 1.0,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     if reference_logps is None:
         raise ValueError("Prospect-DPO requires reference log probabilities")
@@ -149,8 +157,12 @@ def compute_prospect_dpo_loss(
     labels = labels.float()
     positive_mask = labels > 0.5
     negative_mask = ~positive_mask
+    positive_mask_f = positive_mask.float()
+    negative_mask_f = negative_mask.float()
 
-    alpha = compute_prospect_dpo_alpha(s_dwell=s_dwell, alpha_tau=alpha_tau, alpha_k=alpha_k).to(rewards.device)
+    alpha = compute_prospect_dpo_alpha(
+        s_dwell=s_dwell, alpha_tau=alpha_tau, alpha_k=alpha_k, alpha_max=alpha_max
+    ).to(rewards.device)
     lambda_weight = compute_prospect_dpo_lambda(
         p_ctr=p_ctr,
         lambda_max=lambda_max,
@@ -160,29 +172,39 @@ def compute_prospect_dpo_loss(
     positive_losses = torch.sigmoid(-(alpha * rewards))
     negative_losses = torch.sigmoid(lambda_weight * rewards)
 
-    zero = rewards.new_zeros(())
-    positive_loss = positive_losses[positive_mask].mean() if torch.any(positive_mask) else zero
-    negative_loss = negative_losses[negative_mask].mean() if torch.any(negative_mask) else zero
+    # Mask-weighted means (no Python-level `torch.any` branching). This keeps
+    # the autograd graph shape identical across ranks even when a micro-batch
+    # on a given rank is all-positive or all-negative — required for FSDP
+    # allgather/reduce-scatter to stay in sync across ranks. A previous version
+    # used `if torch.any(mask) else zero`, which produced different NCCL
+    # collective sequences per rank and deterministically deadlocked at
+    # the first backward pass (`_ALLGATHER_BASE` hang, seq ~6452 on 8× H100).
+    def _masked_mean(x: torch.Tensor, mask_f: torch.Tensor) -> torch.Tensor:
+        denom = mask_f.sum().clamp(min=1.0)
+        return (x * mask_f).sum() / denom
+
+    positive_loss = _masked_mean(positive_losses, positive_mask_f)
+    negative_loss = _masked_mean(negative_losses, negative_mask_f)
     total_loss = positive_loss + negative_loss
 
     signed_margin = torch.where(positive_mask, rewards, -rewards)
-    positive_reward = rewards[positive_mask].mean() if torch.any(positive_mask) else zero
-    negative_reward = rewards[negative_mask].mean() if torch.any(negative_mask) else zero
-    alpha_mean = alpha[positive_mask].mean() if torch.any(positive_mask) else zero
-    lambda_mean = lambda_weight[negative_mask].mean() if torch.any(negative_mask) else zero
+    positive_reward = _masked_mean(rewards, positive_mask_f)
+    negative_reward = _masked_mean(rewards, negative_mask_f)
+    alpha_mean = _masked_mean(alpha, positive_mask_f)
+    lambda_mean = _masked_mean(lambda_weight, negative_mask_f)
 
     stats = {
         "loss": total_loss,
         "positive_loss": positive_loss,
         "negative_loss": negative_loss,
-        "accuracy": (signed_margin > 0).float().mean() if signed_margin.numel() > 0 else zero,
-        "margin": signed_margin.mean() if signed_margin.numel() > 0 else zero,
-        "reward": rewards.mean() if rewards.numel() > 0 else zero,
+        "accuracy": (signed_margin > 0).float().mean(),
+        "margin": signed_margin.mean(),
+        "reward": rewards.mean(),
         "positive_reward": positive_reward,
         "negative_reward": negative_reward,
         "alpha": alpha_mean,
         "lambda": lambda_mean,
-        "positive_fraction": positive_mask.float().mean() if positive_mask.numel() > 0 else zero,
+        "positive_fraction": positive_mask_f.mean(),
     }
     return total_loss, stats
 
@@ -202,23 +224,33 @@ def compute_single_wise_dpo_loss(
 
     positive_mask = labels > 0.5
     negative_mask = ~positive_mask
-    zero = rewards.new_zeros(())
-    positive_loss = losses[positive_mask].mean() if torch.any(positive_mask) else zero
-    negative_loss = losses[negative_mask].mean() if torch.any(negative_mask) else zero
+    positive_mask_f = positive_mask.float()
+    negative_mask_f = negative_mask.float()
+
+    def _masked_mean(x: torch.Tensor, mask_f: torch.Tensor) -> torch.Tensor:
+        denom = mask_f.sum().clamp(min=1.0)
+        return (x * mask_f).sum() / denom
+
+    # Mask-weighted means keep the autograd graph identical across ranks
+    # even when a micro-batch happens to be all-positive or all-negative.
+    # Required to avoid FSDP allgather desync at backward (see prospect_dpo
+    # loss for the original deadlock signature).
+    positive_loss = _masked_mean(losses, positive_mask_f)
+    negative_loss = _masked_mean(losses, negative_mask_f)
 
     signed_margin = torch.where(positive_mask, rewards, -rewards)
-    positive_reward = rewards[positive_mask].mean() if torch.any(positive_mask) else zero
-    negative_reward = rewards[negative_mask].mean() if torch.any(negative_mask) else zero
+    positive_reward = _masked_mean(rewards, positive_mask_f)
+    negative_reward = _masked_mean(rewards, negative_mask_f)
 
     stats = {
         "loss": losses.mean(),
         "positive_loss": positive_loss,
         "negative_loss": negative_loss,
-        "accuracy": (signed_margin > 0).float().mean() if signed_margin.numel() > 0 else zero,
-        "margin": signed_margin.mean() if signed_margin.numel() > 0 else zero,
-        "reward": rewards.mean() if rewards.numel() > 0 else zero,
+        "accuracy": (signed_margin > 0).float().mean(),
+        "margin": signed_margin.mean(),
+        "reward": rewards.mean(),
         "positive_reward": positive_reward,
         "negative_reward": negative_reward,
-        "positive_fraction": positive_mask.float().mean() if positive_mask.numel() > 0 else zero,
+        "positive_fraction": positive_mask_f.mean(),
     }
     return losses.mean(), stats

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euxo pipefail
 
-TRAIN_FILE="${DPO_HH_TRAIN_FILE:-/data/data/jiangli/parquet/dpo_hh/train.parquet}"
-VAL_FILE="${DPO_HH_VAL_FILE:-/data/data/jiangli/parquet/dpo_hh/val.parquet}"
+TRAIN_FILE="${DPO_HH_TRAIN_FILE:-/home/lijiang3/projects/def-y7ding/lijiang3/hf_cache/data/dpo_hh/train.parquet}"
+VAL_FILE="${DPO_HH_VAL_FILE:-/home/lijiang3/projects/def-y7ding/lijiang3/hf_cache/data/dpo_hh/val.parquet}"
 
 if [[ ! -f "${TRAIN_FILE}" ]]; then
   echo "Missing HH train parquet: ${TRAIN_FILE}" >&2

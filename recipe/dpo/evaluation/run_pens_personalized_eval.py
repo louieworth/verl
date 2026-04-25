@@ -7,7 +7,22 @@ import argparse
 import json
 import os
 import sys
+from datetime import datetime
 from pathlib import Path
+
+# On Compute Canada the venv ships a stub pyarrow wheel; the real module lives
+# in the CVMFS arrow module site-packages. Inject it before importing pandas so
+# `read_parquet` can find an engine without requiring PYTHONPATH to be set.
+try:
+    import pyarrow  # noqa: F401
+except ModuleNotFoundError:
+    _CVMFS_ARROW = (
+        "/cvmfs/soft.computecanada.ca/easybuild/software/2023/x86-64-v3/"
+        "Compiler/gcccore/arrow/19.0.1/lib/python3.12/site-packages"
+    )
+    if _CVMFS_ARROW not in sys.path:
+        sys.path.insert(0, _CVMFS_ARROW)
+    import pyarrow  # noqa: F401
 
 import pandas as pd
 
@@ -23,7 +38,6 @@ from score_pens_predictions import (
     load_references,
     mean,
     parse_reference_list,
-    score_with_python_multi,
     score_with_rouge_package_multi,
 )
 
@@ -65,9 +79,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--raw-file", type=Path, default=env_path("RAW_FILE"))
     parser.add_argument("--result-json-file", type=Path, default=env_path("RESULT_JSON_FILE"))
     parser.add_argument("--model-key", type=str, default=env_default("MODEL_KEY"))
-    parser.add_argument("--backend", choices=["auto", "rouge", "python"], default=env_default("BACKEND", "auto"))
+    parser.add_argument("--backend", choices=["rouge"], default="rouge")
     parser.add_argument("--response-index", type=int, default=int(env_default("RESPONSE_INDEX", "0")))
     parser.add_argument("--align-by-order", action="store_true", default=env_flag("ALIGN_BY_ORDER"))
+    parser.add_argument(
+        "--thinking",
+        choices=["true", "false"],
+        default=env_default("VLLM_ENABLE_THINKING", "false"),
+        help="Whether the generation used vLLM thinking mode. Tagged into the result JSON key.",
+    )
+    parser.add_argument(
+        "--date-tag",
+        type=str,
+        default=env_default("DATE_TAG") or datetime.now().strftime("%Y%m%d"),
+        help="Date tag (default: today YYYYMMDD) appended to the result JSON key.",
+    )
     return parser.parse_args()
 
 
@@ -154,19 +180,8 @@ def score_predictions_frame(
     hypotheses = joined[prediction_key].astype(str).tolist()
     reference_lists = joined["gold_headlines"].tolist()
 
-    backend_used = backend
-    if backend in {"auto", "rouge"}:
-        try:
-            rouge1, rouge2, rougel = score_with_rouge_package_multi(hypotheses, reference_lists)
-            backend_used = "rouge"
-        except Exception:
-            if backend == "rouge":
-                raise
-            rouge1, rouge2, rougel = score_with_python_multi(hypotheses, reference_lists)
-            backend_used = "python"
-    else:
-        rouge1, rouge2, rougel = score_with_python_multi(hypotheses, reference_lists)
-        backend_used = "python"
+    rouge1, rouge2, rougel = score_with_rouge_package_multi(hypotheses, reference_lists)
+    backend_used = "rouge"
 
     return {
         "backend": backend_used,
@@ -180,19 +195,40 @@ def score_predictions_frame(
 
 
 def upsert_result_json(result_file: Path, model_key: str, payload: dict) -> None:
-    result = {}
-    if result_file.exists():
-        with result_file.open("r", encoding="utf-8") as f:
-            existing = json.load(f)
-        if not isinstance(existing, dict):
-            raise ValueError(f"Expected {result_file} to contain a JSON object.")
-        result = existing
+    """Insert-or-update a single model_key in result_file under an exclusive lock.
 
-    result[model_key] = payload
+    Parallel sbatch array tasks writing to the same result.json would race on
+    read-modify-write. We hold an fcntl.flock on a sidecar lock file for the
+    full read-update-write cycle so concurrent writers serialize safely.
+    """
+    import fcntl
+
     result_file.parent.mkdir(parents=True, exist_ok=True)
-    with result_file.open("w", encoding="utf-8") as f:
-        json.dump(result, f, ensure_ascii=False, indent=2)
-        f.write("\n")
+    lock_file = result_file.with_suffix(result_file.suffix + ".lock")
+
+    with lock_file.open("w") as lock_fp:
+        fcntl.flock(lock_fp.fileno(), fcntl.LOCK_EX)
+        try:
+            result = {}
+            if result_file.exists() and result_file.stat().st_size > 0:
+                with result_file.open("r", encoding="utf-8") as f:
+                    content = f.read().strip()
+                if content:
+                    existing = json.loads(content)
+                    if not isinstance(existing, dict):
+                        raise ValueError(f"Expected {result_file} to contain a JSON object.")
+                    result = existing
+
+            result[model_key] = payload
+
+            # Atomic replace: write to a temp file in the same directory, then rename.
+            tmp_path = result_file.with_suffix(result_file.suffix + f".tmp.{os.getpid()}")
+            with tmp_path.open("w", encoding="utf-8") as f:
+                json.dump(result, f, ensure_ascii=False, indent=2)
+                f.write("\n")
+            os.replace(tmp_path, result_file)
+        finally:
+            fcntl.flock(lock_fp.fileno(), fcntl.LOCK_UN)
 
 
 def main() -> None:
@@ -217,7 +253,12 @@ def main() -> None:
     payload["parse_status_counts"] = parse_status_counts
     payload["model_path"] = args.model_path
     payload["raw_generation_file"] = str(args.raw_file)
-    upsert_result_json(args.result_json_file, args.model_key, payload)
+    thinking_on = str(args.thinking).strip().lower() == "true"
+    payload["thinking_mode"] = thinking_on
+    payload["date"] = args.date_tag
+    tagged_key = f"{args.model_key}__think{'ON' if thinking_on else 'OFF'}__{args.date_tag}"
+    upsert_result_json(args.result_json_file, tagged_key, payload)
+    args.model_key = tagged_key
 
     print(
         json.dumps(

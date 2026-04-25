@@ -7,13 +7,11 @@ import argparse
 import ast
 import json
 import math
-import re
-from collections import Counter
 from pathlib import Path
 
 import pandas as pd
 
-STRUCTURED_PARSE_STATUSES = {"fenced_json", "inline_json"}
+STRUCTURED_PARSE_STATUSES = {"fenced_json", "inline_json", "boxed"}
 
 
 def load_table(path: Path) -> pd.DataFrame:
@@ -93,66 +91,6 @@ def flatten_official_test(frame: pd.DataFrame) -> pd.DataFrame:
 
 def normalize_text(text: str) -> str:
     return " ".join(str(text).strip().lower().split())
-
-
-TOKEN_RE = re.compile(r"[a-z0-9]+(?:'[a-z0-9]+)?")
-
-
-def tokenize(text: str) -> list[str]:
-    return TOKEN_RE.findall(normalize_text(text))
-
-
-def rouge_n_f1(hypothesis: str, reference: str, n: int) -> float:
-    hyp_tokens = tokenize(hypothesis)
-    ref_tokens = tokenize(reference)
-    if len(hyp_tokens) < n or len(ref_tokens) < n:
-        return 0.0
-    hyp_ngrams = Counter(tuple(hyp_tokens[i : i + n]) for i in range(len(hyp_tokens) - n + 1))
-    ref_ngrams = Counter(tuple(ref_tokens[i : i + n]) for i in range(len(ref_tokens) - n + 1))
-    overlap = sum((hyp_ngrams & ref_ngrams).values())
-    if overlap == 0:
-        return 0.0
-    precision = overlap / max(sum(hyp_ngrams.values()), 1)
-    recall = overlap / max(sum(ref_ngrams.values()), 1)
-    if precision + recall == 0:
-        return 0.0
-    return 2 * precision * recall / (precision + recall)
-
-
-def lcs_length(x: list[str], y: list[str]) -> int:
-    if not x or not y:
-        return 0
-    dp = [[0] * (len(y) + 1) for _ in range(len(x) + 1)]
-    for i in range(1, len(x) + 1):
-        xi = x[i - 1]
-        for j in range(1, len(y) + 1):
-            if xi == y[j - 1]:
-                dp[i][j] = dp[i - 1][j - 1] + 1
-            else:
-                dp[i][j] = max(dp[i - 1][j], dp[i][j - 1])
-    return dp[-1][-1]
-
-
-def rouge_l_f1(hypothesis: str, reference: str) -> float:
-    hyp_tokens = tokenize(hypothesis)
-    ref_tokens = tokenize(reference)
-    if not hyp_tokens or not ref_tokens:
-        return 0.0
-    lcs = lcs_length(hyp_tokens, ref_tokens)
-    if lcs == 0:
-        return 0.0
-    precision = lcs / len(hyp_tokens)
-    recall = lcs / len(ref_tokens)
-    if precision + recall == 0:
-        return 0.0
-    return 2 * precision * recall / (precision + recall)
-
-
-def compute_with_python(hyps: list[str], refs: list[str]) -> tuple[list[float], list[float], list[float]]:
-    rouge1 = [rouge_n_f1(h, r, 1) for h, r in zip(hyps, refs)]
-    rouge2 = [rouge_n_f1(h, r, 2) for h, r in zip(hyps, refs)]
-    rougel = [rouge_l_f1(h, r) for h, r in zip(hyps, refs)]
-    return rouge1, rouge2, rougel
 
 
 def compute_with_rouge_package(hyps: list[str], refs: list[str]) -> tuple[list[float], list[float], list[float]]:
@@ -303,17 +241,6 @@ def mean(values: list[float]) -> float:
     return float(sum(values) / len(values)) if values else 0.0
 
 
-def score_with_python_multi(hypotheses: list[str], reference_lists: list[list[str]]) -> tuple[list[float], list[float], list[float]]:
-    rouge1 = []
-    rouge2 = []
-    rougel = []
-    for hypothesis, references in zip(hypotheses, reference_lists):
-        rouge1.append(max((rouge_n_f1(hypothesis, reference, 1) for reference in references), default=0.0))
-        rouge2.append(max((rouge_n_f1(hypothesis, reference, 2) for reference in references), default=0.0))
-        rougel.append(max((rouge_l_f1(hypothesis, reference) for reference in references), default=0.0))
-    return rouge1, rouge2, rougel
-
-
 def score_with_rouge_package_multi(
     hypotheses: list[str],
     reference_lists: list[list[str]],
@@ -325,18 +252,31 @@ def score_with_rouge_package_multi(
     rouge2 = []
     rougel = []
     for hypothesis, references in zip(hypotheses, reference_lists):
-        if not references:
+        norm_hyp = normalize_text(hypothesis)
+        if not references or not norm_hyp.strip():
             rouge1.append(0.0)
             rouge2.append(0.0)
             rougel.append(0.0)
             continue
-        scores = evaluator.get_scores(
-            [normalize_text(hypothesis)] * len(references),
-            [normalize_text(reference) for reference in references],
-        )
-        rouge1.append(max(score["rouge-1"]["f"] for score in scores))
-        rouge2.append(max(score["rouge-2"]["f"] for score in scores))
-        rougel.append(max(score["rouge-l"]["f"] for score in scores))
+        norm_refs = [normalize_text(ref) for ref in references]
+        norm_refs = [r for r in norm_refs if r.strip()]
+        if not norm_refs:
+            rouge1.append(0.0)
+            rouge2.append(0.0)
+            rougel.append(0.0)
+            continue
+        try:
+            scores = evaluator.get_scores(
+                [norm_hyp] * len(norm_refs),
+                norm_refs,
+            )
+            rouge1.append(max(score["rouge-1"]["f"] for score in scores))
+            rouge2.append(max(score["rouge-2"]["f"] for score in scores))
+            rougel.append(max(score["rouge-l"]["f"] for score in scores))
+        except ValueError:
+            rouge1.append(0.0)
+            rouge2.append(0.0)
+            rougel.append(0.0)
     return rouge1, rouge2, rougel
 
 
@@ -348,9 +288,9 @@ def main() -> None:
     parser.add_argument(
         "--backend",
         type=str,
-        default="auto",
-        choices=["auto", "rouge", "python"],
-        help="ROUGE backend. `rouge` matches the public PENS repo more closely if installed.",
+        default="rouge",
+        choices=["rouge"],
+        help="ROUGE backend (rouge package).",
     )
     parser.add_argument("--align-by-order", action="store_true", help="Align predictions and references by row order")
     parser.add_argument("--save-per-example", type=Path, default=None, help="Optional output file with per-example scores")
@@ -377,22 +317,8 @@ def main() -> None:
     joined["gold_headline"] = joined["gold_headlines"].apply(lambda refs: refs[0] if refs else "")
     joined["gold_headline_count"] = joined["gold_headlines"].apply(len)
 
-    rouge1: list[float]
-    rouge2: list[float]
-    rougel: list[float]
-    backend_used = args.backend
-    if args.backend in {"auto", "rouge"}:
-        try:
-            rouge1, rouge2, rougel = score_with_rouge_package_multi(hyps, reference_lists)
-            backend_used = "rouge"
-        except Exception:
-            if args.backend == "rouge":
-                raise
-            rouge1, rouge2, rougel = score_with_python_multi(hyps, reference_lists)
-            backend_used = "python"
-    else:
-        rouge1, rouge2, rougel = score_with_python_multi(hyps, reference_lists)
-        backend_used = "python"
+    rouge1, rouge2, rougel = score_with_rouge_package_multi(hyps, reference_lists)
+    backend_used = "rouge"
 
     joined["rouge_1_f1"] = rouge1
     joined["rouge_2_f1"] = rouge2

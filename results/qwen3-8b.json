@@ -1,0 +1,84 @@
+{
+  "qwen3-8b__thinkON__20260415": {
+    "backend": "rouge",
+    "count": 20461,
+    "joined_count": 20554,
+    "skipped_count": 93,
+    "rouge_1_f1": 0.18735444028280962,
+    "rouge_2_f1": 0.05060442098595758,
+    "rouge_l_f1": 0.15945832266572227,
+    "non_empty_prediction_count": 20461,
+    "parse_status_counts": {
+      "inline_json": 17335,
+      "fenced_json": 3126,
+      "empty": 89,
+      "reasoning_no_answer": 4
+    },
+    "model_path": "/home/lijiang3/projects/def-y7ding/lijiang3/hf_cache/hub/models--Qwen--Qwen3-8B/snapshots/b968826d9c46dd6066d109eabc6255188de91218",
+    "raw_generation_file": "/lustre06/project/6093645/lijiang3/verl/gen_results/qwen3-8b_thinkON_20260415.parquet",
+    "thinking_mode": true,
+    "date": "20260415"
+  },
+  "prospect_dpo_click_hist_all_lora_qwen3-8b_global_step_5341_hf_merged__thinkOFF__20260415": {
+    "backend": "rouge",
+    "count": 19923,
+    "joined_count": 20554,
+    "skipped_count": 631,
+    "rouge_1_f1": 0.242326495616557,
+    "rouge_2_f1": 0.08366415711885539,
+    "rouge_l_f1": 0.20878915223587965,
+    "non_empty_prediction_count": 19923,
+    "parse_status_counts": {
+      "fenced_json": 19667,
+      "missing_structured_output": 524,
+      "inline_json": 256,
+      "malformed_json_output": 106,
+      "empty": 1
+    },
+    "model_path": "/scratch/lijiang3/ckpt/PENS/prospect_dpo_click_hist_all_lora_qwen3-8b/global_step_5341/actor/hf_merged",
+    "raw_generation_file": "/lustre06/project/6093645/lijiang3/verl/gen_results/prospect_dpo_click_hist_all_lora_qwen3-8b_global_step_5341_hf_merged.parquet",
+    "thinking_mode": false,
+    "date": "20260415"
+  },
+  "qwen3-8b__thinkOFF__20260415": {
+    "backend": "rouge",
+    "count": 20456,
+    "joined_count": 20554,
+    "skipped_count": 98,
+    "rouge_1_f1": 0.22217100331202022,
+    "rouge_2_f1": 0.06840940911310923,
+    "rouge_l_f1": 0.18761111712991688,
+    "non_empty_prediction_count": 20456,
+    "parse_status_counts": {
+      "fenced_json": 20456,
+      "empty": 97,
+      "missing_structured_output": 1
+    },
+    "model_path": "/home/lijiang3/projects/def-y7ding/lijiang3/hf_cache/hub/models--Qwen--Qwen3-8B/snapshots/b968826d9c46dd6066d109eabc6255188de91218",
+    "raw_generation_file": "/lustre06/project/6093645/lijiang3/verl/gen_results/qwen3-8b.parquet",
+    "thinking_mode": false,
+    "date": "20260415"
+  },
+  "prospect_dpo_click_hist_all_lora_qwen3-8b_global_step_5341_hf_merged__thinkON__20260416": {
+    "backend": "rouge",
+    "count": 17703,
+    "joined_count": 20554,
+    "skipped_count": 2851,
+    "rouge_1_f1": 0.19667525652332798,
+    "rouge_2_f1": 0.060634492232446886,
+    "rouge_l_f1": 0.17071169978815406,
+    "non_empty_prediction_count": 17703,
+    "parse_status_counts": {
+      "fenced_json": 16290,
+      "missing_structured_output": 2051,
+      "inline_json": 1413,
+      "reasoning_no_answer": 700,
+      "empty": 89,
+      "malformed_json_output": 11
+    },
+    "model_path": "/scratch/lijiang3/ckpt/PENS/prospect_dpo_click_hist_all_lora_qwen3-8b/global_step_5341/actor/hf_merged",
+    "raw_generation_file": "/lustre06/project/6093645/lijiang3/verl/gen_results/prospect_dpo_click_hist_all_lora_qwen3-8b_global_step_5341_hf_merged_thinkON_20260416.parquet",
+    "thinking_mode": true,
+    "date": "20260416"
+  }
+}

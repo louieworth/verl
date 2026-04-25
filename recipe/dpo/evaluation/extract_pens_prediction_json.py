@@ -15,6 +15,8 @@ FENCED_JSON_RE = re.compile(r"```json\s*(.*?)\s*```", re.IGNORECASE | re.DOTALL)
 HEADLINE_FIELD_RE = re.compile(
     r'"headline"\s*:\s*"(?P<value>(?:[^"\\]|\\.)*)"', re.IGNORECASE | re.DOTALL
 )
+# Match \boxed{...} allowing nested braces one level deep for headlines with { or }
+BOXED_RE = re.compile(r"\\boxed\s*\{((?:[^{}]|\{[^{}]*\})*)\}", re.DOTALL)
 HEADLINE_KEYS = [
     "headline",
     "title",
@@ -138,6 +140,8 @@ def classify_unstructured_output(cleaned: str) -> tuple[str, str]:
         return "", "reasoning_no_answer"
     if list(HEADLINE_FIELD_RE.finditer(cleaned)):
         return "", "malformed_json_output"
+    if "\\boxed" in cleaned:
+        return "", "malformed_boxed_output"
     return "", "missing_structured_output"
 
 
@@ -145,6 +149,14 @@ def extract_prediction(text: str) -> tuple[str, str]:
     cleaned = str(text).strip()
     if not cleaned:
         return "", "empty"
+
+    # Primary format: \boxed{headline}. Take the last match so models that emit
+    # reasoning first + boxed answer last still parse correctly.
+    boxed_matches = list(BOXED_RE.finditer(cleaned))
+    for match in reversed(boxed_matches):
+        candidate = match.group(1).strip()
+        if candidate and not is_placeholder_prediction(candidate):
+            return candidate, "boxed"
 
     fenced_matches = list(FENCED_JSON_RE.finditer(cleaned))
     for match in reversed(fenced_matches):

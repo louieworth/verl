@@ -30,7 +30,10 @@ from omegaconf import DictConfig, ListConfig
 from torch.utils.data import Dataset
 from transformers import PreTrainedTokenizer, ProcessorMixin
 
-from verl.models.transformers.qwen2_vl import get_rope_index
+# NOTE: qwen2_vl transitively imports flash_attn, which has a buggy CUDA ext on
+# some envs (ABI mismatch → "undefined symbol: _ZNK3c106SymInt6sym_neERKS0_").
+# Import get_rope_index lazily inside the Qwen-VL code path so LLM-only SFT
+# (e.g., Qwen3-4B text) does not pay for flash_attn at startup.
 from verl.utils import hf_tokenizer
 from verl.utils.chat_template import extract_system_prompt_and_generation
 from verl.utils.dataset.dataset_utils import DatasetPadMode
@@ -333,6 +336,8 @@ class MultiTurnSFTDataset(Dataset):
 
         # 2. handle position_ids for Qwen-VL series models
         if self.processor is not None and "Qwen2VLImageProcessor" in self.processor.image_processor.__class__.__name__:
+            from verl.models.transformers.qwen2_vl import get_rope_index  # lazy: avoids flash_attn import at startup
+
             image_grid_thw = multi_modal_inputs.get("image_grid_thw", None)
             video_grid_thw = multi_modal_inputs.get("video_grid_thw", None)
             second_per_grid_ts = multi_modal_inputs.get("second_per_grid_ts", None)
