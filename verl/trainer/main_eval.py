@@ -62,18 +62,23 @@ def save_eval_results(metric_dict: dict[str, float], output_json_path: str, mode
 
     os.makedirs(os.path.dirname(output_json_path), exist_ok=True)
 
-    if os.path.exists(output_json_path):
-        with open(output_json_path) as f:
-            all_results = json.load(f)
-    else:
-        all_results = {}
+    all_results = {}
+    if os.path.exists(output_json_path) and os.path.getsize(output_json_path) > 0:
+        try:
+            with open(output_json_path) as f:
+                all_results = json.load(f)
+        except json.JSONDecodeError:
+            print(f"[save_eval_results] warning: {output_json_path} corrupted; starting fresh")
+            all_results = {}
 
     model_results = dict(all_results.get(model_name, {}))
     model_results.update(formatted_results)
     all_results[model_name] = model_results
 
-    with open(output_json_path, "w") as f:
+    tmp_path = output_json_path + ".tmp"
+    with open(tmp_path, "w") as f:
         json.dump(all_results, f, indent=4)
+    os.replace(tmp_path, output_json_path)
 
 
 @hydra.main(config_path="config", config_name="evaluation", version_base=None)

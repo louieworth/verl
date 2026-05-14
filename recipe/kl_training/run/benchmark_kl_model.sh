@@ -99,8 +99,8 @@ GEN_TP=${GEN_TP:-1}
 EVAL_DATASETS_DIR=${EVAL_DATASETS_DIR:-/data/data/jiangli/huggingface/datasets}
 
 # Datasets to test
-DEFAULT_DATASETS="math500 hmmt25 beyondaime amobench gsm8k"
-# DEFAULT_DATASETS="aime24 aime25"
+# DEFAULT_DATASETS="math500 hmmt25 beyondaime amobench gsm8k"
+DEFAULT_DATASETS="aime24 aime25 hmmt25 beyondaime amobench"
 DATASETS_TO_TEST=${DATASETS:-"${DEFAULT_DATASETS}"}
 DATASETS_TO_TEST_CSV=$(echo "${DATASETS_TO_TEST}" | tr ' ' ',')
 

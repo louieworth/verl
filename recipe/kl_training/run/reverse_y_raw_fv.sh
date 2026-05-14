@@ -22,9 +22,10 @@ set -o pipefail
 # KL Settings
 export KL_TYPE="${KL_TYPE:-reverse}"
 export KL_METHOD="${KL_METHOD:-full_vocab}"
-export TEMPERATURE="${TEMPERATURE:-0.7}"
-export KL_TOKEN_CLIP="${KL_TOKEN_CLIP:-0.06}"
-export USE_INITIAL_RESPONSE="${USE_INITIAL_RESPONSE:-false}"
+export TEMPERATURE="${TEMPERATURE:-1}"
+export KL_TOKEN_CLIP="${KL_TOKEN_CLIP:-0}"
+# y_raw: train on stage1 student rollouts; teacher prompt = π(·|x, y*) (no initial response).
+export Y_MODE="${Y_MODE:-y_raw}"
 
 # Training Settings (full_vocab is memory-heavy; smaller micro-batch + more accum)
 export TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-2}"

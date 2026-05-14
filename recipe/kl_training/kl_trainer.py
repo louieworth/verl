@@ -82,6 +82,13 @@ class KLTrainer:
         if self.is_logging and HAS_WANDB:
             self._init_wandb()
 
+        # T2: gradient cosine state. Cache the previous local-shard flat
+        # gradient so we can compute cos(g_t, g_{t-1}) every N optimizer steps.
+        self._prev_flat_grad = None
+        # T3: resolve correction-token id list (full_vocab only — we need the
+        # full teacher distribution to compute prob mass on those tokens).
+        self._correction_token_ids = self._resolve_correction_token_ids()
+
         logger.info("KL Trainer initialized with verl FSDP backend")
         logger.info("  KL Type: %s", self.config.kl_type)
         logger.info("  KL Method: %s", self.config.kl_method)
@@ -152,6 +159,8 @@ class KLTrainer:
             num_workers=self.config.num_workers,
             local_rank=dp_rank,
             world_size=dp_size,
+            prompt_truncation=getattr(self.config, "prompt_truncation", False),
+            log_difficulty_buckets=getattr(self.config, "log_difficulty_buckets", False),
         )
 
     def _build_model_config(self, model_path: str, *, trainable: bool) -> HFModelConfig:
@@ -237,6 +246,91 @@ class KLTrainer:
         """Only full_vocab kl_method needs the full logits tensor; MC (including JSD MC) is logprob-only."""
         return self.config.kl_method == "full_vocab"
 
+    def _resolve_correction_token_ids(self) -> list[int]:
+        """Build the correction-token id list for T3.
+
+        Priority: explicit `correction_token_ids` (comma-separated ints)
+        overrides phrase tokenization. Phrases are tokenized with the student
+        tokenizer; we keep the *first* token id of each phrase encoded with
+        a leading space (so we hit the mid-sentence form that actually appears
+        in trajectories).
+        """
+        explicit = (self.config.correction_token_ids or "").strip()
+        if explicit:
+            ids = []
+            for piece in explicit.split(","):
+                piece = piece.strip()
+                if piece:
+                    ids.append(int(piece))
+            return sorted(set(ids))
+        phrases = (self.config.correction_token_phrases or "").strip()
+        if not phrases:
+            return []
+        ids: set[int] = set()
+        for phrase in phrases.split(","):
+            phrase = phrase.strip()
+            if not phrase:
+                continue
+            for variant in (phrase, " " + phrase):
+                toks = self.tokenizer.encode(variant, add_special_tokens=False)
+                if toks:
+                    ids.add(toks[0])
+        return sorted(ids)
+
+    def _gather_local_flat_grad(self) -> torch.Tensor | None:
+        """Concatenate local-shard gradients of all trainable params into one
+        flat tensor. For FSDP2, ``param.grad`` may be a DTensor; ``to_local``
+        returns the local shard. Returns None if no grads are populated."""
+        chunks = []
+        for p in self.student_engine.module.parameters():
+            if not p.requires_grad or p.grad is None:
+                continue
+            g = p.grad
+            if hasattr(g, "to_local"):
+                g = g.to_local()
+            chunks.append(g.detach().reshape(-1))
+        if not chunks:
+            return None
+        return torch.cat(chunks)
+
+    def _update_grad_cosine_state(self, *, want_cosine: bool) -> float | None:
+        """T2: cos(g_t, g_{t-1}) where t and t-1 are *consecutive* optimizer steps.
+
+        We always refresh ``self._prev_flat_grad`` (cheap with LoRA — only
+        adapter params have grads), so the cached tensor is always the previous
+        step's gradient. When ``want_cosine`` is True we additionally compute
+        and return the cosine, summing local-shard inner products via a single
+        all_reduce of three scalars. Returns None on the first call (no prev),
+        when shapes don't match, or when either norm is zero.
+
+        Must be called BEFORE optimizer_step on the same step, since the engine
+        clips gradients in-place inside optimizer_step.
+        """
+        cur = self._gather_local_flat_grad()
+        if cur is None:
+            return None
+        cur_f = cur.float()
+
+        prev = self._prev_flat_grad
+        cosine: float | None = None
+        if want_cosine and prev is not None and prev.shape == cur_f.shape:
+            stats = torch.stack([
+                (cur_f * prev).sum(),
+                (cur_f * cur_f).sum(),
+                (prev * prev).sum(),
+            ])
+            dp_group = self.student_engine.get_data_parallel_group()
+            if dp_group is not None and dist.get_world_size(group=dp_group) > 1:
+                dist.all_reduce(stats, op=dist.ReduceOp.SUM, group=dp_group)
+            dot, cur_n2, prev_n2 = stats.tolist()
+            denom = (cur_n2 * prev_n2) ** 0.5
+            if denom > 0:
+                cosine = float(dot / denom)
+
+        # Always cache: ensures the next reported cosine is over consecutive steps.
+        self._prev_flat_grad = cur_f.clone()
+        return cosine
+
     def _common_meta(self, *, return_logits: bool) -> dict[str, Any]:
         return {
             "pad_mode": DatasetPadMode.NO_PADDING,
@@ -273,6 +367,17 @@ class KLTrainer:
         }
         if self.config.kl_method == "full_vocab":
             tensor_dict["teacher_logits"] = teacher_model_output["logits"]
+
+        # T4: forward per-sample difficulty bucket (1=easy / 0=hard) as a [B]
+        # long tensor so it slices batch-wise alongside `temperature` when the
+        # engine builds micro-batches.
+        if self.config.log_difficulty_buckets and "difficulty_bucket" in batch:
+            raw = batch["difficulty_bucket"]
+            if hasattr(raw, "unbind"):
+                vals = [int(t.flatten()[0].item()) for t in raw.unbind()]
+                tensor_dict["difficulty_bucket"] = torch.tensor(vals, dtype=torch.long)
+            else:
+                tensor_dict["difficulty_bucket"] = raw.to(torch.long).reshape(-1)
 
         meta = self._common_meta(return_logits=self._needs_logits())
         meta["grad_accum_steps"] = self.config.gradient_accumulation_steps
@@ -345,8 +450,30 @@ class KLTrainer:
         if not torch.equal(student_counts, teacher_counts):
             raise ValueError("Student and teacher response lengths diverged inside the KL loss.")
 
+        # T3: accumulator for teacher prob mass on correction tokens
+        # (full_vocab only; we have the actual teacher distribution).
+        correction_ids = (
+            self._correction_token_ids
+            if self._needs_logits() and self._correction_token_ids
+            else []
+        )
+        correction_mass_num = 0.0
+        correction_mass_den = 0.0
+
         if self._needs_logits():
-            from .kl_utils import _forward_kl_chunk, _generalized_jsd_chunk, _reverse_kl_chunk
+            from .kl_utils import (
+                _forward_kl_chunk,
+                _forward_kl_topk_chunk,
+                _generalized_jsd_chunk,
+                _reverse_kl_chunk,
+                _reverse_kl_topk_chunk,
+            )
+            top_k = int(getattr(self.config, "top_k", 0) or 0)
+            if top_k > 0 and self.config.kl_type == "jsd":
+                raise ValueError(
+                    "top_k > 0 is only supported with kl_type in {forward, reverse}; "
+                    "JSD requires the full vocabulary for the mixture distribution."
+                )
             # Process logits one sample at a time, freeing each row's logits
             # immediately after use to keep peak memory low on A100-40GB.
             student_logits_nested = model_output["logits"]
@@ -384,21 +511,39 @@ class KLTrainer:
                     continue
                 s_resp = s_resp[:common]
                 t_resp = t_resp[:common]
+
+                # T3: teacher prob mass on correction tokens at every response
+                # position. Done at T=1 (the model's own distribution), before
+                # the temperature scaling that the KL loss applies.
+                if correction_ids:
+                    with torch.no_grad():
+                        t_probs = torch.softmax(t_resp.float(), dim=-1)
+                        mass = t_probs[:, correction_ids].sum(dim=-1)
+                        correction_mass_num += float(mass.sum().item())
+                        correction_mass_den += float(mass.numel())
+                        del t_probs, mass
+
                 if T != 1.0:
                     s_resp = s_resp / T
                     t_resp = t_resp / T
                 sample_kl = []
                 for start in range(0, common, chunk_size):
                     end = min(start + chunk_size, common)
-                    if self.config.kl_type == "reverse":
-                        sample_kl.append(_reverse_kl_chunk(s_resp[start:end], t_resp[start:end]))
+                    s_slice = s_resp[start:end]
+                    t_slice = t_resp[start:end]
+                    if top_k > 0:
+                        # Top-K teacher local support matching (paper Eq. 7-8).
+                        if self.config.kl_type == "reverse":
+                            sample_kl.append(_reverse_kl_topk_chunk(s_slice, t_slice, top_k))
+                        else:  # forward
+                            sample_kl.append(_forward_kl_topk_chunk(t_slice, s_slice, top_k))
+                    elif self.config.kl_type == "reverse":
+                        sample_kl.append(_reverse_kl_chunk(s_slice, t_slice))
                     elif self.config.kl_type == "forward":
-                        sample_kl.append(_forward_kl_chunk(t_resp[start:end], s_resp[start:end]))
+                        sample_kl.append(_forward_kl_chunk(t_slice, s_slice))
                     else:  # jsd
                         sample_kl.append(
-                            _generalized_jsd_chunk(
-                                s_resp[start:end], t_resp[start:end], beta=self.config.beta
-                            )
+                            _generalized_jsd_chunk(s_slice, t_slice, beta=self.config.beta)
                         )
                 kl_chunks.append(torch.cat(sample_kl))
                 del s_resp, t_resp, sample_kl
@@ -457,6 +602,36 @@ class KLTrainer:
         kl_loss = kl_num / max(batch_num_tokens, 1.0) * dp_size
         loss = kl_loss / float(tu.get_non_tensor_data(data, "grad_accum_steps", 1))
 
+        # T1 (per-trajectory mean): unbiased to within-batch length skew —
+        # for each row, divide its KL sum by its valid-token count, then
+        # average across rows. Length-zero rows are skipped.
+        with torch.no_grad():
+            kl_row_sum = (kl_per_position * mask).sum(dim=1)
+            row_tok = mask.sum(dim=1).clamp(min=1)
+            row_means = kl_row_sum / row_tok
+            valid_rows = (mask.sum(dim=1) > 0).float()
+            kl_per_traj_num = (row_means * valid_rows).sum()
+            kl_per_traj_den = valid_rows.sum()
+
+        # T4: bucket-wise KL sums (only when log_difficulty_buckets=True).
+        kl_num_easy_val = 0.0
+        kl_num_hard_val = 0.0
+        tokens_easy_val = 0.0
+        tokens_hard_val = 0.0
+        if self.config.log_difficulty_buckets and "difficulty_bucket" in data.keys():
+            with torch.no_grad():
+                buckets = data["difficulty_bucket"].to(kl_per_position.device).long()
+                # Some engines may pass it as a [B] or [B, 1] — flatten.
+                buckets = buckets.reshape(-1)[: kl_per_position.size(0)]
+                row_kl = (kl_per_position * mask).sum(dim=1)
+                row_tok = mask.sum(dim=1)
+                easy_sel = (buckets == 1)
+                hard_sel = (buckets == 0)
+                kl_num_easy_val = float(row_kl[easy_sel].sum().item())
+                kl_num_hard_val = float(row_kl[hard_sel].sum().item())
+                tokens_easy_val = float(row_tok[easy_sel].sum().item())
+                tokens_hard_val = float(row_tok[hard_sel].sum().item())
+
         # Metrics are reported as local-rank values (no per-micro-batch NCCL
         # all_reduce). With dynamic batching each rank sees ~similar token
         # counts, so the logging rank's ratios (kl_loss = kl_num /
@@ -474,6 +649,18 @@ class KLTrainer:
             "kl_p95": kl_p95.float().item(),
             "kl_p99": kl_p99.float().item(),
             "kl_max": kl_max.float().item(),
+            # T1 (per-trajectory variant). _summarize_step_output divides
+            # the summed numerator by the summed denominator across micro-batches.
+            "kl_per_traj_num": float(kl_per_traj_num.item()),
+            "kl_per_traj_den": float(kl_per_traj_den.item()),
+            # T3 (correction-token mass; full_vocab only — 0/0 when MC).
+            "correction_mass_num": correction_mass_num,
+            "correction_mass_den": correction_mass_den,
+            # T4 (per-difficulty disaggregation; zero when disabled).
+            "kl_num_easy": kl_num_easy_val,
+            "kl_num_hard": kl_num_hard_val,
+            "response_tokens_easy": tokens_easy_val,
+            "response_tokens_hard": tokens_hard_val,
         }
         return loss, metrics
 
@@ -491,6 +678,21 @@ class KLTrainer:
             values = metrics.get(key, [])
             return float(sum(values) / len(values)) if values else 0.0
 
+        # T1-traj: weighted by trajectory count so the per-row arithmetic mean
+        # is preserved across micro-batches.
+        kl_per_traj_num = float(sum(metrics.get("kl_per_traj_num", [])))
+        kl_per_traj_den = float(sum(metrics.get("kl_per_traj_den", [])))
+
+        # T3
+        cm_num = float(sum(metrics.get("correction_mass_num", [])))
+        cm_den = float(sum(metrics.get("correction_mass_den", [])))
+
+        # T4
+        kl_num_easy = float(sum(metrics.get("kl_num_easy", [])))
+        kl_num_hard = float(sum(metrics.get("kl_num_hard", [])))
+        tok_easy = float(sum(metrics.get("response_tokens_easy", [])))
+        tok_hard = float(sum(metrics.get("response_tokens_hard", [])))
+
         return {
             "kl_loss": kl_num / response_tokens,
             "student_perplexity": math.exp(student_nll_num / response_tokens),
@@ -501,6 +703,16 @@ class KLTrainer:
             "kl_p95": _mean("kl_p95"),
             "kl_p99": _mean("kl_p99"),
             "kl_max": max(metrics.get("kl_max", [0.0])) if metrics.get("kl_max") else 0.0,
+            # T1-traj: arithmetic mean of per-trajectory token-mean KLs.
+            "kl_loss_per_traj": (kl_per_traj_num / kl_per_traj_den) if kl_per_traj_den > 0 else 0.0,
+            # T3: average teacher prob mass on correction tokens per response position.
+            "correction_token_mass": (cm_num / cm_den) if cm_den > 0 else 0.0,
+            "correction_token_positions": cm_den,
+            # T4: per-bucket per-token mean KL. NaN-as-zero when bucket is empty.
+            "kl_loss_easy": (kl_num_easy / tok_easy) if tok_easy > 0 else 0.0,
+            "kl_loss_hard": (kl_num_hard / tok_hard) if tok_hard > 0 else 0.0,
+            "response_tokens_easy": tok_easy,
+            "response_tokens_hard": tok_hard,
         }
 
     def _save_checkpoint(self):
@@ -646,31 +858,60 @@ class KLTrainer:
                 )
 
                 if should_step:
+                    # T2: gradient cosine similarity. Cache the *previous*
+                    # step's flat grad on every step (cheap under LoRA), then
+                    # report cosine only every `grad_cosine_interval` steps so
+                    # wandb stays uncluttered. The reported value is always
+                    # cos(g_t, g_{t-1}) over consecutive optimizer steps.
+                    grad_cosine_val: float | None = None
+                    interval = max(0, int(self.config.grad_cosine_interval))
+                    if interval > 0:
+                        want = ((self.global_step + 1) % interval == 0)
+                        grad_cosine_val = self._update_grad_cosine_state(want_cosine=want)
+
                     grad_norm = self.student_engine.optimizer_step()
                     self.student_engine.optimizer_zero_grad()
                     lr = self.student_engine.lr_scheduler_step()
                     self.global_step += 1
 
                     if self.is_logging and HAS_WANDB:
-                        wandb.log(
-                            {
-                                "train/kl_loss": step_metrics["kl_loss"],
-                                "train/student_perplexity": step_metrics["student_perplexity"],
-                                "train/teacher_perplexity": step_metrics["teacher_perplexity"],
-                                "train/response_tokens": step_metrics["response_tokens"],
-                                "train/grad_norm": grad_norm,
-                                "train/learning_rate": lr,
-                                "train/step_time_sec": step_time,
-                                "train/epoch": self.epoch,
-                                "train/global_step": self.global_step,
-                                "train/kl_p50": step_metrics["kl_p50"],
-                                "train/kl_p95": step_metrics["kl_p95"],
-                                "train/kl_p99": step_metrics["kl_p99"],
-                                "train/kl_max": step_metrics["kl_max"],
-                                "train/clip_frac": step_metrics["clip_frac"],
-                                "train/kl_token_clip": self.config.kl_token_clip,
-                            }
-                        )
+                        log_payload = {
+                            "train/kl_loss": step_metrics["kl_loss"],
+                            "train/kl_loss_per_traj": step_metrics["kl_loss_per_traj"],
+                            "train/student_perplexity": step_metrics["student_perplexity"],
+                            "train/teacher_perplexity": step_metrics["teacher_perplexity"],
+                            "train/response_tokens": step_metrics["response_tokens"],
+                            "train/grad_norm": grad_norm,
+                            "train/learning_rate": lr,
+                            "train/step_time_sec": step_time,
+                            "train/epoch": self.epoch,
+                            "train/global_step": self.global_step,
+                            "train/kl_p50": step_metrics["kl_p50"],
+                            "train/kl_p95": step_metrics["kl_p95"],
+                            "train/kl_p99": step_metrics["kl_p99"],
+                            "train/kl_max": step_metrics["kl_max"],
+                            "train/clip_frac": step_metrics["clip_frac"],
+                            "train/kl_token_clip": self.config.kl_token_clip,
+                        }
+                        if grad_cosine_val is not None:
+                            log_payload["train/grad_cosine"] = grad_cosine_val
+                        if self._correction_token_ids:
+                            log_payload["train/correction_token_mass"] = step_metrics[
+                                "correction_token_mass"
+                            ]
+                            log_payload["train/correction_token_positions"] = step_metrics[
+                                "correction_token_positions"
+                            ]
+                        if self.config.log_difficulty_buckets:
+                            log_payload["train/kl_loss_easy"] = step_metrics["kl_loss_easy"]
+                            log_payload["train/kl_loss_hard"] = step_metrics["kl_loss_hard"]
+                            log_payload["train/response_tokens_easy"] = step_metrics[
+                                "response_tokens_easy"
+                            ]
+                            log_payload["train/response_tokens_hard"] = step_metrics[
+                                "response_tokens_hard"
+                            ]
+                        wandb.log(log_payload)
 
                     if self.global_step % self.config.logging_steps == 0 and self.is_logging:
                         logger.info(

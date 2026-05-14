@@ -17,6 +17,12 @@ import re
 _SOLUTION_CLIP_CHARS = 300
 
 
+def _normalize_number(s):
+    """Strip commas and dollar signs; return None for empty/punctuation-only strings."""
+    s = s.replace(",", "").replace("$", "").strip()
+    return s if s not in ("", ".") else None
+
+
 def extract_solution(solution_str, method="strict"):
     assert method in ["strict", "flexible"]
 
@@ -27,26 +33,37 @@ def extract_solution(solution_str, method="strict"):
         solution_str = solution_str[-_SOLUTION_CLIP_CHARS:]
 
     if method == "strict":
-        # this also tests the formatting of the model
-        solutions = re.findall("#### (\\-?[0-9\\.\\,]+)", solution_str)
-        if len(solutions) == 0:
-            final_answer = None
-        else:
-            # take the last solution
-            final_answer = solutions[-1].replace(",", "").replace("$", "")
-    elif method == "flexible":
-        answer = re.findall("(\\-?[0-9\\.\\,]+)", solution_str)
-        final_answer = None
-        if len(answer) == 0:
-            # no reward is there is no answer
-            pass
-        else:
-            invalid_str = ["", "."]
-            # find the last number that is not '.'
-            for final_answer in reversed(answer):
-                if final_answer not in invalid_str:
-                    break
-    return final_answer
+        # Try the prompt-requested "#### <num>" format first.
+        solutions = re.findall(r"#### (\-?[0-9\.\,]+)", solution_str)
+        if solutions:
+            return _normalize_number(solutions[-1])
+
+        # Fallback: \boxed{<content>}. Non-instruct models (e.g. base Qwen3-8B)
+        # ignore the "####" instruction and default to LaTeX boxed format on
+        # math data. Accept it rather than marking them all as 0.
+        boxed = re.findall(r"\\boxed\{([^{}]*)\}", solution_str)
+        if boxed:
+            nums = re.findall(r"\-?[0-9\.\,]+", boxed[-1])
+            for n in reversed(nums):
+                norm = _normalize_number(n)
+                if norm is not None:
+                    return norm
+
+        # Last-resort fallback: the final number in the clipped tail.
+        nums = re.findall(r"\-?[0-9\.\,]+", solution_str)
+        for n in reversed(nums):
+            norm = _normalize_number(n)
+            if norm is not None:
+                return norm
+        return None
+
+    # method == "flexible"
+    nums = re.findall(r"\-?[0-9\.\,]+", solution_str)
+    for n in reversed(nums):
+        norm = _normalize_number(n)
+        if norm is not None:
+            return norm
+    return None
 
 
 def compute_score(solution_str, ground_truth, method="strict", format_score=0.0, score=1.0):

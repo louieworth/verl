@@ -73,6 +73,11 @@ def build_teacher_prompt(
     return prompt + " " + instruction_following
 
 
+_INIT_BLOCK_MARKER = "**Your Initial Solution:**"
+_INIT_BLOCK_END_MARKER = "**Instructions:**"
+_TRUNC_NOTICE = "\n[... initial solution truncated ...]\n"
+
+
 class KLTrainingDataset(Dataset):
     """Builds student/teacher sequences for KL training under verl's no-padding format."""
 
@@ -85,11 +90,21 @@ class KLTrainingDataset(Dataset):
         max_samples: int | None = None,
         corrected_responses_path: str | None = None,
         use_initial_response: bool = False,
+        prompt_truncation: bool = False,
+        log_difficulty_buckets: bool = False,
     ):
         self.tokenizer = tokenizer
         self.kl_type = kl_type
         self.max_length = max_length
         self.use_initial_response = use_initial_response
+        self.prompt_truncation = prompt_truncation
+        self.log_difficulty_buckets = log_difficulty_buckets
+        if prompt_truncation:
+            print(
+                "[KLTrainingDataset] prompt_truncation=ON: when prompt+response > max_length, "
+                "the **Your Initial Solution:** block will be truncated from its tail to "
+                "preserve the response (only applies to teacher-side correction prompts)."
+            )
 
         print(f"Loading data from: {data_path}")
         self.data = datasets.load_dataset("parquet", data_files=data_path, split="train")
@@ -105,6 +120,43 @@ class KLTrainingDataset(Dataset):
 
         print(f"Dataset loaded: {len(self.data)} samples")
 
+        # T4 sanity check: scan the reward column so a misconfigured run
+        # (e.g. forward KL on un-backfilled stage2 parquet) fails LOUDLY
+        # instead of silently routing every sample into the "hard" bucket.
+        if self.log_difficulty_buckets:
+            rewards = []
+            missing = 0
+            for ex in self.data:
+                ei = ex.get("extra_info") or {}
+                r = ei.get("reward") if isinstance(ei, dict) else None
+                if r is None:
+                    missing += 1
+                else:
+                    try:
+                        rewards.append(float(r))
+                    except (TypeError, ValueError):
+                        missing += 1
+            n = len(self.data)
+            n_easy = sum(1 for r in rewards if r >= 1.0)
+            n_hard = len(rewards) - n_easy
+            print(
+                f"[KLTrainingDataset] T4 difficulty buckets: "
+                f"easy={n_easy} ({n_easy / n:.1%}), "
+                f"hard={n_hard} ({n_hard / n:.1%}), "
+                f"missing={missing} ({missing / n:.1%})"
+            )
+            if missing >= 0.5 * n:
+                raise RuntimeError(
+                    f"T4 (log_difficulty_buckets=True) requires extra_info.reward to be "
+                    f"populated, but {missing}/{n} ({missing/n:.0%}) rows are missing it. "
+                    f"\n  - For stage1 parquet: run "
+                    f"`python -m recipe.kl_training.score_stage1_reward --parquet <path>`."
+                    f"\n  - For stage2 parquet (forward KL): run "
+                    f"`python -m recipe.kl_training.backfill_stage2_reward_from_stage1 "
+                    f"--stage1_parquet <stage1.parquet> --stage2_parquet <stage2.parquet> "
+                    f"--output <stage2_with_reward.parquet>` and pass DATA_PATH=<output>."
+                )
+
     def __len__(self) -> int:
         return len(self.data)
 
@@ -118,7 +170,50 @@ class KLTrainingDataset(Dataset):
     def _encode_text(self, text: str) -> list[int]:
         return self.tokenizer.encode(text, add_special_tokens=False)
 
+    def _truncate_initial_response(self, prompt: str, response: str) -> str:
+        """Trim the **Your Initial Solution:** block so that the full prompt+response
+        fits within ``max_length``. Returns the modified prompt; caller still applies
+        a final right-side safety cut. Returns the prompt unchanged if (a) it already
+        fits, (b) the markers are not present (e.g. student-side or non-correction
+        prompt), or (c) trimming the block alone is insufficient.
+        """
+        prompt_ids = self._encode_text(prompt + "\n")
+        response_ids = self._encode_text(response)
+        if len(prompt_ids) + len(response_ids) <= self.max_length:
+            return prompt
+
+        init_start_marker = prompt.find(_INIT_BLOCK_MARKER)
+        init_end_marker = prompt.find(_INIT_BLOCK_END_MARKER, init_start_marker + 1) if init_start_marker >= 0 else -1
+        if init_start_marker < 0 or init_end_marker <= init_start_marker:
+            return prompt
+
+        block_text_start = init_start_marker + len(_INIT_BLOCK_MARKER)
+        block_text = prompt[block_text_start:init_end_marker]
+        block_ids = self._encode_text(block_text)
+        if not block_ids:
+            return prompt
+
+        # Tokens we need to drop from the prompt side, leaving a small margin so
+        # that the post-truncation re-encode still fits (re-tokenization can be
+        # off by a few tokens vs. the slice arithmetic).
+        margin = 16
+        overflow = len(prompt_ids) + len(response_ids) - self.max_length + margin
+        keep_tokens = max(0, len(block_ids) - overflow)
+        if keep_tokens >= len(block_ids):
+            return prompt  # nothing to do
+
+        truncated_block = self.tokenizer.decode(block_ids[:keep_tokens], skip_special_tokens=True)
+        new_prompt = (
+            prompt[:block_text_start]
+            + truncated_block
+            + _TRUNC_NOTICE
+            + prompt[init_end_marker:]
+        )
+        return new_prompt
+
     def _build_sequence(self, prompt: str, response: str) -> tuple[torch.Tensor, torch.Tensor, int]:
+        if self.prompt_truncation:
+            prompt = self._truncate_initial_response(prompt, response)
         prompt_ids = self._encode_text(prompt + "\n")
         response_ids = self._encode_text(response)
         full_ids = (prompt_ids + response_ids)[: self.max_length]
@@ -135,6 +230,23 @@ class KLTrainingDataset(Dataset):
         end = min(start + response_len, seq_len)
         mask[start:end] = 1
         return mask
+
+    def _difficulty_bucket(self, item: dict) -> int:
+        """Binary difficulty bucket from stage1 reward.
+
+        Returns 1 if stage1 reward >= 1 ("easy" — base model solved it),
+        else 0 ("hard"). Caller must guard with ``self.log_difficulty_buckets``
+        (we validate at dataset init that reward is populated when the flag is
+        on, so reward==None reaching here would be a bug).
+        """
+        ei = item.get("extra_info") or {}
+        reward = ei.get("reward")
+        if reward is None:
+            return 0
+        try:
+            return 1 if float(reward) >= 1.0 else 0
+        except (TypeError, ValueError):
+            return 0
 
     def _prepare_item(self, student_prompt: str, teacher_prompt: str, response: str) -> dict[str, torch.Tensor]:
         student_input_ids, student_position_ids, student_prompt_len = self._build_sequence(student_prompt, response)
@@ -194,7 +306,10 @@ class KLTrainingDataset(Dataset):
             use_initial_response=self.use_initial_response,
         )
 
-        return self._prepare_item(student_prompt=student_prompt, teacher_prompt=teacher_prompt, response=response)
+        out = self._prepare_item(student_prompt=student_prompt, teacher_prompt=teacher_prompt, response=response)
+        if self.log_difficulty_buckets:
+            out["difficulty_bucket"] = torch.tensor([self._difficulty_bucket(item)], dtype=torch.long)
+        return out
 
     def _prepare_forward_kl_item(self, idx: int) -> dict[str, torch.Tensor]:
         item = self.data[idx]
@@ -227,11 +342,14 @@ class KLTrainingDataset(Dataset):
             use_initial_response=self.use_initial_response,
         )
 
-        return self._prepare_item(
+        out = self._prepare_item(
             student_prompt=student_prompt,
             teacher_prompt=teacher_prompt,
             response=target_response,
         )
+        if self.log_difficulty_buckets:
+            out["difficulty_bucket"] = torch.tensor([self._difficulty_bucket(item)], dtype=torch.long)
+        return out
 
 
 def create_kl_dataloader(
@@ -246,6 +364,8 @@ def create_kl_dataloader(
     num_workers: int = 4,
     local_rank: int = -1,
     world_size: int = 1,
+    prompt_truncation: bool = False,
+    log_difficulty_buckets: bool = False,
 ) -> DataLoader:
     dataset = KLTrainingDataset(
         data_path=data_path,
@@ -255,6 +375,8 @@ def create_kl_dataloader(
         max_samples=max_samples,
         corrected_responses_path=corrected_responses_path,
         use_initial_response=use_initial_response,
+        prompt_truncation=prompt_truncation,
+        log_difficulty_buckets=log_difficulty_buckets,
     )
 
     sampler = None

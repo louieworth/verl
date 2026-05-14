@@ -47,9 +47,8 @@ export USE_LORA="${USE_LORA:-true}"
 # max_length: OPSD uses 20000, we match
 export MAX_LENGTH="${MAX_LENGTH:-18432}"
 
-# Data source: stage1 (student rollout). USE_INITIAL_RESPONSE only tags the
-# run name and does not affect which data we load (stage1 is always stage1).
-export USE_INITIAL_RESPONSE="${USE_INITIAL_RESPONSE:-false}"
+# y_raw: train on stage1 student rollouts; teacher prompt = π(·|x, y*) (no initial response).
+export Y_MODE="${Y_MODE:-y_raw}"
 
 # FSDP / memory — full_vocab on 8B needs SP and enough token budget per GPU
 export SP_SIZE="${SP_SIZE:-1}"

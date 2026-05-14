@@ -143,6 +143,62 @@ def _forward_kl_chunk(
     return (teacher_probs * (teacher_logprobs - student_logprobs)).sum(dim=-1)
 
 
+def _forward_kl_topk_chunk(
+    teacher_logits_chunk: torch.Tensor,
+    student_logits_chunk: torch.Tensor,
+    k: int,
+) -> torch.Tensor:
+    """Forward KL on teacher's top-K local support.
+
+    Paper: Fu et al. 2026, "Revisiting On-Policy Distillation". Eq. (6)–(8).
+    The support set S(c) = TopK_q(c) is chosen by teacher logits at every
+    position; both teacher and student are renormalized via a separate
+    softmax over the top-K logits before the KL is taken — gradients flow
+    only through the K selected logits on the student side.
+
+    Forward direction (Σ_v p̂_t (log p̂_t − log p̂_s)) is the user-facing variant
+    used here; the paper's Eq. (8) is reverse — see ``_reverse_kl_topk_chunk``.
+
+    Inputs: ``[chunk_len, vocab]``. Returns ``[chunk_len]`` per-position KL.
+    """
+    _, V = teacher_logits_chunk.shape
+    k = min(int(k), V)
+    teacher = teacher_logits_chunk.float()
+    student = student_logits_chunk.float()
+    _, topk_idx = teacher.topk(k, dim=-1)              # [L, K]
+    t_top = teacher.gather(-1, topk_idx)               # [L, K]
+    s_top = student.gather(-1, topk_idx)               # [L, K] — gradient kept
+    t_logp = F.log_softmax(t_top, dim=-1)              # renormalized teacher
+    s_logp = F.log_softmax(s_top, dim=-1)              # renormalized student
+    t_p = t_logp.exp()
+    return (t_p * (t_logp - s_logp)).sum(dim=-1)
+
+
+def _reverse_kl_topk_chunk(
+    student_logits_chunk: torch.Tensor,
+    teacher_logits_chunk: torch.Tensor,
+    k: int,
+) -> torch.Tensor:
+    """Reverse KL on teacher's top-K local support — paper Eq. (8) verbatim.
+
+    Same renormalization as :func:`_forward_kl_topk_chunk`, but the KL is
+    student-leading: ``Σ_v π̂(v) (log π̂(v) − log q̂(v))``.
+
+    Inputs: ``[chunk_len, vocab]``. Returns ``[chunk_len]`` per-position KL.
+    """
+    _, V = teacher_logits_chunk.shape
+    k = min(int(k), V)
+    teacher = teacher_logits_chunk.float()
+    student = student_logits_chunk.float()
+    _, topk_idx = teacher.topk(k, dim=-1)
+    t_top = teacher.gather(-1, topk_idx)
+    s_top = student.gather(-1, topk_idx)
+    s_logp = F.log_softmax(s_top, dim=-1)
+    t_logp = F.log_softmax(t_top, dim=-1)
+    s_p = s_logp.exp()
+    return (s_p * (s_logp - t_logp)).sum(dim=-1)
+
+
 def compute_generalized_jsd_monte_carlo(
     teacher_logprobs: torch.Tensor,
     student_logprobs: torch.Tensor,

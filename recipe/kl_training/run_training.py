@@ -58,6 +58,12 @@ def parse_args():
         default=False,
         help="Teacher prompt mode: false=rewrite from expert only, true=rewrite using the initial response plus expert guidance.",
     )
+    parser.add_argument(
+        "--prompt_truncation",
+        type=lambda x: x.lower() == "true",
+        default=False,
+        help="When prompt+response > max_length, truncate the **Your Initial Solution:** block in the teacher prompt instead of the response tail. Preserves response loss signal at the cost of dropping initial-solution context.",
+    )
     parser.add_argument("--num_workers", type=int, default=4)
 
     # verl FSDP Settings
@@ -92,13 +98,30 @@ def parse_args():
     parser.add_argument("--save_merged_model", type=lambda x: x.lower() == "true", default=True)
     parser.add_argument("--save_steps", type=int, default=100,
                         help="Save FSDP checkpoint every N optimizer steps. Lower = better crash safety, more disk.")
-    parser.add_argument("--max_ckpt_to_keep", type=int, default=-1,
-                        help="FSDP checkpoint retention. -1 (or 0) = keep all; N>0 = rolling window of N.")
+    parser.add_argument("--max_ckpt_to_keep", type=int, default=1,
+                        help="Rolling window for intra-epoch FSDP ckpts. Per-epoch hf_merged is preserved separately.")
 
     # Evaluation Settings
     parser.add_argument("--run_eval_after_training", type=lambda x: x.lower() == "true", default=False)
     parser.add_argument("--eval_datasets", type=str, default="aime24,aime25,math500")
     parser.add_argument("--eval_datasets_dir", type=str, default="/data/data/jiangli/huggingface/datasets")
+
+    # Diagnostic metrics (T1–T4 from y vs y' study)
+    parser.add_argument("--grad_cosine_interval", type=int, default=0,
+                        help="T2: log cos(g_t, g_{t-1}) every N optimizer steps (0=off).")
+    parser.add_argument("--correction_token_phrases", type=str, default="",
+                        help="T3: comma-separated correction-token phrases (e.g. 'Wait,But,Actually'). "
+                             "First subword of each phrase (with leading space variant) is added to the id list.")
+    parser.add_argument("--correction_token_ids", type=str, default="",
+                        help="T3: comma-separated explicit token ids. Overrides --correction_token_phrases when set.")
+    parser.add_argument("--log_difficulty_buckets", type=lambda x: x.lower() == "true", default=False,
+                        help="T4: bucket samples by stage1 reward (>=1 easy, else hard) and log kl_loss per bucket.")
+
+    # Top-K teacher local support matching (Fu et al. 2026, arXiv:2603.25562)
+    parser.add_argument("--top_k", type=int, default=0,
+                        help="When > 0 and kl_method=full_vocab, replace per-position KL with truncated KL "
+                             "over the top-K teacher-selected tokens (renormalized in support). "
+                             "Paper default 32. JSD is not supported with top-K.")
 
     return parser.parse_args()
 
@@ -141,6 +164,7 @@ def main():
         corrected_responses_path=args.corrected_responses_path,
         max_samples=args.max_samples,
         use_initial_response=args.use_initial_response,
+        prompt_truncation=args.prompt_truncation,
         num_workers=args.num_workers,
         # verl FSDP Settings
         fsdp_strategy=args.fsdp_strategy,
@@ -170,6 +194,13 @@ def main():
         run_eval_after_training=args.run_eval_after_training,
         eval_datasets=args.eval_datasets.split(",") if args.eval_datasets else [],
         eval_datasets_dir=args.eval_datasets_dir,
+        # Diagnostic metrics
+        grad_cosine_interval=args.grad_cosine_interval,
+        correction_token_phrases=args.correction_token_phrases,
+        correction_token_ids=args.correction_token_ids,
+        log_difficulty_buckets=args.log_difficulty_buckets,
+        # Top-K local support matching
+        top_k=args.top_k,
     )
 
     trainer = KLTrainer(config)

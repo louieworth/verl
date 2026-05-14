@@ -7,7 +7,11 @@
 **/*.tar.gz
 **/playground
 **/wandb
-
+results_opsd/
+results/
+recipe/kl_training/anlysis/
+recipe/kl_training/improvement/
+.agent/
 /pyrightconfig.json
 
 # Byte-compiled / optimized / DLL files

@@ -20,9 +20,11 @@ set -o pipefail
 export KL_TYPE="${KL_TYPE:-forward}"
 export KL_METHOD="${KL_METHOD:-monte_carlo}"
 export TEMPERATURE="${TEMPERATURE:-1}"
-export KL_TOKEN_CLIP="${KL_TOKEN_CLIP:-0.1}"
-export USE_INITIAL_RESPONSE="${USE_INITIAL_RESPONSE:-true}"
+export KL_TOKEN_CLIP="${KL_TOKEN_CLIP:-0}"
+export Y_MODE="${Y_MODE:-y_cor}"
 export FORWARD_STAGE2_MODE="${FORWARD_STAGE2_MODE:-rewrite_all}"
+# Do NOT reward-filter the stage2 output (keep full corrected set).
+export FORWARD_FILTER_STAGE2="${FORWARD_FILTER_STAGE2:-false}"
 
 # Training Settings (correction mode uses bigger effective batch)
 export TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-4}"

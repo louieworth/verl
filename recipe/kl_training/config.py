@@ -63,6 +63,7 @@ class KLTrainingConfig:
     corrected_responses_path: str = ""  # Optional legacy second file for forward KL rewrite targets
     max_samples: Optional[int] = None
     use_initial_response: bool = False  # Teacher prompt mode: False=rewrite from expert only, True=rewrite using initial response + expert guidance
+    prompt_truncation: bool = False  # If True, when prompt+response > max_length, trim the **Your Initial Solution:** block in the teacher prompt instead of right-truncating the response.
     num_workers: int = 4
 
     # verl FSDP Settings
@@ -92,7 +93,7 @@ class KLTrainingConfig:
     logging_steps: int = 10
     eval_steps: int = 500
     save_merged_model: bool = True  # Merge LoRA adapters after training
-    max_ckpt_to_keep: int = -1  # FSDP checkpoint retention. -1 (or 0) = keep all, N>0 = rolling window
+    max_ckpt_to_keep: int = 1  # Rolling window for intra-epoch FSDP ckpts; per-epoch hf_merged is always preserved separately
 
     # Evaluation Settings
     eval_datasets: list = field(default_factory=lambda: ["aime24", "aime25", "math500", "hmmt25"])
@@ -118,6 +119,37 @@ class KLTrainingConfig:
     # Wandb
     wandb_project: str = "verl-kl-training"
     wandb_run_name: str = ""
+
+    # ------------------------------------------------------------------
+    # Diagnostic metrics (T1–T4 from the y vs y' study)
+    # ------------------------------------------------------------------
+    # T2: gradient cosine similarity between consecutive optimizer steps.
+    # 0 disables; otherwise compute every N optimizer steps. Captured
+    # before grad clipping; FSDP-aware (all-reduces local-shard scalars).
+    grad_cosine_interval: int = 0
+    # T3: correction-token mass — teacher prob mass on a fixed vocab of
+    # "hesitation/correction" tokens at each response position. Only meaningful
+    # for kl_method="full_vocab" (we have the full teacher distribution).
+    # Provide either a comma-separated phrase list (tokenized at trainer init)
+    # or a comma-separated explicit token-id list.
+    correction_token_phrases: str = ""
+    correction_token_ids: str = ""
+    # T4: per-difficulty disaggregation. When True, the dataset attaches a
+    # binary bucket (1=stage1 reward>=1 i.e. "easy"; 0="hard") per sample,
+    # and the trainer logs kl_loss per bucket. Requires extra_info.reward to
+    # be populated on stage1 parquet (run score_stage1_reward.py first).
+    log_difficulty_buckets: bool = False
+
+    # ------------------------------------------------------------------
+    # Top-K teacher local support matching (Fu et al. 2026, arXiv:2603.25562)
+    # ------------------------------------------------------------------
+    # When > 0 and kl_method="full_vocab", the per-position KL is replaced
+    # by a truncated KL: at each prefix the support is the top-K tokens
+    # selected by the *teacher*, both teacher and student are renormalized
+    # over that K-token support, and the requested KL direction is computed
+    # there. Set to 0 to disable. Paper default K=32. JSD is not supported
+    # with top-K (the mixture only makes sense over the full vocabulary).
+    top_k: int = 0
 
     def __post_init__(self):
         """Validate configuration."""
