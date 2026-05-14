@@ -16,7 +16,7 @@ from typing import Any
 import datasets
 from transformers import AutoTokenizer
 
-from recipe.kl_training.data_utils import (
+from recipe.opd.dataset.data_utils import (
     PROMPT_TEMPLATE_REVERSE_KL_STUDENT,
     build_teacher_prompt,
     instruction_following,

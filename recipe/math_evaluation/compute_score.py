@@ -19,7 +19,7 @@ def compute_score_data_source(data_source, response, ground_truth):
 
         return gsm8k.compute_score(response, ground_truth)
     if data_source == "amobench":
-        from recipe.open_math_reasoning import amobench_parser_reward
+        from verl.utils.reward_score import amobench_parser_reward
 
         return amobench_parser_reward.compute_score(response, ground_truth)
 

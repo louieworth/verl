@@ -8,7 +8,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from recipe.kl_training.eval_utils import (
+from recipe.math_evaluation.eval_utils import (
     build_result_key,
     evaluate_generated_output,
     find_existing_result_value,

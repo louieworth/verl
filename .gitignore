@@ -9,8 +9,8 @@
 **/wandb
 results_opsd/
 results/
-recipe/kl_training/anlysis/
-recipe/kl_training/improvement/
+recipe/opd/anlysis/
+recipe/opd/improvement/
 .agent/
 /pyrightconfig.json
 

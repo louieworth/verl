@@ -12,9 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from recipe.kl_training.config import KLTrainingConfig
-from recipe.kl_training.data_utils import build_teacher_prompt
-from recipe.kl_training.kl_trainer import build_eval_model_name, build_eval_tag
+from recipe.opd.config import KLTrainingConfig
+from recipe.opd.dataset.data_utils import build_teacher_prompt
+from recipe.opd.kl_trainer import build_eval_model_name, build_eval_tag
 
 
 def test_build_teacher_prompt_rewrite_mode_omits_initial_response():

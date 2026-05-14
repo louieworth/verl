@@ -10,9 +10,9 @@ REPO_ROOT = os.path.dirname(os.path.dirname(SCRIPT_DIR))
 
 sys.path.insert(0, REPO_ROOT)
 
-from recipe.kl_training._tokenizer_compat import apply_qwen2_tokenizer_vllm_compat
+from recipe.opd._tokenizer_compat import apply_qwen2_tokenizer_vllm_compat
 
-from recipe.kl_training.eval_utils import resolve_eval_dataset_paths, run_evaluation_suite
+from recipe.math_evaluation.eval_utils import resolve_eval_dataset_paths, run_evaluation_suite
 
 
 def parse_args():

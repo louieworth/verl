@@ -25,7 +25,7 @@
 
 ## 1. 根本问题:`forward KL + monte_carlo` 当前实现根本没有在蒸馏
 
-`recipe/kl_training/kl_utils.py:85-95`:
+`recipe/opd/kl_utils.py:85-95`:
 
 ```python
 def compute_forward_kl_monte_carlo(teacher_logprobs, student_logprobs, mask, ...):
@@ -139,7 +139,7 @@ rank 64 / alpha 128 / lr 2e-5 对 8B 模型 + 只跑 1 个 outer epoch 的情况
 
 ### P0 — 让 `forward + correction` 真的在做蒸馏
 
-**改动**: `recipe/kl_training/kl_utils.py:85-95` 和 shell 默认值。
+**改动**: `recipe/opd/kl_utils.py:85-95` 和 shell 默认值。
 
 **路线 A(最小改动,推荐先跑)**: 让 `compute_forward_kl_monte_carlo` 真正用 teacher_logprobs。数学上,当 target tokens 来自 teacher(你这里是 correction rewrite),forward KL MC 的无偏估计是:
 
@@ -298,21 +298,21 @@ stage2 `y_1` 里的 token 分两类:
 
 | 改动 | 文件 | 行 |
 |---|---|---|
-| **[P0]** forward MC 加回 teacher 项 | `recipe/kl_training/kl_utils.py` | 57-95 |
-| **[P0]** shell 默认 `KL_TOKEN_CLIP=0.05, TEMPERATURE=1` | `recipe/kl_training/run_correction_kl_training.sh` | 33-36 |
+| **[P0]** forward MC 加回 teacher 项 | `recipe/opd/kl_utils.py` | 57-95 |
+| **[P0]** shell 默认 `KL_TOKEN_CLIP=0.05, TEMPERATURE=1` | `recipe/opd/run_correction_kl_training.sh` | 33-36 |
 | **[P0 alt]** 切 full_vocab | `run_correction_kl_training.sh` env + pass through | 34 |
 | **[P1.1]** stage2 post-rewrite reward filter | 新脚本或复用 `recipe/open_math_reasoning/build_reward_filtered_dataset.py`;shell 里插入 filter 步骤 | `run_correction_kl_training.sh:368-386` 之后 |
 | **[P1.2]** 默认 reward0_only | `run_correction_kl_training.sh` | 38 |
 | **[P1.3]** best-of-N rewrite | `run_correction_kl_training.sh` | 383 (`rollout.n`) |
-| **[P2.1]** teacher prompt 限长 (initial_response / expert_cot) | `recipe/kl_training/data_utils.py:build_teacher_prompt` 以及 `stage2_prepare_rewrite_all.py` 保持一致 | 32-73 / 16-44 |
-| **[P2.3]** length truncation 监控 | `recipe/kl_training/data_utils.py:_prepare_item` | 137-171 |
+| **[P2.1]** teacher prompt 限长 (initial_response / expert_cot) | `recipe/opd/data_utils.py:build_teacher_prompt` 以及 `stage2_prepare_rewrite_all.py` 保持一致 | 32-73 / 16-44 |
+| **[P2.3]** length truncation 监控 | `recipe/opd/data_utils.py:_prepare_item` | 137-171 |
 | **[P3]** 多 epoch curriculum | `run_correction_kl_training.sh` | 51 |
 | **[P4]** 超参 | `run_correction_kl_training.sh` | 44-54 |
-| **[P5.1]** 双 student prompt aux loss (可选) | `recipe/kl_training/kl_trainer.py:_make_student_batch / _compute_kl_loss` | 259-421 |
+| **[P5.1]** 双 student prompt aux loss (可选) | `recipe/opd/kl_trainer.py:_make_student_batch / _compute_kl_loss` | 259-421 |
 
 ## 11. 验证
 
-- **Unit**: `recipe/kl_training/test_kl_utils.py` 补充 test case: 验证修复后 forward MC 的数值 = `(teacher_logp - student_logp).mean(mask)`,且梯度 = `-student_logp` 梯度 (teacher 项 detach 后梯度为 0)。
+- **Unit**: `recipe/opd/test_kl_utils.py` 补充 test case: 验证修复后 forward MC 的数值 = `(teacher_logp - student_logp).mean(mask)`,且梯度 = `-student_logp` 梯度 (teacher 项 detach 后梯度为 0)。
 - **Data sanity** (每次改完 stage2 filter / best-of-N): 读 filtered parquet,抽样 10 条 target `y_1`,人工确认答案正确 + 推理连贯。再跑 `amobench_parser_reward` 在 filtered set 上,reward=1 占比应该 ≈ 1.0。
 - **Training sanity** (每次 loss 改动):
   - `train/kl_loss` 应该从初始 > 0 单调下降

@@ -225,7 +225,7 @@ def _evaluate_generated_output(
         "verl.trainer.main_eval",
         f"data.path={gen_output}",
         f"data.prompt_key={prompt_key}",
-        "custom_reward_function.path=recipe/open_math_reasoning/compute_score.py",
+        "custom_reward_function.path=recipe/math_evaluation/compute_score.py",
         "custom_reward_function.name=compute_score_data_source",
         "sample_aggregation=pass_at_k",
     ]

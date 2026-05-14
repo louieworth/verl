@@ -17,7 +17,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from recipe.kl_training.kl_trainer import KLTrainer
+from recipe.opd.kl_trainer import KLTrainer
 
 
 def build_trainer(tmp_path, rank: int):
@@ -39,8 +39,8 @@ def test_export_hf_model_rank0_success(monkeypatch, tmp_path):
         recorded["cmd"] = cmd
         recorded["check"] = check
 
-    monkeypatch.setattr("recipe.kl_training.kl_trainer.subprocess.run", fake_run)
-    monkeypatch.setattr("recipe.kl_training.kl_trainer.dist.broadcast_object_list", lambda obj, src: None)
+    monkeypatch.setattr("recipe.opd.kl_trainer.subprocess.run", fake_run)
+    monkeypatch.setattr("recipe.opd.kl_trainer.dist.broadcast_object_list", lambda obj, src: None)
 
     trainer._export_hf_model()
 
@@ -57,8 +57,8 @@ def test_export_hf_model_rank0_failure_is_rethrown_after_broadcast(monkeypatch, 
     def fake_run(cmd, check):
         raise subprocess.CalledProcessError(returncode=1, cmd=cmd)
 
-    monkeypatch.setattr("recipe.kl_training.kl_trainer.subprocess.run", fake_run)
-    monkeypatch.setattr("recipe.kl_training.kl_trainer.dist.broadcast_object_list", lambda obj, src: None)
+    monkeypatch.setattr("recipe.opd.kl_trainer.subprocess.run", fake_run)
+    monkeypatch.setattr("recipe.opd.kl_trainer.dist.broadcast_object_list", lambda obj, src: None)
 
     with pytest.raises(RuntimeError, match="FSDP checkpoint export failed on rank 0"):
         trainer._export_hf_model()
@@ -70,7 +70,7 @@ def test_export_hf_model_non_rank0_raises_rank0_failure(monkeypatch, tmp_path):
     def fake_broadcast(obj, src):
         obj[0] = "CalledProcessError: Command '['python', '-m', 'verl.model_merger']' returned non-zero exit status 1."
 
-    monkeypatch.setattr("recipe.kl_training.kl_trainer.dist.broadcast_object_list", fake_broadcast)
+    monkeypatch.setattr("recipe.opd.kl_trainer.dist.broadcast_object_list", fake_broadcast)
 
     with pytest.raises(RuntimeError, match="FSDP checkpoint export failed on rank 0"):
         trainer._export_hf_model()

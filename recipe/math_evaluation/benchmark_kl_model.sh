@@ -28,7 +28,7 @@
 #   TOKENIZER_PATH=/path/to/tokenizer bash benchmark_kl_model.sh /path/to/model
 #
 #   # Batch config mode (unchanged): per-model overrides live in JSON
-#   bash benchmark_kl_model.sh --config recipe/kl_training/benchmark_batch_config.json
+#   bash benchmark_kl_model.sh --config recipe/opd/benchmark_batch_config.json
 #
 
 set -e
@@ -37,9 +37,8 @@ set -e
 # Configuration
 ################################################################################
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RECIPE_DIR="$(dirname "$SCRIPT_DIR")"             # recipe/kl_training (where run_eval_suite.py lives)
-VERL_ROOT="$(dirname "$(dirname "$RECIPE_DIR")")" # repo root
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"  # recipe/math_evaluation (where run_eval_suite.py and run_benchmark_batch.py live)
+VERL_ROOT="$(dirname "$(dirname "$SCRIPT_DIR")")"             # repo root
 PYTHON_BIN=${PYTHON_BIN:-python3}
 
 BENCHMARK_CONFIG=${BENCHMARK_CONFIG:-""}
@@ -61,7 +60,7 @@ if [ -n "${BENCHMARK_CONFIG}" ]; then
         exit 1
     fi
 
-    "${PYTHON_BIN}" "$RECIPE_DIR/run_benchmark_batch.py" --config "${BENCHMARK_CONFIG}" ${DRY_RUN_FLAG}
+    "${PYTHON_BIN}" "$SCRIPT_DIR/run_benchmark_batch.py" --config "${BENCHMARK_CONFIG}" ${DRY_RUN_FLAG}
     exit $?
 fi
 
@@ -155,7 +154,7 @@ evaluate_one_model() {
     fi
 
     local PY_CMD=(
-        "${PYTHON_BIN}" "$RECIPE_DIR/run_eval_suite.py"
+        "${PYTHON_BIN}" "$SCRIPT_DIR/run_eval_suite.py"
         --model_path "${MODEL_PATH}"
         --model_name "${MODEL_NAME}"
         --output_dir "${GEN_OUTPUT_DIR}"

@@ -34,8 +34,8 @@ from verl.workers.config import FSDPEngineConfig, FSDPOptimizerConfig, HFModelCo
 from verl.workers.engine_workers import TrainingWorker
 
 from .config import KLTrainingConfig
-from .data_utils import create_kl_dataloader
-from .eval_utils import run_evaluation_suite
+from .dataset.data_utils import create_kl_dataloader
+from recipe.math_evaluation.eval_utils import run_evaluation_suite
 from .kl_utils import compute_kl_divergence
 
 logging.basicConfig(level=logging.INFO)

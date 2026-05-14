@@ -3,12 +3,15 @@
 # Ablation: Forward KL FV on y_cor (stage2 rewrite) filtered to stage1 r=0
 # =============================================================================
 #
-# Trains forward KL FV on stage2 rewrites generated only from stage1 prompts
-# the student got WRONG (reward==0). Data already exists on disk via the
-# script's natural FORWARD_STAGE2_MODE=reward0_only path:
-#   gen_results/Qwen3-8B/epoch1/deepscaleR_stage2_reward0_y_cor_responses.parquet
-# (12318 rows; the script will auto-backfill stage1 reward into a *_s1reward
-# variant if LOG_DIFFICULTY_BUCKETS=true.)
+# Trains forward KL FV on stage2 rewrites whose underlying stage1 sample
+# was WRONG (stage1 reward==0). After the y_r_prepare.py generation-mode
+# simplification (always generates for every stage1 row), the reward==0
+# constraint is enforced *post-generation* via the stage2-filter path:
+#   FORWARD_FILTER_STAGE2=true + FORWARD_FILTER_REQUIRE_STAGE1_FAILED=true
+#   + FORWARD_FILTER_THRESHOLD=0  (i.e. keep any stage2_reward, just filter by stage1)
+# Resulting parquet:
+#   gen_results/Qwen3-8B/epoch1/deepscaleR_stage2_y_cor_responses_filtered_s1fail.parquet
+# Cost: extra GPU time generating rewrites for reward==1 rows that are then dropped.
 # =============================================================================
 
 set -e
@@ -19,8 +22,9 @@ export KL_METHOD="${KL_METHOD:-full_vocab}"
 export TEMPERATURE="${TEMPERATURE:-1}"
 export KL_TOKEN_CLIP="${KL_TOKEN_CLIP:-0}"
 export Y_MODE="${Y_MODE:-y_cor}"
-export FORWARD_STAGE2_MODE="${FORWARD_STAGE2_MODE:-reward0_only}"
-export FORWARD_FILTER_STAGE2="${FORWARD_FILTER_STAGE2:-false}"
+export FORWARD_FILTER_STAGE2="${FORWARD_FILTER_STAGE2:-true}"
+export FORWARD_FILTER_THRESHOLD="${FORWARD_FILTER_THRESHOLD:-0}"
+export FORWARD_FILTER_REQUIRE_STAGE1_FAILED="${FORWARD_FILTER_REQUIRE_STAGE1_FAILED:-true}"
 
 export TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-2}"
 export GRADIENT_ACCUMULATION_STEPS="${GRADIENT_ACCUMULATION_STEPS:-32}"
@@ -52,7 +56,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 echo "=========================================="
 echo "ABLATION: Forward KL FV on y_cor (stage1 r=0)"
 echo "=========================================="
-echo "  KL_TYPE=$KL_TYPE  Y_MODE=$Y_MODE  STAGE2_MODE=$FORWARD_STAGE2_MODE  FILTER=$FORWARD_FILTER_STAGE2"
+echo "  KL_TYPE=$KL_TYPE  Y_MODE=$Y_MODE  POST_FILTER=$FORWARD_FILTER_STAGE2 (th=$FORWARD_FILTER_THRESHOLD, s1_failed=$FORWARD_FILTER_REQUIRE_STAGE1_FAILED)"
 echo "  MODEL_SAVE_DIR=$MODEL_SAVE_DIR"
 echo "  PASS_K=$PASS_K"
 echo "=========================================="

@@ -6,10 +6,13 @@
 # Trains forward KL FV on stage2 rewrites that satisfy BOTH:
 #   stage1 student got it WRONG (reward==0) AND teacher's rewrite is CORRECT
 #   (stage2_reward >= 1.0).
-# Data parquet (already generated):
-#   gen_results/Qwen3-8B/epoch1/deepscaleR_stage2_reward0_y_cor_responses_filtered.parquet
-# (4372 rows.)
-# Achieved by setting FORWARD_STAGE2_MODE=reward0_only + FORWARD_FILTER_STAGE2=true.
+# After the y_r_prepare.py generation-mode simplification (always generates
+# for every stage1 row), both constraints are enforced post-generation:
+#   FORWARD_FILTER_STAGE2=true + FORWARD_FILTER_THRESHOLD=1.0
+#   + FORWARD_FILTER_REQUIRE_STAGE1_FAILED=true
+# Resulting parquet:
+#   gen_results/Qwen3-8B/epoch1/deepscaleR_stage2_y_cor_responses_filtered_s1fail.parquet
+# Cost: extra GPU time generating rewrites for reward==1 rows that are then dropped.
 # =============================================================================
 
 set -e
@@ -20,9 +23,9 @@ export KL_METHOD="${KL_METHOD:-full_vocab}"
 export TEMPERATURE="${TEMPERATURE:-1}"
 export KL_TOKEN_CLIP="${KL_TOKEN_CLIP:-0}"
 export Y_MODE="${Y_MODE:-y_cor}"
-export FORWARD_STAGE2_MODE="${FORWARD_STAGE2_MODE:-reward0_only}"
 export FORWARD_FILTER_STAGE2="${FORWARD_FILTER_STAGE2:-true}"
 export FORWARD_FILTER_THRESHOLD="${FORWARD_FILTER_THRESHOLD:-1.0}"
+export FORWARD_FILTER_REQUIRE_STAGE1_FAILED="${FORWARD_FILTER_REQUIRE_STAGE1_FAILED:-true}"
 
 export TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-2}"
 export GRADIENT_ACCUMULATION_STEPS="${GRADIENT_ACCUMULATION_STEPS:-32}"
@@ -53,7 +56,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 echo "=========================================="
 echo "ABLATION: Forward KL FV on y_cor (stage1 r=0 AND stage2 r=1)"
 echo "=========================================="
-echo "  KL_TYPE=$KL_TYPE  Y_MODE=$Y_MODE  STAGE2_MODE=$FORWARD_STAGE2_MODE  FILTER=$FORWARD_FILTER_STAGE2 (th=$FORWARD_FILTER_THRESHOLD)"
+echo "  KL_TYPE=$KL_TYPE  Y_MODE=$Y_MODE  POST_FILTER=$FORWARD_FILTER_STAGE2 (th=$FORWARD_FILTER_THRESHOLD, s1_failed=$FORWARD_FILTER_REQUIRE_STAGE1_FAILED)"
 echo "  MODEL_SAVE_DIR=$MODEL_SAVE_DIR"
 echo "  PASS_K=$PASS_K"
 echo "=========================================="

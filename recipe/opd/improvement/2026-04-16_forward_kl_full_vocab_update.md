@@ -17,7 +17,7 @@
 
 ### 1.1 要改的文件
 
-`recipe/kl_training/kl_utils.py:57-95` → `compute_forward_kl_monte_carlo`
+`recipe/opd/kl_utils.py:57-95` → `compute_forward_kl_monte_carlo`
 
 ### 1.2 现在的实现
 
@@ -73,7 +73,7 @@ teacher_logprobs 是常数(forward_only, `kl_trainer.py:563-567` 的 teacher eng
 
 ### 2.1 要改的文件
 
-`recipe/kl_training/run_correction_kl_training.sh:36`
+`recipe/opd/run_correction_kl_training.sh:36`
 
 ```bash
 # 现在
@@ -120,7 +120,7 @@ if self.config.kl_token_clip and self.config.kl_token_clip > 0:
 
 ### 3.1 要改的文件
 
-`recipe/kl_training/run_correction_kl_training.sh:34`
+`recipe/opd/run_correction_kl_training.sh:34`
 
 ```bash
 # 现在
@@ -233,13 +233,13 @@ Hinton KD 的传统是"训练 T 大,推理 T 小",OPSD 的 full_vocab JSD 也是
 
 | # | 文件 | 行 | 改动 |
 |---|---|---|---|
-| 1 | `recipe/kl_training/kl_utils.py` | 57-95 | `compute_forward_kl_monte_carlo` 改成返回 `(teacher_logp - student_logp) * mask`,删掉 `del teacher_logprobs` 和 NLL 退化说明 |
-| 2 | `recipe/kl_training/run_correction_kl_training.sh` | 36 | `KL_TOKEN_CLIP` 默认 `0` → `0.1` |
-| 3 | `recipe/kl_training/run_correction_kl_training.sh` | 34 | `KL_METHOD` 默认 `monte_carlo` → `full_vocab` |
+| 1 | `recipe/opd/kl_utils.py` | 57-95 | `compute_forward_kl_monte_carlo` 改成返回 `(teacher_logp - student_logp) * mask`,删掉 `del teacher_logprobs` 和 NLL 退化说明 |
+| 2 | `recipe/opd/run_correction_kl_training.sh` | 36 | `KL_TOKEN_CLIP` 默认 `0` → `0.1` |
+| 3 | `recipe/opd/run_correction_kl_training.sh` | 34 | `KL_METHOD` 默认 `monte_carlo` → `full_vocab` |
 
 不需要改的文件 (已经支持):
-- `recipe/kl_training/kl_trainer.py`: `_common_meta` / `_make_student_batch` / `_compute_kl_loss` 已有 `full_vocab` 条件分支
-- `recipe/kl_training/kl_utils.py:compute_forward_kl_full_vocab`: 实现已在,reduction="none" 已支持
+- `recipe/opd/kl_trainer.py`: `_common_meta` / `_make_student_batch` / `_compute_kl_loss` 已有 `full_vocab` 条件分支
+- `recipe/opd/kl_utils.py:compute_forward_kl_full_vocab`: 实现已在,reduction="none" 已支持
 
 ---
 
@@ -312,9 +312,9 @@ Hinton KD 的传统是"训练 T 大,推理 T 小",OPSD 的 full_vocab JSD 也是
 
 | # | 文件 | 改动 | 行为变化 |
 |---|---|---|---|
-| 1 | `recipe/kl_training/kl_utils.py` | `compute_forward_kl_monte_carlo` 从 `kl = -student_logp` 改回 `kl = (teacher_logp - student_logp) * mask` | 梯度**不变**(teacher 项 detached);`train/kl_loss` 从 NLL 变成真实 KL 值;`kl_p50/p95/p99` 变成真实 KL 分位数,`kl_token_clip` 开始有物理意义 |
-| 2 | `recipe/kl_training/run_correction_kl_training.sh:34` | `KL_METHOD` 默认 `monte_carlo` → `full_vocab` | teacher/student engine 返回 logits 而不是 logprobs,`compute_forward_kl_full_vocab` 走 `sum_v q(v)(log q - log p)`;soft-label bandwidth 从每 token 1 bit 提到 `~log2(V)` bit;代价:teacher/student logits 各 ~12 GB,可能需要降 `max_token_len_per_gpu` 或加 SP |
-| 3 | `recipe/kl_training/run_correction_kl_training.sh:36` | `KL_TOKEN_CLIP` 默认 `0` → `0.1` | 改动 1 之后 clip 的是"teacher 比 student 高出 >0.1 nats"的 style tokens (OPSD 观察 style tokens KL 是 math tokens 的 6-15 倍),保护 math token 梯度不被吞 |
+| 1 | `recipe/opd/kl_utils.py` | `compute_forward_kl_monte_carlo` 从 `kl = -student_logp` 改回 `kl = (teacher_logp - student_logp) * mask` | 梯度**不变**(teacher 项 detached);`train/kl_loss` 从 NLL 变成真实 KL 值;`kl_p50/p95/p99` 变成真实 KL 分位数,`kl_token_clip` 开始有物理意义 |
+| 2 | `recipe/opd/run_correction_kl_training.sh:34` | `KL_METHOD` 默认 `monte_carlo` → `full_vocab` | teacher/student engine 返回 logits 而不是 logprobs,`compute_forward_kl_full_vocab` 走 `sum_v q(v)(log q - log p)`;soft-label bandwidth 从每 token 1 bit 提到 `~log2(V)` bit;代价:teacher/student logits 各 ~12 GB,可能需要降 `max_token_len_per_gpu` 或加 SP |
+| 3 | `recipe/opd/run_correction_kl_training.sh:36` | `KL_TOKEN_CLIP` 默认 `0` → `0.1` | 改动 1 之后 clip 的是"teacher 比 student 高出 >0.1 nats"的 style tokens (OPSD 观察 style tokens KL 是 math tokens 的 6-15 倍),保护 math token 梯度不被吞 |
 
 **显式没有改的东西(避免和 distillation signal 改动混淆归因)**:
 - Temperature (training=1.0 / sampling=0.6 / eval=0.6 都保留,**不"对齐"**,详见 §3.5)

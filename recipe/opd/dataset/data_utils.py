@@ -150,9 +150,9 @@ class KLTrainingDataset(Dataset):
                     f"T4 (log_difficulty_buckets=True) requires extra_info.reward to be "
                     f"populated, but {missing}/{n} ({missing/n:.0%}) rows are missing it. "
                     f"\n  - For stage1 parquet: run "
-                    f"`python -m recipe.kl_training.score_stage1_reward --parquet <path>`."
+                    f"`python -m recipe.opd.dataset.score_stage1_reward --parquet <path>`."
                     f"\n  - For stage2 parquet (forward KL): run "
-                    f"`python -m recipe.kl_training.backfill_stage2_reward_from_stage1 "
+                    f"`python -m recipe.opd.dataset.backfill_stage2_reward_from_stage1 "
                     f"--stage1_parquet <stage1.parquet> --stage2_parquet <stage2.parquet> "
                     f"--output <stage2_with_reward.parquet>` and pass DATA_PATH=<output>."
                 )

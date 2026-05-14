@@ -19,7 +19,7 @@ REPO = Path("/data/verl")
 SRC = REPO / "results/Qwen3-8B/results.json"
 DST = REPO / "results/Qwen3-8B/ours_ablation_stage_2.json"
 GEN_BASE = REPO / "gen_results"
-COMPUTE_SCRIPT = REPO / "recipe/kl_training/compute_pass_at_k_from_gen.py"
+COMPUTE_SCRIPT = REPO / "recipe/math_evaluation/compute_pass_at_k_from_gen.py"
 
 # (substring identifying the model name, evaluator-tag suffix used in eval gen dirs)
 PATTERNS = [

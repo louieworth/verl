@@ -5,7 +5,7 @@
 
 import torch
 import pytest
-from recipe.kl_training.kl_utils import (
+from recipe.opd.kl_utils import (
     compute_reverse_kl_monte_carlo,
     compute_reverse_kl_full_vocab,
     compute_forward_kl_monte_carlo,

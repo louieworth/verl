@@ -3,8 +3,8 @@
 
 Idempotent: if every row already has extra_info.reward, exit without rewriting
 (unless --force). Designed to be inserted between stage1 generation and stage2
-prep in run_kl_training.sh so that stage2_prepare_rewrite_reward0.py sees a
-populated reward field.
+prep in run_kl_training.sh. Required by T4 (LOG_DIFFICULTY_BUCKETS) and by
+post-generation reward filtering (FORWARD_FILTER_STAGE2 / y_o stage1_reward_*).
 """
 import argparse
 import os
@@ -14,7 +14,7 @@ import tempfile
 import numpy as np
 import pandas as pd
 
-from recipe.open_math_reasoning.compute_score import compute_score_data_source
+from recipe.math_evaluation.compute_score import compute_score_data_source
 
 
 def _first_response(r) -> str:

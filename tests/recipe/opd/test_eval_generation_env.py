@@ -14,7 +14,7 @@
 
 import os
 
-from recipe.kl_training import eval_utils
+from recipe.opd import eval_utils
 from verl.trainer.generation_server_env import (
     TORCH_LAUNCH_ENV_KEYS,
     build_generation_server_runtime_env,

@@ -12,9 +12,9 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 # Add repository root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from recipe.kl_training.config import KLTrainingConfig
-from recipe.kl_training.kl_trainer import KLTrainer
-from recipe.kl_training._tokenizer_compat import apply_qwen2_tokenizer_vllm_compat
+from recipe.opd.config import KLTrainingConfig
+from recipe.opd.kl_trainer import KLTrainer
+from recipe.opd._tokenizer_compat import apply_qwen2_tokenizer_vllm_compat
 
 
 def parse_args():

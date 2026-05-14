@@ -35,12 +35,21 @@ KL_METHOD=${KL_METHOD:-"monte_carlo"}  # monte_carlo or full_vocab (JSD at beta�
 KL_TOKEN_CLIP=${KL_TOKEN_CLIP:-0.06}    # Per-token KL/JSD clip. OPSD 8B uses 0.06; 0 disables.
 TEMPERATURE=${TEMPERATURE:-0.7}         # Softmax temperature
 BETA=${BETA:-0}                         # JSD mixture coefficient (0=forward KL, 1=reverse KL, 0<β<1=mixture)
-Y_MODE=${Y_MODE:-"y_raw"}  # y_raw: train on stage1 student rollouts, teacher prompt = π(·|x, y*).
-                            # y_cor: train on stage2 teacher rewrites, teacher prompt = π(·|x, y_raw, y*).
+Y_MODE=${Y_MODE:-"y_o"}    # y_o (formerly y_raw): train on stage1 student rollouts, teacher prompt = π(·|x, y*).
+                            # y_r (formerly y_cor): train on stage2 teacher rewrites, teacher prompt = π(·|x, y_o, y*).
                             # Drives both data routing AND training-time teacher prompt construction.
+                            # Legacy aliases y_raw / y_cor are accepted but emit a deprecation warning.
+case "$Y_MODE" in
+    y_raw)
+        echo "WARNING: Y_MODE=y_raw is deprecated; use Y_MODE=y_o (alias accepted for backward compat)." >&2
+        Y_MODE="y_o" ;;
+    y_cor)
+        echo "WARNING: Y_MODE=y_cor is deprecated; use Y_MODE=y_r (alias accepted for backward compat)." >&2
+        Y_MODE="y_r" ;;
+esac
 PROMPT_TRUNCATION=${PROMPT_TRUNCATION:-"true"}  # When prompt+response > MAX_LENGTH: false=cut response tail (loses gradient), true=cut **Your Initial Solution:** block in teacher prompt (preserves response).
-FORWARD_STAGE2_MODE=${FORWARD_STAGE2_MODE:-"rewrite_all"}  # y_cor only: rewrite_all or reward0_only (filter stage1 input by reward==0)
-FORWARD_FILTER_STAGE2=${FORWARD_FILTER_STAGE2:-"false"}    # y_cor only: true=score y_1 after stage2 gen and keep reward>=threshold
+FORWARD_STAGE2_MODE=${FORWARD_STAGE2_MODE:-"rewrite_all"}  # y_o only: rewrite_all | stage1_reward_0_only | stage1_reward_1_only (filter stage1 parquet by reward)
+FORWARD_FILTER_STAGE2=${FORWARD_FILTER_STAGE2:-"false"}    # y_r only: true=score y_r after stage2 gen and keep reward>=threshold
 FORWARD_FILTER_THRESHOLD=${FORWARD_FILTER_THRESHOLD:-1.0}  # Minimum stage2_reward to keep (1.0 = correct)
 FORWARD_FILTER_REQUIRE_STAGE1_FAILED=${FORWARD_FILTER_REQUIRE_STAGE1_FAILED:-"false"}  # true: also require extra_info.reward==0 (lets you reuse rewrite_all parquet as reward0_only+filter)
 
@@ -117,28 +126,46 @@ EVAL_DATASETS_DIR=${EVAL_DATASETS_DIR:-"/data/data/jiangli/huggingface/datasets"
 PASS_K=${PASS_K:-1}
 
 # Paths
-# Layout: recipe/kl_training/run/<this_script>.sh
-#         recipe/kl_training/<run_training.py, run_eval_suite.py>
-#         recipe/open_math_reasoning/<stage1/2 prep, benchmark>
+# Layout: recipe/opd/run/<this_script>.sh
+#         recipe/opd/<run_training.py, run_eval_suite.py>
+#         recipe/opd/generation/<stage1/2 prep, scoring>
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RECIPE_DIR="$(dirname "$SCRIPT_DIR")"                           # recipe/kl_training
+RECIPE_DIR="$(dirname "$SCRIPT_DIR")"                           # recipe/opd
 VERL_ROOT="$(dirname "$(dirname "$RECIPE_DIR")")"               # repo root
-PIPELINE_DIR="$(dirname "$RECIPE_DIR")/open_math_reasoning"     # recipe/open_math_reasoning
+PIPELINE_DIR="$RECIPE_DIR/generation"                           # recipe/opd/generation
 
 # Training data path (for prompts)
 TRAIN_DATA_PATH=${TRAIN_DATA_PATH:-"/data/data/jiangli/data/DeepScaleR-Cleaned"}
 
 # Model name from the original base model, not from epoch checkpoints
 MODEL_NAME="${MODEL_PATH##*/}"
-if [ "$Y_MODE" = "y_cor" ]; then
+if [ "$Y_MODE" = "y_r" ]; then
     USE_INITIAL_RESPONSE="true"
-elif [ "$Y_MODE" = "y_raw" ]; then
+elif [ "$Y_MODE" = "y_o" ]; then
     USE_INITIAL_RESPONSE="false"
 else
-    echo "ERROR: Y_MODE must be one of: y_raw, y_cor (got: $Y_MODE)"
+    echo "ERROR: Y_MODE must be one of: y_o, y_r (got: $Y_MODE)"
     exit 1
 fi
-PROMPT_MODE_TAG="$Y_MODE"   # y_cor or y_raw — kept named PROMPT_MODE_TAG for backward compat with downstream string handling
+
+# MAX_PROMPT_LENGTH / MAX_RESPONSE_LENGTH default by Y_MODE: y_r prompts embed
+# the expert solution + initial response and need more headroom than y_o.
+# MAX_LENGTH = MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH unless explicitly overridden.
+if [ "$Y_MODE" = "y_r" ]; then
+    MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-24576}
+else
+    MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-2048}
+fi
+MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-16384}
+if [ -z "${MAX_LENGTH+x}" ]; then
+    MAX_LENGTH=$((MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH))
+fi
+# STAGE2_PROMPT_LENGTH (used by stage2 generation server only) tracks MAX_PROMPT_LENGTH
+# for y_r runs since both refer to the same correction-prompt budget.
+if [ "$Y_MODE" = "y_r" ]; then
+    STAGE2_PROMPT_LENGTH=${STAGE2_PROMPT_LENGTH:-$MAX_PROMPT_LENGTH}
+fi
+PROMPT_MODE_TAG="$Y_MODE"   # y_o or y_r — kept named PROMPT_MODE_TAG for backward compat with downstream string handling
 CLIP_TAG="clip$(echo $KL_TOKEN_CLIP | sed 's/\.//')"  # e.g. 0.1 -> clip01, 0.06 -> clip006
 if [ "$KL_TYPE" = "jsd" ]; then
     BETA_TAG="_beta$(echo $BETA | sed 's/\.//')"
@@ -150,23 +177,22 @@ if [ "${TOP_K:-0}" -gt 0 ]; then
 else
     TOPK_TAG=""
 fi
-# y_raw + FORWARD_STAGE2_MODE = stage1_reward_{0,1}_only filters the stage1
+# y_o + FORWARD_STAGE2_MODE = stage1_reward_{0,1}_only filters the stage1
 # parquet by extra_info.reward to produce a per-bucket training set.
-Y_RAW_FILTER_TAG=""
-if [ "$Y_MODE" = "y_raw" ]; then
+Y_O_FILTER_TAG=""
+if [ "$Y_MODE" = "y_o" ]; then
     case "${FORWARD_STAGE2_MODE:-}" in
-        "stage1_reward_0_only") Y_RAW_FILTER_TAG="_reward0" ;;
-        "stage1_reward_1_only") Y_RAW_FILTER_TAG="_reward1" ;;
+        "stage1_reward_0_only") Y_O_FILTER_TAG="_reward0" ;;
+        "stage1_reward_1_only") Y_O_FILTER_TAG="_reward1" ;;
         ""|"none"|"all"|"rewrite_all") ;;  # default = no filter
-        *) echo "ERROR: y_raw FORWARD_STAGE2_MODE must be one of: stage1_reward_0_only, stage1_reward_1_only, all (got: $FORWARD_STAGE2_MODE)"; exit 1 ;;
+        *) echo "ERROR: y_o FORWARD_STAGE2_MODE must be one of: stage1_reward_0_only, stage1_reward_1_only, all (got: $FORWARD_STAGE2_MODE)"; exit 1 ;;
     esac
 fi
-EXPERIMENT_TAG="kl_${KL_TYPE}_${KL_METHOD}_${PROMPT_MODE_TAG}_${CLIP_TAG}${BETA_TAG}${TOPK_TAG}${Y_RAW_FILTER_TAG}"
+EXPERIMENT_TAG="kl_${KL_TYPE}_${KL_METHOD}_${PROMPT_MODE_TAG}_${CLIP_TAG}${BETA_TAG}${TOPK_TAG}${Y_O_FILTER_TAG}"
 
-if [ "$Y_MODE" = "y_cor" ] && [ "$FORWARD_STAGE2_MODE" != "rewrite_all" ] && [ "$FORWARD_STAGE2_MODE" != "reward0_only" ]; then
-    echo "ERROR: y_cor FORWARD_STAGE2_MODE must be one of: rewrite_all, reward0_only"
-    exit 1
-fi
+# y_r path no longer reads FORWARD_STAGE2_MODE — y_r_prepare.py always processes
+# every stage1 row. Reward-based filtering of y_r happens post-generation via
+# FORWARD_FILTER_STAGE2=true (recipe/opd/dataset/filter_stage2_by_reward.py).
 
 if [ "$TOTAL_EPOCHS" -lt 1 ]; then
     echo "ERROR: TOTAL_EPOCHS must be >= 1"
@@ -235,15 +261,11 @@ resolve_epoch_data_path() {
     local epoch_dir
     epoch_dir="$(epoch_gen_results_dir "$epoch")"
 
-    # y_cor: train on stage2 teacher rewrites (correction prompt with initial response).
-    # y_raw: train on stage1 student rollouts (works with any KL_TYPE: forward via jsd β=0,
-    #        reverse, jsd with β>0). KL_TYPE only controls the loss math.
-    if [ "$Y_MODE" = "y_cor" ]; then
-        if [ "$FORWARD_STAGE2_MODE" = "reward0_only" ]; then
-            echo "$epoch_dir/deepscaleR_stage2_reward0_${PROMPT_MODE_TAG}_responses.parquet"
-        else
-            echo "$epoch_dir/deepscaleR_stage2_${PROMPT_MODE_TAG}_responses.parquet"
-        fi
+    # y_r: train on stage2 teacher rewrites (correction prompt with initial response).
+    # y_o: train on stage1 student rollouts (works with any KL_TYPE: forward via jsd β=0,
+    #      reverse, jsd with β>0). KL_TYPE only controls the loss math.
+    if [ "$Y_MODE" = "y_r" ]; then
+        echo "$epoch_dir/deepscaleR_stage2_${PROMPT_MODE_TAG}_responses.parquet"
     else
         case "${FORWARD_STAGE2_MODE:-}" in
             "stage1_reward_0_only") echo "$epoch_dir/deepscaleR_stage1_responses_reward0.parquet" ;;
@@ -294,7 +316,7 @@ print_base_configuration() {
     if [ "$KL_TYPE" = "jsd" ]; then
         echo "  Beta:     $BETA"
     fi
-    if [ "$Y_MODE" = "y_cor" ]; then
+    if [ "$Y_MODE" = "y_r" ]; then
         echo "  Stage2 Mode: $FORWARD_STAGE2_MODE"
         echo "  Stage2 Filter: $FORWARD_FILTER_STAGE2 (threshold=$FORWARD_FILTER_THRESHOLD)"
     fi
@@ -317,7 +339,7 @@ print_base_configuration() {
     echo "Data Settings:"
     echo "  Train Data:     $TRAIN_DATA_PATH"
     echo "  Manual Data Override: ${DATA_PATH:-<auto>}"
-    if [ "$Y_MODE" = "y_cor" ] && [ -n "$CORRECTED_RESPONSES_PATH" ]; then
+    if [ "$Y_MODE" = "y_r" ] && [ -n "$CORRECTED_RESPONSES_PATH" ]; then
         echo "  Legacy Rewrite Targets: $CORRECTED_RESPONSES_PATH"
     fi
     echo "  Max Samples:    ${MAX_SAMPLES:-all}"
@@ -387,7 +409,7 @@ run_epoch() {
     echo "Checking Training Data"
     echo "=========================================="
 
-    if [ "$Y_MODE" = "y_cor" ]; then
+    if [ "$Y_MODE" = "y_r" ]; then
         if file_exists_and_nonempty "$current_data_path"; then
             echo "Found existing Stage 2 $PROMPT_MODE_TAG data: $current_data_path"
         else
@@ -400,7 +422,7 @@ run_epoch() {
                 echo "  Stage 1 already done: $stage1_output"
             else
                 echo "  [Stage 1] Generating initial responses..."
-                python3 "$PIPELINE_DIR/stage1_prepare.py" \
+                python3 "$PIPELINE_DIR/y_o_prepare.py" \
                     --input_path "$TRAIN_DATA_PATH" \
                     --output_file "$stage1_prompts"
 
@@ -424,38 +446,25 @@ run_epoch() {
                     +data.output_path="${stage1_output}"
             fi
 
-            # Score stage1 responses and backfill extra_info.reward so that
-            # stage2_prepare_rewrite_reward0.py's reward==0 filter is meaningful.
-            # Idempotent: no-op if reward field is already populated.
+            # Score stage1 responses and backfill extra_info.reward.
+            # Required by T4 (LOG_DIFFICULTY_BUCKETS=true) and downstream reward
+            # filtering (FORWARD_FILTER_STAGE2=true). Idempotent: no-op if
+            # reward field is already populated.
             if [ "${SCORE_STAGE1:-true}" = "true" ]; then
                 echo "  [Stage 1 score] Ensuring extra_info.reward is populated..."
-                python3 -m recipe.kl_training.score_stage1_reward \
+                python3 -m recipe.opd.dataset.score_stage1_reward \
                     --parquet "$stage1_output"
             fi
 
-            local stage2_prompts
-            if [ "$FORWARD_STAGE2_MODE" = "reward0_only" ]; then
-                echo "  [Stage 2] Generating reward==0 prompts..."
-                stage2_prompts="$current_gen_results_dir/deepscaleR_stage2_reward0_${PROMPT_MODE_TAG}_prompts.parquet"
-                if file_exists_and_nonempty "$stage2_prompts"; then
-                    echo "  Stage 2 reward==0 prompts already prepared: $stage2_prompts"
-                else
-                    python3 "$PIPELINE_DIR/stage2_prepare_rewrite_reward0.py" \
-                        --stage1_output "$stage1_output" \
-                        --use_initial_response "$USE_INITIAL_RESPONSE" \
-                        --output_file "$stage2_prompts"
-                fi
+            local stage2_prompts="$current_gen_results_dir/deepscaleR_stage2_${PROMPT_MODE_TAG}_prompts.parquet"
+            if file_exists_and_nonempty "$stage2_prompts"; then
+                echo "  Stage 2 prompts already prepared: $stage2_prompts"
             else
-                echo "  [Stage 2] Generating prompts over all samples..."
-                stage2_prompts="$current_gen_results_dir/deepscaleR_stage2_${PROMPT_MODE_TAG}_prompts.parquet"
-                if file_exists_and_nonempty "$stage2_prompts"; then
-                    echo "  Stage 2 prompts already prepared: $stage2_prompts"
-                else
-                    python3 "$PIPELINE_DIR/stage2_prepare_rewrite_all.py" \
-                        --stage1_output "$stage1_output" \
-                        --use_initial_response "$USE_INITIAL_RESPONSE" \
-                        --output_file "$stage2_prompts"
-                fi
+                echo "  [Stage 2] Generating prompts over all stage1 rows..."
+                python3 "$PIPELINE_DIR/y_r_prepare.py" \
+                    --stage1_output "$stage1_output" \
+                    --use_initial_response "$USE_INITIAL_RESPONSE" \
+                    --output_file "$stage2_prompts"
             fi
 
             echo "  [Stage 2] Generating ${PROMPT_MODE_TAG} responses..."
@@ -492,7 +501,7 @@ run_epoch() {
                 echo "  [Stage 2 filter] scoring y_1 and keeping reward>=${FORWARD_FILTER_THRESHOLD}${FORWARD_FILTER_REQUIRE_STAGE1_FAILED:+ (stage1 failures only)} ..."
                 local extra_flags=""
                 [ "$FORWARD_FILTER_REQUIRE_STAGE1_FAILED" = "true" ] && extra_flags="--require_stage1_failed"
-                python3 -m recipe.kl_training.filter_stage2_by_reward \
+                python3 -m recipe.opd.dataset.filter_stage2_by_reward \
                     --input  "$current_data_path" \
                     --output "$filtered_path" \
                     --threshold "$FORWARD_FILTER_THRESHOLD" \
@@ -518,7 +527,7 @@ run_epoch() {
                     echo "  [T4 backfill] already backfilled: $backfilled_path"
                 else
                     echo "  [T4 backfill] joining stage1 reward into stage2 parquet for difficulty bucketing..."
-                    python3 -m recipe.kl_training.backfill_stage2_reward_from_stage1 \
+                    python3 -m recipe.opd.dataset.backfill_stage2_reward_from_stage1 \
                         --stage1_parquet "$stage1_for_backfill" \
                         --stage2_parquet "$current_data_path" \
                         --output "$backfilled_path"
@@ -534,7 +543,7 @@ run_epoch() {
 
             local stage1_prompts="$current_gen_results_dir/deepscaleR_stage1_prompts.parquet"
 
-            python3 "$PIPELINE_DIR/stage1_prepare.py" \
+            python3 "$PIPELINE_DIR/y_o_prepare.py" \
                 --input_path "$TRAIN_DATA_PATH" \
                 --output_file "$stage1_prompts"
 
@@ -563,7 +572,7 @@ run_epoch() {
         # Idempotent: no-op if the reward field is already populated.
         if [ "${SCORE_STAGE1:-true}" = "true" ]; then
             echo "  [Stage 1 score] Ensuring extra_info.reward is populated..."
-            python3 -m recipe.kl_training.score_stage1_reward \
+            python3 -m recipe.opd.dataset.score_stage1_reward \
                 --parquet "$current_data_path"
         fi
     fi
@@ -750,6 +759,8 @@ EOF
         local _datasets_space
         _datasets_space=$(echo "$EVAL_DATASETS" | tr ',' ' ')
 
+        local MATH_EVAL_DIR="$VERL_ROOT/recipe/math_evaluation"
+
         echo ""
         echo "=========================================="
         echo "Running evaluation via benchmark_kl_model.sh"
@@ -765,7 +776,7 @@ EOF
             EVAL_DATASETS_DIR="$EVAL_DATASETS_DIR" \
             DATASETS="$_datasets_space" \
             PASS_K="$PASS_K" \
-            bash "$SCRIPT_DIR/benchmark_kl_model.sh" "$eval_model_path"
+            bash "$MATH_EVAL_DIR/benchmark_kl_model.sh" "$eval_model_path"
         ) 2>&1 | tee "$current_output_dir/logs/eval_$(date +%Y%m%d_%H%M%S).log"
     fi
 
@@ -840,7 +851,7 @@ if [ "$RUN_EVAL_AFTER_TRAINING" = "true" ]; then
 fi
 if [ "$SAVE_MERGED_MODEL" = "true" ]; then
     echo "Merged Model: $FINAL_MODEL_SAVE_DIR/hf_merged"
-    echo "Benchmark: bash $SCRIPT_DIR/benchmark_kl_model.sh $FINAL_MODEL_SAVE_DIR/hf_merged"
+    echo "Benchmark: bash $VERL_ROOT/recipe/math_evaluation/benchmark_kl_model.sh $FINAL_MODEL_SAVE_DIR/hf_merged"
 else
     echo "FSDP Checkpoints: $FINAL_MODEL_SAVE_DIR/global_step_*"
 fi

@@ -15,7 +15,7 @@ import tempfile
 import numpy as np
 import pandas as pd
 
-from recipe.open_math_reasoning.compute_score import compute_score_data_source
+from recipe.math_evaluation.compute_score import compute_score_data_source
 
 
 def score_row(resp_str: str, gt, data_source: str) -> float:
