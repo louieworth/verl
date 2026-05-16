@@ -1,8 +1,18 @@
-# KL Training
+# OPD — On-Policy Distillation
 
-Token-level KL distillation for math reasoning. The teacher rewrites or guides
-the student's response, and the student learns the teacher's per-token
-distribution under a chosen KL objective.
+Token-level KL distillation for math reasoning. The teacher rewrites or
+guides the student's response, and the student learns the teacher's
+per-token distribution under a chosen KL objective.
+
+Two distillation modes share the same trainer and loss math:
+
+| Mode | Teacher | y_r prompt sees | When to use |
+| --- | --- | --- | --- |
+| **OPSD** (default) | = student | problem + initial response + **expert solution y\*** | On-policy *self*-distillation — same model used as both student and teacher reference, leaning on the ground-truth solution as anchor. |
+| **OPD** | ≠ student (must set `TEACHER_MODEL_PATH`) | problem + initial response only (no y\*) | Distilling from a larger / stronger teacher model. Teacher rewrites the student's attempt with no expert hint. |
+
+Mode is selected by `DISTILL_MODE=opsd|opd` env var (or `--distill_mode`
+CLI flag).
 
 ## Layout
 
@@ -16,20 +26,18 @@ recipe/opd/
 ├── run/
 │   ├── run_kl_training.sh          — shared base: infra defaults, multi-epoch loop;
 │   │                                 hands off to recipe/math_evaluation/benchmark_kl_model.sh after training
-│   ├── forward_clip_y_o.sh         — canonical 1: forward KL + clip on y_o
-│   ├── forward_y_r.sh              — canonical 2: forward KL on y_r (rewrites)
-│   ├── reverse_topk_y_o.sh         — canonical 3: reverse KL + top-K on y_o
-│   ├── reverse_y_o.sh              — canonical 4: reverse KL on y_o
-│   └── ablation/                   — every other run script (MC variants, 4B variants, reward-filtered, OPSD/JSD, queue runners)
+│   ├── opsd/                       — 4 canonical wrappers for OPSD (teacher = student, with y*)
+│   ├── opd/                        — 4 canonical wrappers for OPD  (teacher ≠ student, no y*)
+│   └── ablation/                   — MC / 4B / reward-filtered / OPSD-JSD / queue runners
 ├── anlysis/                        — figure scripts
 └── improvement/                    — writeup notes
 ```
 
 Evaluation (post-train benchmark, scoring library, dataset prep) lives in
-`recipe/math_evaluation/` — see its README. `recipe/opd/` only owns
-the training loop and the training-data prep that feeds it.
+`recipe/math_evaluation/` — see its README. `recipe/opd/` only owns the
+training loop and the training-data prep that feeds it.
 
-## The 4 canonical recipes
+## The 4 canonical recipes (× 2 modes)
 
 | Script                  | KL type | Data | Special knob       | LR    | Temp |
 | ----------------------- | ------- | ---- | ------------------ | ----- | ---- |
@@ -38,17 +46,26 @@ the training loop and the training-data prep that feeds it.
 | `reverse_topk_y_o.sh`   | reverse | y_o  | `TOP_K=32`         | 2e-6 | 1.0  |
 | `reverse_y_o.sh`        | reverse | y_o  | —                  | 2e-6 | 1.0  |
 
-Run one:
+Each one exists in both `run/opsd/` and `run/opd/`. The OPD variants are
+thin wrappers that set `DISTILL_MODE=opd`, require `TEACHER_MODEL_PATH`, and
+exec the OPSD wrapper for shared config.
+
 ```bash
-bash recipe/opd/run/reverse_topk_y_o.sh
+# OPSD — teacher = student
+bash recipe/opd/run/opsd/reverse_topk_y_o.sh
+
+# OPD — teacher ≠ student
+TEACHER_MODEL_PATH=Qwen/Qwen3-32B bash recipe/opd/run/opd/reverse_topk_y_o.sh
 ```
 
 ## Exposed parameters (env overrides)
 
 | Env var | Applies to | Default | Notes |
 | --- | --- | --- | --- |
+| `DISTILL_MODE` | all | `opsd` | `opsd` \| `opd`. OPD requires `TEACHER_MODEL_PATH`. |
+| `TEACHER_MODEL_PATH` | OPD only | empty (= student) | Path/HF id of teacher model. Must be set for OPD. |
 | `Y_MODE` | all | per-script | `y_o` (stage1 student rollout) or `y_r` (stage2 teacher rewrite). |
-| `MAX_PROMPT_LENGTH` | all | `2048` if `y_o`, `24576` if `y_r` | y_r prompts embed the expert solution + initial response. |
+| `MAX_PROMPT_LENGTH` | all | `2048` if `y_o`, `24576` if `y_r` | y_r prompts are longer because they embed the initial response (and y\* in OPSD). |
 | `MAX_RESPONSE_LENGTH` | all | `16384` | |
 | `TEMPERATURE` | all | `1.0` | Distillation softmax temperature. |
 | `LEARNING_RATE` | all | per-script (2e-6 or 5e-6) | |
@@ -65,9 +82,9 @@ deprecation warning; the canonical names are `y_o` / `y_r`.
 
 ## Adding an ablation
 
-Copy one of the four canonical scripts into `run/ablation/`, rename it, and
-edit the pinned values. Anything more invasive — new KL types, new data
-sources — goes in `kl_trainer.py` / `data_utils.py` and is exposed through
+Copy a canonical script into `run/ablation/`, rename it, and edit the
+pinned values. Anything more invasive — new KL types, new data sources —
+goes in `kl_trainer.py` / `dataset/data_utils.py` and is exposed through
 `run_kl_training.sh`.
 
 ## Data pipeline

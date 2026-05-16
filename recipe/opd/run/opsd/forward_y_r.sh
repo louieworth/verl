@@ -27,6 +27,7 @@
 set -e
 set -o pipefail
 
+export DISTILL_MODE="opsd"
 export KL_TYPE="forward"
 export KL_METHOD="full_vocab"
 export Y_MODE="${Y_MODE:-y_r}"
@@ -42,4 +43,4 @@ export GRADIENT_ACCUMULATION_STEPS=32
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-exec "$SCRIPT_DIR/run_kl_training.sh" "$@"
+exec "$(dirname "$SCRIPT_DIR")/run_kl_training.sh" "$@"

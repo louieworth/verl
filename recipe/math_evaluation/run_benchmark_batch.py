@@ -159,7 +159,7 @@ def main():
             os.path.expanduser(model_config.get("results_file", config.get("results_file", f"results/{base_model_name}/results.json")))
         )
         output_dir = os.path.abspath(
-            os.path.expanduser(model_config.get("output_dir", os.path.join("gen_results", full_model_name, "evaluate")))
+            os.path.expanduser(model_config.get("output_dir", os.path.join("gen_results", "eval", full_model_name)))
         )
         tokenizer_path = model_config.get("tokenizer_path") or config.get("tokenizer_path")
         if tokenizer_path:

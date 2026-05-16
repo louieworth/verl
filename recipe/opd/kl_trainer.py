@@ -107,17 +107,21 @@ class KLTrainer:
         destroy_global_process_group()
 
     def _init_wandb(self):
+        effective_teacher_path = self.config.teacher_model_path or self.config.student_model_path
         wandb.init(
             project=self.config.wandb_project,
             name=self.config.wandb_run_name,
             config={
+                "distill_mode": self.config.distill_mode,
                 "kl_type": self.config.kl_type,
                 "kl_method": self.config.kl_method,
                 "temperature": self.config.temperature,
                 "prompt_mode": self.config.prompt_mode_tag,
                 "use_initial_response": self.config.use_initial_response,
                 "student_model_path": self.config.student_model_path,
-                "teacher_model_path": self.config.teacher_model_path or self.config.student_model_path,
+                "student_model": self.config.student_model_path.rstrip("/").split("/")[-1],
+                "teacher_model_path": effective_teacher_path,
+                "teacher_model": effective_teacher_path.rstrip("/").split("/")[-1],
                 "use_lora": self.config.use_lora,
                 "lora_rank": self.config.lora_rank,
                 "lora_alpha": self.config.lora_alpha,
@@ -161,6 +165,7 @@ class KLTrainer:
             world_size=dp_size,
             prompt_truncation=getattr(self.config, "prompt_truncation", False),
             log_difficulty_buckets=getattr(self.config, "log_difficulty_buckets", False),
+            distill_mode=getattr(self.config, "distill_mode", "opsd"),
         )
 
     def _build_model_config(self, model_path: str, *, trainable: bool) -> HFModelConfig:

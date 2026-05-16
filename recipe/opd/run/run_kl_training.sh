@@ -29,6 +29,14 @@ set -o pipefail
 # =============================================================================
 # Configuration
 # =============================================================================
+# Distillation Mode
+DISTILL_MODE=${DISTILL_MODE:-"opsd"}   # opsd: teacher = student, teacher prompt embeds y* (expert solution).
+                                        # opd : teacher ≠ student, teacher prompt has NO expert reference.
+case "$DISTILL_MODE" in
+    opsd|opd) ;;
+    *) echo "ERROR: DISTILL_MODE must be opsd or opd (got: $DISTILL_MODE)" >&2; exit 1 ;;
+esac
+
 # KL Training Settings
 KL_TYPE=${KL_TYPE:-"reverse"}          # reverse | forward | jsd (OPSD generalized JSD)
 KL_METHOD=${KL_METHOD:-"monte_carlo"}  # monte_carlo or full_vocab (JSD at beta∈(0,1) requires full_vocab)
@@ -139,12 +147,39 @@ TRAIN_DATA_PATH=${TRAIN_DATA_PATH:-"/data/data/jiangli/data/DeepScaleR-Cleaned"}
 
 # Model name from the original base model, not from epoch checkpoints
 MODEL_NAME="${MODEL_PATH##*/}"
-if [ "$Y_MODE" = "y_r" ]; then
-    USE_INITIAL_RESPONSE="true"
-elif [ "$Y_MODE" = "y_o" ]; then
-    USE_INITIAL_RESPONSE="false"
-else
+if [ "$Y_MODE" != "y_o" ] && [ "$Y_MODE" != "y_r" ]; then
     echo "ERROR: Y_MODE must be one of: y_o, y_r (got: $Y_MODE)"
+    exit 1
+fi
+
+# TEACHER_TRAINING_PROMPT picks the teacher-side prompt variant *at training time*.
+# The generation-time prompt is FIXED (always the refine variant — for OPD it
+# always contains initial_response; for OPSD it always contains expert_solution
+# + initial_response). This knob only changes what the teacher conditions on
+# when computing logprobs over y_r tokens during the KL loss.
+#
+#   vanilla — teacher trained on π_T(·|x)         (OPD) or π_T(·|x, y*)         (OPSD)
+#   refine  — teacher trained on π_T(·|x, y_o)    (OPD) or π_T(·|x, y*, y_o)    (OPSD)
+#
+# Default: y_r data → refine (matches generation-time conditioning);
+#          y_o data → vanilla (stage1 parquet has no initial_response field).
+if [ -n "${TEACHER_TRAINING_PROMPT:-}" ]; then
+    case "$TEACHER_TRAINING_PROMPT" in
+        vanilla) USE_INITIAL_RESPONSE="false" ;;
+        refine)  USE_INITIAL_RESPONSE="true" ;;
+        *) echo "ERROR: TEACHER_TRAINING_PROMPT must be 'vanilla' or 'refine' (got: $TEACHER_TRAINING_PROMPT)" >&2; exit 1 ;;
+    esac
+else
+    if [ "$Y_MODE" = "y_r" ]; then
+        TEACHER_TRAINING_PROMPT="refine"; USE_INITIAL_RESPONSE="true"
+    else
+        TEACHER_TRAINING_PROMPT="vanilla"; USE_INITIAL_RESPONSE="false"
+    fi
+fi
+
+# refine + y_o is invalid: stage1 parquet has no initial_response field to embed.
+if [ "$Y_MODE" = "y_o" ] && [ "$USE_INITIAL_RESPONSE" = "true" ]; then
+    echo "ERROR: TEACHER_TRAINING_PROMPT=refine is incompatible with Y_MODE=y_o (no initial response in stage1 parquet)." >&2
     exit 1
 fi
 
@@ -188,11 +223,32 @@ if [ "$Y_MODE" = "y_o" ]; then
         *) echo "ERROR: y_o FORWARD_STAGE2_MODE must be one of: stage1_reward_0_only, stage1_reward_1_only, all (got: $FORWARD_STAGE2_MODE)"; exit 1 ;;
     esac
 fi
-EXPERIMENT_TAG="kl_${KL_TYPE}_${KL_METHOD}_${PROMPT_MODE_TAG}_${CLIP_TAG}${BETA_TAG}${TOPK_TAG}${Y_O_FILTER_TAG}"
+# Teacher model name — used to qualify stage2 file paths AND the experiment
+# tag. For OPSD (teacher empty → defaults to student) we fall back to the
+# student name so the qualifier is still present and consistent.
+if [ -n "${TEACHER_MODEL_PATH:-}" ]; then
+    TEACHER_MODEL_NAME="${TEACHER_MODEL_PATH##*/}"
+else
+    TEACHER_MODEL_NAME="${MODEL_NAME}"
+fi
+
+EXPERIMENT_TAG="kl_${KL_TYPE}_${KL_METHOD}_${PROMPT_MODE_TAG}_${CLIP_TAG}${BETA_TAG}${TOPK_TAG}${Y_O_FILTER_TAG}_${DISTILL_MODE}_${TEACHER_TRAINING_PROMPT}"
+# For OPD, also include teacher name so different teachers on same student
+# don't collide. (For OPSD teacher = student, redundant — skipped.)
+if [ "$DISTILL_MODE" = "opd" ]; then
+    EXPERIMENT_TAG="${EXPERIMENT_TAG}_teacher${TEACHER_MODEL_NAME}"
+fi
 
 # y_r path no longer reads FORWARD_STAGE2_MODE — y_r_prepare.py always processes
 # every stage1 row. Reward-based filtering of y_r happens post-generation via
 # FORWARD_FILTER_STAGE2=true (recipe/opd/dataset/filter_stage2_by_reward.py).
+
+# OPD requires a distinct teacher (teacher ≠ student).
+if [ "$DISTILL_MODE" = "opd" ] && [ -z "$TEACHER_MODEL_PATH" ]; then
+    echo "ERROR: DISTILL_MODE=opd requires TEACHER_MODEL_PATH to be set (teacher must differ from student)."
+    echo "       Leave it empty only for DISTILL_MODE=opsd (teacher = student)."
+    exit 1
+fi
 
 if [ "$TOTAL_EPOCHS" -lt 1 ]; then
     echo "ERROR: TOTAL_EPOCHS must be >= 1"
@@ -261,11 +317,14 @@ resolve_epoch_data_path() {
     local epoch_dir
     epoch_dir="$(epoch_gen_results_dir "$epoch")"
 
-    # y_r: train on stage2 teacher rewrites (correction prompt with initial response).
-    # y_o: train on stage1 student rollouts (works with any KL_TYPE: forward via jsd β=0,
-    #      reverse, jsd with β>0). KL_TYPE only controls the loss math.
+    # y_r: train on stage2 teacher rewrites. Qualified by DISTILL_MODE and the
+    #      TEACHER_MODEL_NAME because:
+    #        - OPSD vs OPD use different teacher prompts (with/without y*)
+    #        - Different teachers (e.g. Qwen3-8B vs Qwen3-32B) produce different y_r
+    # y_o: train on stage1 student rollouts (no qualifier — student rollouts
+    #      depend only on the student model already in the path).
     if [ "$Y_MODE" = "y_r" ]; then
-        echo "$epoch_dir/deepscaleR_stage2_${PROMPT_MODE_TAG}_responses.parquet"
+        echo "$epoch_dir/deepscaleR_stage2_${PROMPT_MODE_TAG}_${DISTILL_MODE}_${TEACHER_MODEL_NAME}_responses.parquet"
     else
         case "${FORWARD_STAGE2_MODE:-}" in
             "stage1_reward_0_only") echo "$epoch_dir/deepscaleR_stage1_responses_reward0.parquet" ;;
@@ -312,7 +371,8 @@ print_base_configuration() {
     echo "  Method:   $KL_METHOD"
     echo "  Temp:     $TEMPERATURE"
     echo "  Clip:     $KL_TOKEN_CLIP"
-    echo "  Y Mode:   $Y_MODE  (prompt_tag=$PROMPT_MODE_TAG, use_initial_response=$USE_INITIAL_RESPONSE)"
+    echo "  Y Mode:   $Y_MODE  (prompt_tag=$PROMPT_MODE_TAG)"
+    echo "  Distill:  $DISTILL_MODE  (teacher_training_prompt=$TEACHER_TRAINING_PROMPT, use_initial_response=$USE_INITIAL_RESPONSE)"
     if [ "$KL_TYPE" = "jsd" ]; then
         echo "  Beta:     $BETA"
     fi
@@ -456,22 +516,33 @@ run_epoch() {
                     --parquet "$stage1_output"
             fi
 
-            local stage2_prompts="$current_gen_results_dir/deepscaleR_stage2_${PROMPT_MODE_TAG}_prompts.parquet"
+            local stage2_prompts="$current_gen_results_dir/deepscaleR_stage2_${PROMPT_MODE_TAG}_${DISTILL_MODE}_${TEACHER_MODEL_NAME}_prompts.parquet"
             if file_exists_and_nonempty "$stage2_prompts"; then
                 echo "  Stage 2 prompts already prepared: $stage2_prompts"
             else
                 echo "  [Stage 2] Generating prompts over all stage1 rows..."
+                # Generation prompt is fixed (always refine variant) — y_r_prepare.py
+                # hardcodes use_initial_response=True for both OPSD and OPD. The
+                # training-side teacher conditioning (TEACHER_TRAINING_PROMPT) is
+                # independent and goes to run_training.py, not here.
                 python3 "$PIPELINE_DIR/y_r_prepare.py" \
                     --stage1_output "$stage1_output" \
-                    --use_initial_response "$USE_INITIAL_RESPONSE" \
+                    --distill_mode "$DISTILL_MODE" \
                     --output_file "$stage2_prompts"
             fi
 
+            # OPD: y_r must come from the TEACHER's distribution.
+            # OPSD: teacher = student, so either path works.
+            local stage2_gen_model_path="$current_model_path"
+            if [ "$DISTILL_MODE" = "opd" ]; then
+                stage2_gen_model_path="$current_teacher_model_path"
+                echo "  [Stage 2] (OPD) Using TEACHER model for y_r generation: $stage2_gen_model_path"
+            fi
             echo "  [Stage 2] Generating ${PROMPT_MODE_TAG} responses..."
             python3 -m verl.trainer.main_generation_server \
                 trainer.nnodes="${NNODES}" \
                 trainer.n_gpus_per_node="${NGPUS_PER_NODE}" \
-                actor_rollout_ref.model.path="${current_model_path}" \
+                actor_rollout_ref.model.path="${stage2_gen_model_path}" \
                 actor_rollout_ref.model.trust_remote_code=true \
                 actor_rollout_ref.rollout.temperature=0.6 \
                 actor_rollout_ref.rollout.top_p=0.95 \
@@ -637,6 +708,7 @@ EOF
         $RECIPE_DIR/run_training.py \
         --nnodes $NNODES \
         --n_gpus_per_node $NGPUS_PER_NODE \
+        --distill_mode $DISTILL_MODE \
         --kl_type $KL_TYPE \
         --kl_method $KL_METHOD \
         --kl_token_clip $KL_TOKEN_CLIP \

@@ -132,7 +132,7 @@ evaluate_one_model() {
     BASE_MODEL_NAME=$(echo "${FULL_MODEL_NAME}" | sed -E 's/_kl_.*$//')
     MODEL_NAME="${FULL_MODEL_NAME}${EPOCH_SUFFIX}"
 
-    local GEN_OUTPUT_DIR="gen_results/${FULL_MODEL_NAME}/evaluate"
+    local GEN_OUTPUT_DIR="gen_results/eval/${FULL_MODEL_NAME}"
     mkdir -p "${GEN_OUTPUT_DIR}"
 
     local RESULTS_FILE="results/${BASE_MODEL_NAME}/results.json"

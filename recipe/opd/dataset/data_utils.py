@@ -15,7 +15,30 @@ from verl.utils.dataset.dataset_utils import DatasetPadMode, SFTTensorCollator
 instruction_following = "Please reason step by step, and put your final answer within \\boxed{}."
 
 
-PROMPT_TEMPLATE_REVERSE_KL_TEACHER = """
+# =============================================================================
+# Teacher / student prompt templates (training-time)
+# =============================================================================
+# The 4 teacher prompts form a 2×2 grid:
+#
+#                          | use_initial_response = False  | use_initial_response = True
+#   ─────────────────────  | ───────────────────────────── | ─────────────────────────────────
+#   distill_mode = "opsd"  | vanilla OPSD: π_T(·|x, y*)    | refine OPSD:  π_T(·|x, y*, y_o)
+#   distill_mode = "opd"   | vanilla OPD:  π_T(·|x)        | refine OPD:   π_T(·|x, y_o)
+#
+# The student prompt is always just π_S(·|x) (problem only). All 4 teacher
+# templates that embed initial_response share the same **Your Initial
+# Solution:** / **Instructions:** markers so the prompt-truncation logic
+# below works uniformly.
+# =============================================================================
+
+
+# Student prompt — used in all (distill_mode, use_initial_response) combos.
+PROMPT_TEMPLATE_STUDENT = """
+{PROBLEM}
+"""
+
+# vanilla OPSD: teacher sees problem + expert solution (no initial response).
+PROMPT_TEMPLATE_OPSD_VANILLA_TEACHER = """
 {PROBLEM}
 
 Here is a reference solution:
@@ -25,11 +48,8 @@ After understanding the reference solution, please try to solve this problem usi
 Answer:
 """
 
-PROMPT_TEMPLATE_REVERSE_KL_STUDENT = """
-{PROBLEM}
-"""
-
-PROMPT_TEMPLATE_FORWARD_KL_WITH_INITIAL_RESPONSE = """
+# refine OPSD: teacher sees problem + expert solution + initial response.
+PROMPT_TEMPLATE_OPSD_REFINE_TEACHER = """
 Your task is to rewrite your mathematical solution using the reference solution as guidance.
 
 **Problem:**
@@ -48,6 +68,29 @@ Your task is to rewrite your mathematical solution using the reference solution 
 4. Output ONLY the rewritten solution
 """
 
+# vanilla OPD: teacher sees only the problem (no y*, no y_o).
+PROMPT_TEMPLATE_OPD_VANILLA_TEACHER = """
+{PROBLEM}
+"""
+
+# refine OPD: teacher sees problem + initial response (no expert reference).
+# Same instruction shape as refine OPSD, minus the expert-anchor language.
+PROMPT_TEMPLATE_OPD_REFINE_TEACHER = """
+Your task is to rewrite your mathematical solution.
+
+**Problem:**
+{PROBLEM}
+
+**Your Initial Solution:**
+{INITIAL_RESPONSE}
+
+**Instructions:**
+1. Preserve the overall structure and reasoning path of your original solution
+2. Identify and fix errors in computation or logic
+3. Keep correct intermediate steps and meaningful work
+4. Output ONLY the rewritten solution
+"""
+
 
 def build_teacher_prompt(
     problem: str,
@@ -55,21 +98,41 @@ def build_teacher_prompt(
     *,
     initial_response: str = "",
     use_initial_response: bool = False,
+    distill_mode: str = "opsd",
 ) -> str:
-    """Build the teacher-side prompt for either rewrite-only or rewrite-with-initial-response mode."""
-    if use_initial_response:
-        prompt = (
-            PROMPT_TEMPLATE_FORWARD_KL_WITH_INITIAL_RESPONSE.replace("{PROBLEM}", problem)
-            .replace("{INITIAL_RESPONSE}", initial_response)
-            .replace("{EXPERT_SOLUTION}", expert_solution)
-            .strip()
-        )
-    else:
-        prompt = (
-            PROMPT_TEMPLATE_REVERSE_KL_TEACHER.replace("{PROBLEM}", problem)
-            .replace("{EXPERT_SOLUTION}", expert_solution)
-            .strip()
-        )
+    """Build the teacher-side prompt by (distill_mode × use_initial_response):
+
+        opsd + False → vanilla OPSD: π_T(·|x, y*)
+        opsd + True  → refine  OPSD: π_T(·|x, y*, y_o)
+        opd  + False → vanilla OPD:  π_T(·|x)
+        opd  + True  → refine  OPD:  π_T(·|x, y_o)
+    """
+    if distill_mode == "opd":
+        if use_initial_response:
+            prompt = (
+                PROMPT_TEMPLATE_OPD_REFINE_TEACHER
+                .replace("{PROBLEM}", problem)
+                .replace("{INITIAL_RESPONSE}", initial_response)
+                .strip()
+            )
+        else:
+            prompt = PROMPT_TEMPLATE_OPD_VANILLA_TEACHER.replace("{PROBLEM}", problem).strip()
+    else:  # opsd
+        if use_initial_response:
+            prompt = (
+                PROMPT_TEMPLATE_OPSD_REFINE_TEACHER
+                .replace("{PROBLEM}", problem)
+                .replace("{INITIAL_RESPONSE}", initial_response)
+                .replace("{EXPERT_SOLUTION}", expert_solution)
+                .strip()
+            )
+        else:
+            prompt = (
+                PROMPT_TEMPLATE_OPSD_VANILLA_TEACHER
+                .replace("{PROBLEM}", problem)
+                .replace("{EXPERT_SOLUTION}", expert_solution)
+                .strip()
+            )
     return prompt + " " + instruction_following
 
 
@@ -92,6 +155,7 @@ class KLTrainingDataset(Dataset):
         use_initial_response: bool = False,
         prompt_truncation: bool = False,
         log_difficulty_buckets: bool = False,
+        distill_mode: str = "opsd",
     ):
         self.tokenizer = tokenizer
         self.kl_type = kl_type
@@ -99,6 +163,7 @@ class KLTrainingDataset(Dataset):
         self.use_initial_response = use_initial_response
         self.prompt_truncation = prompt_truncation
         self.log_difficulty_buckets = log_difficulty_buckets
+        self.distill_mode = distill_mode
         if prompt_truncation:
             print(
                 "[KLTrainingDataset] prompt_truncation=ON: when prompt+response > max_length, "
@@ -296,7 +361,7 @@ class KLTrainingDataset(Dataset):
         if not response:
             raise ValueError("Reverse KL requires stage1 responses in the 'responses' field.")
 
-        student_prompt = PROMPT_TEMPLATE_REVERSE_KL_STUDENT.replace("{PROBLEM}", problem).strip()
+        student_prompt = PROMPT_TEMPLATE_STUDENT.replace("{PROBLEM}", problem).strip()
         student_prompt = student_prompt + " " + instruction_following
 
         teacher_prompt = build_teacher_prompt(
@@ -304,6 +369,7 @@ class KLTrainingDataset(Dataset):
             expert_solution,
             initial_response=response,
             use_initial_response=self.use_initial_response,
+            distill_mode=self.distill_mode,
         )
 
         out = self._prepare_item(student_prompt=student_prompt, teacher_prompt=teacher_prompt, response=response)
@@ -340,6 +406,7 @@ class KLTrainingDataset(Dataset):
             expert_solution,
             initial_response=initial_response,
             use_initial_response=self.use_initial_response,
+            distill_mode=self.distill_mode,
         )
 
         out = self._prepare_item(
@@ -366,6 +433,7 @@ def create_kl_dataloader(
     world_size: int = 1,
     prompt_truncation: bool = False,
     log_difficulty_buckets: bool = False,
+    distill_mode: str = "opsd",
 ) -> DataLoader:
     dataset = KLTrainingDataset(
         data_path=data_path,
@@ -377,6 +445,7 @@ def create_kl_dataloader(
         use_initial_response=use_initial_response,
         prompt_truncation=prompt_truncation,
         log_difficulty_buckets=log_difficulty_buckets,
+        distill_mode=distill_mode,
     )
 
     sampler = None

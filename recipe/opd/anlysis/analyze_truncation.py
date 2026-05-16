@@ -17,7 +17,7 @@ import datasets
 from transformers import AutoTokenizer
 
 from recipe.opd.dataset.data_utils import (
-    PROMPT_TEMPLATE_REVERSE_KL_STUDENT,
+    PROMPT_TEMPLATE_STUDENT,
     build_teacher_prompt,
     instruction_following,
 )
@@ -77,7 +77,7 @@ def build_reverse_prompts(item: dict[str, Any], use_initial_response: bool) -> t
     if not response:
         raise ValueError("Reverse KL requires stage1 responses in the 'responses' field.")
 
-    student_prompt = PROMPT_TEMPLATE_REVERSE_KL_STUDENT.replace("{PROBLEM}", problem).strip()
+    student_prompt = PROMPT_TEMPLATE_STUDENT.replace("{PROBLEM}", problem).strip()
     student_prompt = student_prompt + " " + instruction_following
     teacher_prompt = build_teacher_prompt(
         problem,

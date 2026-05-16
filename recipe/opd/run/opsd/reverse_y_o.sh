@@ -23,6 +23,7 @@
 set -e
 set -o pipefail
 
+export DISTILL_MODE="opsd"
 export KL_TYPE="reverse"
 export KL_METHOD="full_vocab"
 export Y_MODE="${Y_MODE:-y_o}"
@@ -35,4 +36,4 @@ export TOTAL_EPOCHS="${TOTAL_EPOCHS:-1}"
 export GRADIENT_ACCUMULATION_STEPS=16
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-exec "$SCRIPT_DIR/run_kl_training.sh" "$@"
+exec "$(dirname "$SCRIPT_DIR")/run_kl_training.sh" "$@"

@@ -20,6 +20,13 @@ from recipe.opd._tokenizer_compat import apply_qwen2_tokenizer_vllm_compat
 def parse_args():
     parser = argparse.ArgumentParser(description="KL Divergence Training for Math Reasoning")
 
+    # Distillation Mode
+    parser.add_argument(
+        "--distill_mode", type=str, default="opsd", choices=["opsd", "opd"],
+        help="opsd: teacher = student, teacher prompt embeds expert solution. "
+             "opd: teacher != student, teacher prompt has no expert reference.",
+    )
+
     # KL Settings
     parser.add_argument("--kl_type", type=str, default="reverse", choices=["reverse", "forward", "jsd"])
     parser.add_argument("--kl_method", type=str, default="monte_carlo", choices=["monte_carlo", "full_vocab"])
@@ -137,6 +144,8 @@ def main():
 
     # Create config
     config = KLTrainingConfig(
+        # Distillation Mode
+        distill_mode=args.distill_mode,
         # KL Settings
         kl_type=args.kl_type,
         kl_method=args.kl_method,

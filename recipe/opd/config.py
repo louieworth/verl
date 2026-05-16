@@ -20,6 +20,11 @@ def get_prompt_mode_tag(use_initial_response: bool) -> str:
 class KLTrainingConfig:
     """Configuration for KL Divergence Training."""
 
+    # Distillation Mode
+    # opsd: on-policy self-distillation — teacher = student, teacher prompt embeds y* (expert solution).
+    # opd : on-policy distillation       — teacher ≠ student, teacher prompt has NO expert reference.
+    distill_mode: Literal["opsd", "opd"] = "opsd"
+
     # KL Settings
     kl_type: Literal["reverse", "forward", "jsd"] = "reverse"
     kl_method: Literal["monte_carlo", "full_vocab"] = "monte_carlo"
@@ -164,6 +169,12 @@ class KLTrainingConfig:
 
         if not self.bf16 and not self.fp16:
             print("Warning: Neither bf16 nor fp16 is enabled. Training will use fp32.")
+
+        if self.distill_mode == "opd" and not self.teacher_model_path:
+            raise ValueError(
+                "distill_mode='opd' requires a distinct teacher: set teacher_model_path. "
+                "Leave it empty only for distill_mode='opsd' (teacher = student)."
+            )
 
         self.eval_dataset_paths = {
             "aime24": f"{self.eval_datasets_dir}/aime24/aime24_test.parquet",

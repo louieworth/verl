@@ -3,10 +3,20 @@
 #
 # y_r prompt preparation — build stage2 rewrite prompts for every stage1 row.
 #
-# A "y_r" example is the teacher's *rewritten* response to a problem, used as
-# the training target for forward KL on stage2 data. This script takes the
-# stage1 parquet (student rollouts with reward) and produces the prompt that
-# the teacher will rollout against to generate y_r.
+# A "y_r" example is the teacher's rewrite of the student's stage1 attempt.
+# This script takes the stage1 parquet (student rollouts) and produces the
+# prompt that the teacher will rollout against to generate y_r.
+#
+# The generation prompt is FIXED (always the refine variant — teacher reads
+# the initial response). The two templates differ only by whether they show
+# the expert solution:
+#
+#   --distill_mode opsd  →  refine OPSD: π_T(·|x, y*, y_o)
+#   --distill_mode opd   →  refine OPD:  π_T(·|x, y_o)
+#
+# The training-time teacher conditioning is a separate knob (driven by
+# TEACHER_TRAINING_PROMPT in run_kl_training.sh / use_initial_response in
+# config.py) and may be vanilla or refine independently.
 #
 # Always processes every stage1 row. If you want to train only on rewrites of
 # failed samples, do the reward filtering downstream via
@@ -21,17 +31,8 @@ import datasets
 instruction_following = "Please reason step by step, and put your final answer within \\boxed{}."
 
 
-PROMPT_TEMPLATE_REWRITE_FROM_EXPERT = """
-{PROBLEM}
-
-Here is a reference solution:
-{EXPERT_SOLUTION}
-
-After understanding the reference solution, please try to solve this problem using your own approach below:
-Answer:
-"""
-
-PROMPT_TEMPLATE_REWRITE_WITH_INITIAL_RESPONSE = """
+# refine OPSD: teacher sees problem + expert solution + initial response.
+PROMPT_TEMPLATE_OPSD_REFINE = """
 Your task is to rewrite your mathematical solution using the reference solution as guidance.
 
 **Problem:**
@@ -50,6 +51,23 @@ Your task is to rewrite your mathematical solution using the reference solution 
 4. Output ONLY the rewritten solution
 """
 
+# refine OPD: teacher sees problem + initial response (no expert reference).
+PROMPT_TEMPLATE_OPD_REFINE = """
+Your task is to rewrite your mathematical solution.
+
+**Problem:**
+{PROBLEM}
+
+**Your Initial Solution:**
+{INITIAL_RESPONSE}
+
+**Instructions:**
+1. Preserve the overall structure and reasoning path of your original solution
+2. Identify and fix errors in computation or logic
+3. Keep correct intermediate steps and meaningful work
+4. Output ONLY the rewritten solution
+"""
+
 
 def _normalize_reward_value(val: Any) -> int:
     if isinstance(val, list):
@@ -60,7 +78,7 @@ def _normalize_reward_value(val: Any) -> int:
         return 0
 
 
-def make_map_fn(use_initial_response: bool):
+def make_map_fn(distill_mode: str):
     def process_fn(example: Dict[str, Any]):
         extra_info = (example.get("extra_info", {}) or {}).copy()
         extra_info["reward"] = _normalize_reward_value(extra_info.get("reward", 0))
@@ -72,17 +90,17 @@ def make_map_fn(use_initial_response: bool):
         problem = extra_info.get("problem", "")
         expert_solution = extra_info.get("expert_cot", "")
 
-        if use_initial_response:
+        if distill_mode == "opd":
             prompt_content = (
-                PROMPT_TEMPLATE_REWRITE_WITH_INITIAL_RESPONSE
+                PROMPT_TEMPLATE_OPD_REFINE
                 .replace("{PROBLEM}", problem)
                 .replace("{INITIAL_RESPONSE}", initial_response)
-                .replace("{EXPERT_SOLUTION}", expert_solution)
             )
-        else:
+        else:  # opsd
             prompt_content = (
-                PROMPT_TEMPLATE_REWRITE_FROM_EXPERT
+                PROMPT_TEMPLATE_OPSD_REFINE
                 .replace("{PROBLEM}", problem)
+                .replace("{INITIAL_RESPONSE}", initial_response)
                 .replace("{EXPERT_SOLUTION}", expert_solution)
             )
         prompt_content = prompt_content + " " + instruction_following
@@ -111,20 +129,20 @@ def main() -> None:
         help="Output parquet for y_r prompts.",
     )
     parser.add_argument(
-        "--use_initial_response",
-        type=lambda x: x.lower() == "true",
-        default=False,
-        help="If true, embed the stage1 response in the prompt; otherwise reference-only.",
+        "--distill_mode",
+        choices=["opsd", "opd"],
+        default="opsd",
+        help="opsd: teacher sees expert solution + initial response. "
+             "opd:  teacher sees only initial response (no expert reference).",
     )
     args = parser.parse_args()
 
     print(f"Loading Stage 1 output: {args.stage1_output}")
     ds_raw = datasets.load_dataset("parquet", data_files=args.stage1_output, split="train")
 
-    prompt_mode = "rewrite_with_initial_response" if args.use_initial_response else "rewrite_from_expert"
-    print(f"Building y_r prompts ({len(ds_raw)} rows, prompt={prompt_mode})...")
+    print(f"Building y_r prompts ({len(ds_raw)} rows, refine {args.distill_mode.upper()})...")
     ds_out = ds_raw.map(
-        function=make_map_fn(args.use_initial_response),
+        function=make_map_fn(args.distill_mode),
         remove_columns=["responses"],
     )
 
