@@ -46,7 +46,17 @@ export GRADIENT_ACCUMULATION_STEPS=32
 export TEACHER_TRAINING_PROMPT="${TEACHER_TRAINING_PROMPT:-refine}"
 
 # OOM mitigation (y_r prompts are long).
-export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+# y_r default MAX_LENGTH = 24576 + 16384 = 40960; single-sample logits in
+# full_vocab ≈ 12.5 GiB plus fp32 softmax intermediates. With Qwen3-8B teacher
+# resident alongside Qwen3-1.7B student on A100-40G, this OOMs unless we
+# either split the sequence (SP) or offload teacher params.
+#
+# NOTE: do NOT export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True at top
+# level — it propagates into the stage1/stage2 vLLM subprocesses and crashes
+# them with "Expandable segments are not compatible with memory pool".
+# run_kl_training.sh already enables it inside the inner torchrun subshell.
+export SP_SIZE="${SP_SIZE:-2}"                  # halve per-GPU token count → logits peak ~6 GiB
+export PARAM_OFFLOAD="${PARAM_OFFLOAD:-true}"   # 8B teacher params → CPU when idle, ~2 GiB/GPU back
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 exec "$(dirname "$SCRIPT_DIR")/run_kl_training.sh" "$@"
