@@ -71,6 +71,13 @@ class BaseModelInitializer(ABC):
         transformer_layer_spec = self.get_transformer_layer_spec(vp_stage=vp_stage)
         rope_scaling_args = self.get_rope_scaling_args()
         mtp_block_spec = extra_kwargs.get("mtp_block_spec", None)
+        rotary_base = getattr(self.hf_config, "rope_theta", None)
+        if rotary_base is None:
+            rope_parameters = getattr(self.hf_config, "rope_parameters", None)
+            if isinstance(rope_parameters, dict):
+                rotary_base = rope_parameters.get("rope_theta", rope_parameters.get("base"))
+        if rotary_base is None:
+            rotary_base = 10000
         model = GPTModel(
             config=self.tfconfig,
             transformer_layer_spec=transformer_layer_spec,
@@ -80,7 +87,7 @@ class BaseModelInitializer(ABC):
             post_process=post_process,
             share_embeddings_and_output_weights=share_embeddings_and_output_weights,
             position_embedding_type="rope",
-            rotary_base=self.hf_config.rope_theta,
+            rotary_base=rotary_base,
             **rope_scaling_args,
             mtp_block_spec=mtp_block_spec,
             **({} if not self.has_vp_stage else {"vp_stage": vp_stage}),

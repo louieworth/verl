@@ -93,7 +93,12 @@ def main(config):
 
     # Initialize Ray
     if not ray.is_initialized():
-        ray.init(**OmegaConf.to_container(config.ray_kwargs.get("ray_init", {})))
+        ray_init_kwargs = OmegaConf.to_container(config.ray_kwargs.get("ray_init", {}), resolve=True)
+        if ray_init_kwargs.get("address") or os.environ.get("RAY_ADDRESS"):
+            ray_init_kwargs = dict(ray_init_kwargs)
+            ray_init_kwargs.pop("num_cpus", None)
+            ray_init_kwargs.pop("num_gpus", None)
+        ray.init(**ray_init_kwargs)
 
     # evaluate test_score based on data source
     data_source_reward = defaultdict(list)

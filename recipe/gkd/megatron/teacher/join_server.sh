@@ -4,6 +4,7 @@ export PROXY_BACKEND_PORT=15556
 PROXY_IP="127.0.0.1"
 BACKEND=vllm
 CKPT_PATH="/path/to/TEACHER_MODEL/"
+N_LOGPROBS="${N_LOGPROBS:-full_vocab}"
 
 wait_server_ready() {
     server=$1
@@ -28,6 +29,6 @@ wait_server_ready proxy $PROXY_IP $PROXY_BACKEND_PORT
 
 echo "teacher proxy is ready"
 
-nohup python worker.py --backend $BACKEND --proxy-addr $PROXY_IP:$PROXY_BACKEND_PORT --tp-size 8 --n-logprobs 256 --ckpt-path $CKPT_PATH &> worker.log &
+nohup python worker.py --backend $BACKEND --proxy-addr $PROXY_IP:$PROXY_BACKEND_PORT --tp-size 8 --n-logprobs "$N_LOGPROBS" --ckpt-path $CKPT_PATH &> worker.log &
 
 echo "teacher server is ready"

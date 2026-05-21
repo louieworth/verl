@@ -1,0 +1,45 @@
+#!/bin/bash
+# Defaults for the 1-node H200 "y_o share" layout (8 GPU on one node):
+#   GPU 0:        teacher Qwen3-8B vLLM (TP=1)
+#   GPU 1,2,3:    student rollout vLLM (DP=3)
+#   GPU 4,5,6,7:  student Megatron actor (DP=4, hybrid_engine=False)
+#
+# Functionally equivalent to _h100_2node_share_defaults.sh but on a single
+# H200 node (8 GPUs total = 1+3+4) instead of 2 H100 nodes (8 = 4+4 with
+# 1+3 on shared, 4 on dedicated). Same logical roles, same isolation
+# properties for actor.
+
+export SCHEDULER="${SCHEDULER:-one_step_off}"
+export OPTIMIZATION_MODE="${OPTIMIZATION_MODE:-multi_step}"
+export TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-1024}"
+export USE_DYNAMIC_BSZ="${USE_DYNAMIC_BSZ:-True}"
+export STUDENT_ACTOR_MAX_TOKENS_PER_GPU="${STUDENT_ACTOR_MAX_TOKENS_PER_GPU:-49152}"
+export GPU_TYPE="${GPU_TYPE:-h200}"
+export RESOURCE_LAYOUT="one_node_share"
+export TRAINING_NNODES="${TRAINING_NNODES:-1}"
+export ROLLOUT_NNODES="${ROLLOUT_NNODES:-1}"
+export TEACHER_NNODES="${TEACHER_NNODES:-1}"
+
+# CUDA_VISIBLE_DEVICES split for the single 8-GPU node:
+export TEACHER_CUDA_VISIBLE_DEVICES="${TEACHER_CUDA_VISIBLE_DEVICES:-0}"
+export ROLLOUT_CUDA_VISIBLE_DEVICES="${ROLLOUT_CUDA_VISIBLE_DEVICES:-1,2,3}"
+export TRAINING_CUDA_VISIBLE_DEVICES="${TRAINING_CUDA_VISIBLE_DEVICES:-4,5,6,7}"
+
+export TEACHER_GPUS_PER_NODE="${TEACHER_GPUS_PER_NODE:-1}"
+export ROLLOUT_GPUS_PER_NODE="${ROLLOUT_GPUS_PER_NODE:-3}"
+export TRAINING_GPUS_PER_NODE="${TRAINING_GPUS_PER_NODE:-4}"
+export NODE_GPUS_TOTAL="${NODE_GPUS_TOTAL:-8}"
+
+export TEACHER_TP_SIZE="${TEACHER_TP_SIZE:-1}"
+
+# Teacher gets a dedicated GPU in this layout.
+export TEACHER_GPU_MEMORY_UTILIZATION="${TEACHER_GPU_MEMORY_UTILIZATION:-0.85}"
+
+export ROLLOUT_ENABLE_SLEEP_MODE="${ROLLOUT_ENABLE_SLEEP_MODE:-False}"
+export ROLLOUT_FREE_CACHE_ENGINE="${ROLLOUT_FREE_CACHE_ENGINE:-False}"
+export ROLLOUT_GPU_MEMORY_UTILIZATION="${ROLLOUT_GPU_MEMORY_UTILIZATION:-0.85}"
+export ROLLOUT_ENABLE_CHUNKED_PREFILL="${ROLLOUT_ENABLE_CHUNKED_PREFILL:-True}"
+export ROLLOUT_ENABLE_PREFIX_CACHING="${ROLLOUT_ENABLE_PREFIX_CACHING:-True}"
+export ROLLOUT_MAX_NUM_BATCHED_TOKENS="${ROLLOUT_MAX_NUM_BATCHED_TOKENS:-20480}"
+
+export KEEP_ALIVE_ON_FAILURE="${KEEP_ALIVE_ON_FAILURE:-true}"

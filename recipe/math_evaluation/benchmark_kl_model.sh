@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Benchmark KL Training Model on Math Datasets
-# Results are saved to results/${BASE_MODEL_NAME}/results.json (same format as run_full_pipeline_multi_epoch.sh)
+# Results are saved to ${EVAL_RESULTS_FILE}, or results/${BASE_MODEL_NAME}/results.json by default.
 #
 # Usage:
 #   bash benchmark_kl_model.sh <model_path> [<model_path2> ...]
@@ -105,6 +105,9 @@ DATASETS_TO_TEST_CSV=$(echo "${DATASETS_TO_TEST}" | tr ' ' ',')
 
 # Pass@k
 PASS_K=${PASS_K:-1}
+GEN_OUTPUT_BASE_DIR=${GEN_OUTPUT_BASE_DIR:-gen_results/eval}
+RESULTS_BASE_DIR=${RESULTS_BASE_DIR:-results}
+WRITE_PASS16_AGGREGATES=${WRITE_PASS16_AGGREGATES:-true}
 
 ################################################################################
 # Per-model evaluation
@@ -129,14 +132,14 @@ evaluate_one_model() {
         EPOCH_SUFFIX=""
     fi
 
-    BASE_MODEL_NAME=$(echo "${FULL_MODEL_NAME}" | sed -E 's/_kl_.*$//')
-    MODEL_NAME="${FULL_MODEL_NAME}${EPOCH_SUFFIX}"
+    BASE_MODEL_NAME="${EVAL_BASE_MODEL_NAME:-$(echo "${FULL_MODEL_NAME}" | sed -E 's/_kl_.*$//')}"
+    MODEL_NAME="${EVAL_MODEL_NAME:-${FULL_MODEL_NAME}${EPOCH_SUFFIX}}"
 
-    local GEN_OUTPUT_DIR="gen_results/eval/${FULL_MODEL_NAME}"
+    local GEN_OUTPUT_DIR="${EVAL_OUTPUT_DIR:-${GEN_OUTPUT_BASE_DIR}/${FULL_MODEL_NAME}}"
     mkdir -p "${GEN_OUTPUT_DIR}"
 
-    local RESULTS_FILE="results/${BASE_MODEL_NAME}/results.json"
-    mkdir -p "results/${BASE_MODEL_NAME}"
+    local RESULTS_FILE="${EVAL_RESULTS_FILE:-${RESULTS_BASE_DIR}/${BASE_MODEL_NAME}/results.json}"
+    mkdir -p "$(dirname "${RESULTS_FILE}")"
 
     echo "################################################################################"
     echo "# KL Model Benchmark"
@@ -173,6 +176,36 @@ evaluate_one_model() {
     fi
 
     "${PY_CMD[@]}"
+
+    if [ "${PASS_K}" = "16" ] && [ "${WRITE_PASS16_AGGREGATES}" = "true" ] && [ -f "${RESULTS_FILE}" ]; then
+        echo ""
+        echo "Computing avg@16/pass@16 aggregates from generated responses..."
+        "${PYTHON_BIN}" "$SCRIPT_DIR/compute_pass_at_k_from_gen.py" \
+            --gen_dir "${GEN_OUTPUT_DIR}" \
+            --results_file "${RESULTS_FILE}" \
+            --model_name "${MODEL_NAME}" \
+            --datasets "${DATASETS_TO_TEST_CSV}"
+    fi
+
+    if [ -n "${EVAL_METADATA_FILE:-}" ] && [ -f "${EVAL_METADATA_FILE}" ] && [ -f "${RESULTS_FILE}" ]; then
+        "${PYTHON_BIN}" - "${RESULTS_FILE}" "${MODEL_NAME}" "${EVAL_METADATA_FILE}" <<'PY'
+import json
+import os
+import sys
+
+results_file, model_name, metadata_file = sys.argv[1], sys.argv[2], sys.argv[3]
+with open(results_file) as f:
+    results = json.load(f)
+with open(metadata_file) as f:
+    metadata = json.load(f)
+entry = results.setdefault(model_name, {})
+entry["_metadata"] = metadata
+tmp = results_file + ".tmp"
+with open(tmp, "w") as f:
+    json.dump(results, f, indent=2, ensure_ascii=False)
+os.replace(tmp, results_file)
+PY
+    fi
 
     echo ""
     echo "=========================================="

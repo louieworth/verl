@@ -18,7 +18,19 @@ GENERATION_SERVER_ENV_VARS = {
     "TOKENIZERS_PARALLELISM": "true",
     "NCCL_DEBUG": "WARN",
     "VLLM_USE_V1": "1",
+    # Avoid vLLM torch.compile cache corruption across repeated standalone
+    # rollout launches in long-lived Slurm allocations.
+    "VLLM_DISABLE_COMPILE_CACHE": "1",
 }
+
+
+GENERATION_SERVER_PASSTHROUGH_ENV_KEYS = (
+    "VLLM_CACHE_ROOT",
+    "TORCHINDUCTOR_CACHE_DIR",
+    "TRITON_CACHE_DIR",
+    "TORCH_EXTENSIONS_DIR",
+    "XDG_CACHE_HOME",
+)
 
 
 # These keys are commonly injected by torchrun / torchelastic. They are valid
@@ -46,7 +58,12 @@ TORCH_LAUNCH_ENV_KEYS = (
 
 def build_generation_server_runtime_env() -> dict[str, dict[str, str]]:
     """Return the runtime env used by standalone generation servers."""
-    return {"env_vars": GENERATION_SERVER_ENV_VARS.copy()}
+    env_vars = GENERATION_SERVER_ENV_VARS.copy()
+    for key in GENERATION_SERVER_PASSTHROUGH_ENV_KEYS:
+        value = os.environ.get(key)
+        if value:
+            env_vars[key] = value
+    return {"env_vars": env_vars}
 
 
 @contextmanager

@@ -99,6 +99,11 @@ class KLTrainingConfig:
     eval_steps: int = 500
     save_merged_model: bool = True  # Merge LoRA adapters after training
     max_ckpt_to_keep: int = 1  # Rolling window for intra-epoch FSDP ckpts; per-epoch hf_merged is always preserved separately
+    resume_checkpoint_path: str = ""  # Optional explicit FSDP checkpoint to load before training
+    resume_checkpoint_mode: Literal["continue", "initialize"] = "continue"
+    resident_rollout_manifest: str = ""  # Optional resident y_o vLLM manifest for post-train weight sync
+    sync_resident_rollout: bool = False
+    async_hf_export: bool = False  # Launch rank-0 HF export in the background when eval does not need it
 
     # Evaluation Settings
     eval_datasets: list = field(default_factory=lambda: ["aime24", "aime25", "math500", "hmmt25"])
@@ -174,6 +179,12 @@ class KLTrainingConfig:
             raise ValueError(
                 "distill_mode='opd' requires a distinct teacher: set teacher_model_path. "
                 "Leave it empty only for distill_mode='opsd' (teacher = student)."
+            )
+
+        if self.resume_checkpoint_mode not in {"continue", "initialize"}:
+            raise ValueError(
+                "resume_checkpoint_mode must be 'continue' or 'initialize', "
+                f"got {self.resume_checkpoint_mode!r}"
             )
 
         self.eval_dataset_paths = {

@@ -43,6 +43,7 @@ EVAL_DATASET_ROOTS = {
     "aime24": "aime24/aime24_test.parquet",
     "aime25": "aime25/aime25_test.parquet",
     "math500": "math500/math500_test.parquet",
+    "hmmt23": "hmmt23/hmmt23_test.parquet",
     "hmmt24": "hmmt24/hmmt24_test.parquet",
     "hmmt25": "hmmt25/hmmt25_test.parquet",
     "amc23": "amc23/amc23_test.parquet",

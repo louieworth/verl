@@ -137,10 +137,17 @@ def _forward_kl_chunk(
     student_logits_chunk: torch.Tensor,
 ) -> torch.Tensor:
     """Compute per-position forward KL for a chunk. Inputs: [chunk_len, vocab]."""
-    teacher_logprobs = F.log_softmax(teacher_logits_chunk.float(), dim=-1)
-    student_logprobs = F.log_softmax(student_logits_chunk.float(), dim=-1)
-    teacher_probs = teacher_logprobs.exp()
-    return (teacher_probs * (teacher_logprobs - student_logprobs)).sum(dim=-1)
+    with torch.no_grad():
+        teacher_logits = teacher_logits_chunk.float()
+        teacher_log_z = torch.logsumexp(teacher_logits, dim=-1)
+        teacher_probs = F.softmax(teacher_logits, dim=-1)
+        teacher_term = torch.einsum("lv,lv->l", teacher_probs, teacher_logits) - teacher_log_z
+        del teacher_logits, teacher_log_z
+
+    student_logits = student_logits_chunk.float()
+    student_log_z = torch.logsumexp(student_logits, dim=-1)
+    student_term = torch.einsum("lv,lv->l", teacher_probs, student_logits) - student_log_z
+    return teacher_term - student_term
 
 
 def _forward_kl_topk_chunk(

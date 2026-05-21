@@ -56,7 +56,7 @@ def parse_args():
     parser.add_argument("--min_lr_ratio", type=float, default=0.1)
 
     # Data Settings
-    parser.add_argument("--data_path", type=str, required=True)
+    parser.add_argument("--data_path", type=str, default="")
     parser.add_argument("--corrected_responses_path", type=str, default="")
     parser.add_argument("--max_samples", type=int, default=None)
     parser.add_argument(
@@ -107,6 +107,18 @@ def parse_args():
                         help="Save FSDP checkpoint every N optimizer steps. Lower = better crash safety, more disk.")
     parser.add_argument("--max_ckpt_to_keep", type=int, default=1,
                         help="Rolling window for intra-epoch FSDP ckpts. Per-epoch hf_merged is preserved separately.")
+    parser.add_argument("--resume_checkpoint_path", type=str, default="",
+                        help="Explicit FSDP checkpoint to load before training.")
+    parser.add_argument("--resume_checkpoint_mode", type=str, default="continue", choices=["continue", "initialize"],
+                        help="continue=resume same run and skip completed optimizer steps; initialize=load weights/optimizer but run this batch from scratch.")
+    parser.add_argument("--resident_rollout_manifest", type=str, default="",
+                        help="Manifest for a resident y_o vLLM server to receive updated student weights.")
+    parser.add_argument("--sync_resident_rollout", type=lambda x: x.lower() == "true", default=False,
+                        help="After training, push live student weights into the resident y_o vLLM server.")
+    parser.add_argument("--sync_resident_rollout_only", type=lambda x: x.lower() == "true", default=False,
+                        help="Load a checkpoint and push it into resident y_o vLLM without running KL training.")
+    parser.add_argument("--async_hf_export", type=lambda x: x.lower() == "true", default=False,
+                        help="Run final HF export in a background rank-0 subprocess when possible.")
 
     # Evaluation Settings
     parser.add_argument("--run_eval_after_training", type=lambda x: x.lower() == "true", default=False)
@@ -141,6 +153,16 @@ def main():
     apply_qwen2_tokenizer_vllm_compat()
 
     args = parse_args()
+
+    if not args.sync_resident_rollout_only and not args.data_path:
+        raise ValueError("--data_path is required unless --sync_resident_rollout_only true")
+    if args.sync_resident_rollout_only:
+        if not args.resume_checkpoint_path:
+            raise ValueError("--sync_resident_rollout_only requires --resume_checkpoint_path")
+        if not args.resident_rollout_manifest:
+            raise ValueError("--sync_resident_rollout_only requires --resident_rollout_manifest")
+        if not args.sync_resident_rollout:
+            raise ValueError("--sync_resident_rollout_only requires --sync_resident_rollout true")
 
     # Create config
     config = KLTrainingConfig(
@@ -199,6 +221,11 @@ def main():
         save_merged_model=args.save_merged_model,
         save_steps=args.save_steps,
         max_ckpt_to_keep=args.max_ckpt_to_keep,
+        resume_checkpoint_path=args.resume_checkpoint_path,
+        resume_checkpoint_mode=args.resume_checkpoint_mode,
+        resident_rollout_manifest=args.resident_rollout_manifest,
+        sync_resident_rollout=args.sync_resident_rollout,
+        async_hf_export=args.async_hf_export,
         # Evaluation Settings
         run_eval_after_training=args.run_eval_after_training,
         eval_datasets=args.eval_datasets.split(",") if args.eval_datasets else [],
@@ -212,9 +239,12 @@ def main():
         top_k=args.top_k,
     )
 
-    trainer = KLTrainer(config)
+    trainer = KLTrainer(config, sync_only=args.sync_resident_rollout_only)
     try:
-        trainer.train()
+        if args.sync_resident_rollout_only:
+            trainer.sync_resident_rollout_from_checkpoint()
+        else:
+            trainer.train()
     except BaseException:
         # A single rank failing inside train() must not call destroy_process_group
         # while peers are still inside an FSDP collective — that hangs the whole

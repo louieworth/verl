@@ -68,7 +68,13 @@ class AsyncLLMServerManager:
     - Sticky session: send multi-turn chat completions to same server for automatic prefix caching
     """
 
-    def __init__(self, config: DictConfig, server_handles: list[ray.actor.ActorHandle], max_cache_size: int = 10000):
+    def __init__(
+        self,
+        config: DictConfig,
+        server_handles: list[ray.actor.ActorHandle],
+        max_cache_size: int = 10000,
+        server_offset: int | None = None,
+    ):
         """Initialize the AsyncLLMServerManager.
 
         Args:
@@ -77,8 +83,13 @@ class AsyncLLMServerManager:
             max_cache_size (int, optional): max cache size for request_id to server mapping. Defaults to 10000.
         """
         self.config = config
-        self.server_handles = server_handles
-        random.shuffle(self.server_handles)
+        self.server_handles = list(server_handles)
+        if self.server_handles:
+            if server_offset is None:
+                random.shuffle(self.server_handles)
+            else:
+                server_offset %= len(self.server_handles)
+                self.server_handles = self.server_handles[server_offset:] + self.server_handles[:server_offset]
 
         # Least requests load balancing
         self.weighted_serveres = [[0, idx, server] for idx, server in enumerate(self.server_handles)]
@@ -364,6 +375,7 @@ class AgentLoopWorker:
         config: DictConfig,
         server_handles: list[ray.actor.ActorHandle],
         reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
+        worker_index: int | None = None,
     ):
         self.config = config
         rollout_config, model_config = _get_rollout_and_model_config(config)
@@ -372,7 +384,7 @@ class AgentLoopWorker:
 
         # for recipe to change
         if not hasattr(self, "server_manager"):
-            self.server_manager = AsyncLLMServerManager(config, server_handles)
+            self.server_manager = AsyncLLMServerManager(config, server_handles, server_offset=worker_index)
 
         self.dataset_cls = get_dataset_class(config.data)
         self.reward_loop_worker_handles = reward_loop_worker_handles
@@ -949,7 +961,7 @@ class AgentLoopManager:
                     scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
                         node_id=node_id, soft=True
                     ),
-                ).remote(self.config, self.server_handles, self.reward_loop_worker_handles)
+                ).remote(self.config, self.server_handles, self.reward_loop_worker_handles, i)
             )
 
     @auto_await

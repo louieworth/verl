@@ -22,11 +22,36 @@ Functions:
 import time
 from types import SimpleNamespace
 
+import numpy as np
 import torch
 
 from verl import DataProto
 
 teacher_topk_logps_padded, teacher_topk_indices_padded = None, None
+
+
+def _default_distill_loss_mask(batch: DataProto, attention_mask: torch.Tensor) -> torch.Tensor:
+    if "distill_loss_mask" in batch.batch.keys():
+        loss_mask = batch.batch["distill_loss_mask"].to(torch.bool).clone()
+    else:
+        response_length = batch.meta_info.get("response_length")
+        if response_length is None and "responses" in batch.batch.keys():
+            response_length = batch.batch["responses"].size(1)
+        loss_mask = attention_mask.clone()
+        if response_length is not None:
+            loss_mask[:, : (-int(response_length) - 1)] = False
+
+    loss_mask &= attention_mask
+    if "is_padded_sample" in batch.batch.keys():
+        loss_mask[batch.batch["is_padded_sample"].to(torch.bool)] = False
+    return loss_mask
+
+
+def _as_numpy_payload(tensor: torch.Tensor):
+    tensor = tensor.detach().cpu().contiguous()
+    if tensor.dtype == torch.bfloat16:
+        return tensor.view(torch.int16).numpy()
+    return tensor.numpy()
 
 
 def get_teacher_knowledge(batch: DataProto, teacher_client, n_server_workers=1, is_async=False):
@@ -49,17 +74,23 @@ def get_teacher_knowledge(batch: DataProto, teacher_client, n_server_workers=1, 
 
     input_ids = []
     attention_mask = batch.batch["attention_mask"].to(torch.bool)
+    loss_mask = _default_distill_loss_mask(batch, attention_mask)
+    loss_row_masks = []
+    logprob_row_indices = []
     # response_length = batch.meta_info["response_length"]
 
-    for ids, mask in zip(batch.batch["input_ids"], attention_mask, strict=False):
+    for ids, mask, row_loss_mask in zip(batch.batch["input_ids"], attention_mask, loss_mask, strict=False):
         input_ids.append(ids[mask].tolist())
+        active_loss_mask = row_loss_mask[mask]
+        loss_row_masks.append(active_loss_mask)
+        logprob_row_indices.append(active_loss_mask.nonzero(as_tuple=False).flatten().tolist())
 
     all_teacher_topk_logps = []
     all_teacher_topk_indices = []
 
     batch_size = len(input_ids)
-    assert batch_size % n_server_workers == 0
-    micro_batch_size = batch_size // n_server_workers
+    n_chunks = max(1, min(n_server_workers, batch_size))
+    micro_batch_size = (batch_size + n_chunks - 1) // n_chunks
     futures = []
     tik1 = time.time()
     tok1 = tik1
@@ -69,7 +100,10 @@ def get_teacher_knowledge(batch: DataProto, teacher_client, n_server_workers=1, 
         tok1 = max(tok1, time.time())
 
     for i in range(0, batch_size, micro_batch_size):
-        fut = teacher_client.submit(input_ids[i : i + micro_batch_size])
+        fut = teacher_client.submit(
+            input_ids[i : i + micro_batch_size],
+            logprob_row_indices=logprob_row_indices[i : i + micro_batch_size],
+        )
         fut.add_done_callback(cb)
         futures.append(fut)
 
@@ -87,49 +121,52 @@ def get_teacher_knowledge(batch: DataProto, teacher_client, n_server_workers=1, 
         # teacher_topk_logps = [x.to(params_dtype) for x in all_teacher_topk_logps]
         # teacher_topk_indices = [x.to(params_dtype) for x in all_teacher_topk_indices]
         teacher_topk_logps, teacher_topk_indices = all_teacher_topk_logps, all_teacher_topk_indices
-
-        real_seq_lens = torch.tensor([x.size(0) for x in teacher_topk_logps], dtype=torch.int32)
-
-        topk = teacher_topk_logps[0].size(-1)
-
-        logp_dtype = teacher_topk_logps[0].dtype
-        idx_dtype = teacher_topk_indices[0].dtype
-        teacher_knowledge_shape = list(batch.batch["input_ids"].shape) + [topk]
-
-        global teacher_topk_logps_padded, teacher_topk_indices_padded
-        if (
-            teacher_topk_logps_padded is None
-            or teacher_topk_logps_padded.dtype != logp_dtype
-            or teacher_topk_logps_padded.shape != torch.Size(teacher_knowledge_shape)
-        ):
-            teacher_topk_logps_padded = torch.zeros(*teacher_knowledge_shape, dtype=logp_dtype)
-        else:
-            teacher_topk_logps_padded.zero_()
-
-        if (
-            teacher_topk_indices_padded is None
-            or teacher_topk_indices_padded.dtype != idx_dtype
-            or teacher_topk_indices_padded.shape != torch.Size(teacher_knowledge_shape)
-        ):
-            teacher_topk_indices_padded = torch.zeros(*teacher_knowledge_shape, dtype=idx_dtype)
-        else:
-            teacher_topk_indices_padded.zero_()
+        has_indices = bool(teacher_topk_indices) and teacher_topk_indices[0] is not None
 
         batch_size = attention_mask.size(0)
+        real_seq_lens = torch.tensor([x.size(0) for x in teacher_topk_logps], dtype=torch.int32)
+        teacher_loss_lens = torch.zeros(batch_size, dtype=torch.int32)
+        logps_payload = np.empty((batch_size,), dtype=object)
+        indices_payload = np.empty((batch_size,), dtype=object) if has_indices else None
+
         for i in range(batch_size):
-            teacher_topk_logps_padded[i][attention_mask[i]] = teacher_topk_logps[i]
-            teacher_topk_indices_padded[i][attention_mask[i]] = teacher_topk_indices[i]
+            row_active_loss_mask = loss_row_masks[i]
+            expected_loss_rows = int(row_active_loss_mask.sum().item())
+            if teacher_topk_logps[i].size(0) == expected_loss_rows:
+                selected_logps = teacher_topk_logps[i]
+            elif row_active_loss_mask.numel() == teacher_topk_logps[i].size(0):
+                selected_logps = teacher_topk_logps[i][row_active_loss_mask.to(teacher_topk_logps[i].device)]
+            else:
+                raise RuntimeError(
+                    "Teacher logprob rows do not align with active input tokens: "
+                    f"row={i}, active_tokens={row_active_loss_mask.numel()}, "
+                    f"loss_tokens={expected_loss_rows}, teacher_rows={teacher_topk_logps[i].size(0)}"
+                )
+            teacher_loss_lens[i] = selected_logps.size(0)
+            logps_payload[i] = _as_numpy_payload(selected_logps)
+            if has_indices:
+                if teacher_topk_indices[i].size(0) == expected_loss_rows:
+                    selected_indices = teacher_topk_indices[i]
+                elif row_active_loss_mask.numel() == teacher_topk_indices[i].size(0):
+                    selected_indices = teacher_topk_indices[i][row_active_loss_mask.to(teacher_topk_indices[i].device)]
+                else:
+                    raise RuntimeError(
+                        "Teacher index rows do not align with active input tokens: "
+                        f"row={i}, active_tokens={row_active_loss_mask.numel()}, "
+                        f"loss_tokens={expected_loss_rows}, teacher_rows={teacher_topk_indices[i].size(0)}"
+                    )
+                indices_payload[i] = _as_numpy_payload(selected_indices)
 
         output_batch = DataProto.from_single_dict(
-            data={"real_seq_lens": real_seq_lens},
+            data={"real_seq_lens": real_seq_lens, "teacher_loss_lens": teacher_loss_lens},
         )
 
-        output_batch.non_tensor_batch.update(
-            {
-                "teacher_topk_logps": teacher_topk_logps_padded.numpy(),
-                "teacher_topk_indices": teacher_topk_indices_padded.numpy(),
-            }
-        )
+        # Per-sample compact payload: each object row is [loss_tokens_i, topk].
+        # Full-vocab no longer pads prompt/padding tokens into [batch, seq, vocab].
+        non_tensor = {"teacher_topk_logps": logps_payload}
+        if has_indices:
+            non_tensor["teacher_topk_indices"] = indices_payload
+        output_batch.non_tensor_batch.update(non_tensor)
 
         tok2 = time.time()
 

@@ -424,8 +424,15 @@ def _load_hf_model(config, model_config, is_value_model):
         print(f"load from local dir {local_model_path}")
 
     src_rank = _megatron_calc_global_rank(tp_rank=0, dp_rank=0, pp_rank=0, cp_rank=mpu.get_context_parallel_rank())
+    is_src_rank = torch.distributed.get_rank() == src_rank
+    if not is_src_rank:
+        with init_empty_weights(), warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            model = auto_cls.from_config(model_config)
+        return architectures, model, {}, is_value_model
+
     cpu_init_weights = lambda: torch.device("cpu")
-    init_context = init_empty_weights if torch.distributed.get_rank() != src_rank else cpu_init_weights
+    init_context = cpu_init_weights
     with init_context(), warnings.catch_warnings():
         warnings.simplefilter("ignore")
         # TODO: to find a better way to load mistral7b-rm lm_head

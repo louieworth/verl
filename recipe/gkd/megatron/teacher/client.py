@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import os
 import queue
 import random
 import threading
@@ -66,6 +67,8 @@ class TeacherClient:
         temperature=1,
         only_response=False,
         max_seq_len=None,
+        recv_timeout_ms=None,
+        request_batch_size=None,
     ) -> None:
         self.server_ip = server_ip
         self.server_port = server_port
@@ -78,52 +81,103 @@ class TeacherClient:
         self.temperature = temperature
         self.only_response = only_response
         self.max_seq_len = max_seq_len
+        if request_batch_size in (None, "", "null", "None"):
+            self.request_batch_size = None
+        else:
+            self.request_batch_size = max(1, int(request_batch_size))
+        if recv_timeout_ms is None:
+            recv_timeout_ms = os.environ.get("TEACHER_CLIENT_RCVTIMEO_MS", "3600000")
+        self.recv_timeout_ms = int(recv_timeout_ms)
         self._run()
 
     def bg_task(self):
-        socket = self.context.socket(zmq.REQ)
-        socket.connect(f"tcp://{self.server_ip}:{self.server_port}")
-        socket.setsockopt(zmq.LINGER, 0)
-        socket.setsockopt(zmq.RCVTIMEO, 600000)  # 接收超时 30 分钟
+        def make_socket():
+            socket = self.context.socket(zmq.REQ)
+            socket.setsockopt(zmq.LINGER, 0)
+            socket.setsockopt(zmq.RCVTIMEO, self.recv_timeout_ms)
+            if hasattr(zmq, "REQ_RELAXED"):
+                socket.setsockopt(zmq.REQ_RELAXED, 1)
+            if hasattr(zmq, "REQ_CORRELATE"):
+                socket.setsockopt(zmq.REQ_CORRELATE, 1)
+            socket.connect(f"tcp://{self.server_ip}:{self.server_port}")
+            return socket
 
         while True:
             futures = []
             inputs = []
             batch = []
+            socket = None
             try:
+                request_options = []
                 with self.mutex:
                     for _ in range(self.num_microbatches):
-                        future, data = self.task_queue.get()
+                        task = self.task_queue.get()
+                        if len(task) == 2:
+                            future, data = task
+                            options = {}
+                        else:
+                            future, data, options = task
                         if DEBUG:
                             inputs.append(data)
                         futures.append(future)
+                        request_options.append(options)
                         batch.extend(data.tolist() if isinstance(data, torch.Tensor) else data)
 
-                if self.max_seq_len:
-                    max_tokens = [min(self.max_tokens, self.max_seq_len - len(prompt)) for prompt in batch]
-                    request = {"prompt_token_ids": batch, "max_tokens": max_tokens}
+                if request_options:
+                    first_options = {k: v for k, v in request_options[0].items() if k != "logprob_row_indices"}
+                    for options in request_options:
+                        comparable = {k: v for k, v in options.items() if k != "logprob_row_indices"}
+                        if comparable != first_options:
+                            raise RuntimeError("TeacherClient batched requests must use identical request options")
+                    has_row_indices = ["logprob_row_indices" in options for options in request_options]
+                    if any(has_row_indices) and not all(has_row_indices):
+                        raise RuntimeError("TeacherClient batched requests must all provide logprob_row_indices or none")
+                    all_logprob_row_indices = []
+                    if all(has_row_indices):
+                        for options in request_options:
+                            all_logprob_row_indices.extend(options["logprob_row_indices"])
+                    else:
+                        all_logprob_row_indices = None
                 else:
-                    request = {"prompt_token_ids": batch, "max_tokens": self.max_tokens}
-                if self.temperature:
-                    request["temperature"] = self.temperature
-                if self.only_response:
-                    request["only_response"] = True
+                    first_options = {}
+                    all_logprob_row_indices = None
 
-                socket.send(serialize(request))
-                raw = socket.recv()
-                response = deserialize(raw)
-
-                if isinstance(response, dict) and response.get("status") == "error":
-                    reason = response.get("reason", "unknown")
-                    err = RuntimeError(f"Teacher error: {reason}")
-                    for f in futures:
-                        f.set_exception(err)
-                    continue
+                max_tokens_opt = first_options.get("max_tokens", self.max_tokens)
+                temperature = first_options.get("temperature", self.temperature)
+                only_response = first_options.get("only_response", self.only_response)
 
                 required = ("responses", "teacher_topk_logprobs", "teacher_topk_indices")
-                for k in required:
-                    if k not in response:
-                        raise RuntimeError(f"Invalid response: missing key '{k}'")
+                response = {k: [] for k in required}
+                request_batch_size = self.request_batch_size or max(1, len(batch))
+                for start in range(0, len(batch), request_batch_size):
+                    sub_batch = batch[start : start + request_batch_size]
+                    if self.max_seq_len:
+                        max_tokens = [min(max_tokens_opt, self.max_seq_len - len(prompt)) for prompt in sub_batch]
+                        request = {"prompt_token_ids": sub_batch, "max_tokens": max_tokens}
+                    else:
+                        request = {"prompt_token_ids": sub_batch, "max_tokens": max_tokens_opt}
+                    if all_logprob_row_indices is not None:
+                        request["logprob_row_indices"] = all_logprob_row_indices[start : start + request_batch_size]
+                    if temperature:
+                        request["temperature"] = temperature
+                    if only_response:
+                        request["only_response"] = True
+
+                    socket = make_socket()
+                    socket.send(serialize(request))
+                    raw = socket.recv()
+                    sub_response = deserialize(raw)
+                    socket.close(0)
+                    socket = None
+
+                    if isinstance(sub_response, dict) and sub_response.get("status") == "error":
+                        reason = sub_response.get("reason", "unknown")
+                        raise RuntimeError(f"Teacher error: {reason}")
+
+                    for k in required:
+                        if k not in sub_response:
+                            raise RuntimeError(f"Invalid response: missing key '{k}'")
+                        response[k].extend(sub_response[k])
 
                 total = len(response["teacher_topk_logprobs"])
                 if self.num_microbatches <= 0 or total % self.num_microbatches != 0:
@@ -143,6 +197,8 @@ class TeacherClient:
                 err = TimeoutError(f"Timeout waiting for server {self.server_ip}:{self.server_port}")
                 for f in futures:
                     f.set_exception(err)
+                if socket is not None:
+                    socket.close(0)
                 continue
             except Exception as e:
                 for f in futures:
@@ -150,15 +206,17 @@ class TeacherClient:
                         f.set_exception(e)
                     except Exception:
                         pass
+                if socket is not None:
+                    socket.close(0)
                 continue
 
     def _run(self):
         for _ in range(self.n_server_workers):
             threading.Thread(target=self.bg_task, daemon=True).start()
 
-    def submit(self, data):
+    def submit(self, data, **request_options):
         future = Future()
-        self.task_queue.put((future, data))
+        self.task_queue.put((future, data, request_options))
         return future
 
     def __del__(self):

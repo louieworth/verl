@@ -97,7 +97,10 @@ class ServerAdapter(BaseRollout):
         self.device_uuid = get_device_uuid(get_device_id())
         self.zmq_handle = f"ipc:///tmp/rl-colocate-zmq-{self.device_uuid}.sock"
 
-        self.use_shm = not is_support_ipc()
+        force_shm = os.getenv("VERL_VLLM_USE_SHM_WEIGHT_SYNC", "").lower() in ("1", "true", "yes", "y")
+        self.use_shm = force_shm or not is_support_ipc()
+        if force_shm:
+            logger.warning("Forcing shared-memory vLLM weight sync because VERL_VLLM_USE_SHM_WEIGHT_SYNC is set.")
         if self.use_shm:
             logger.warning(
                 "IPC is not supported on your devices. Falling back to shared memory for weight transfer, "

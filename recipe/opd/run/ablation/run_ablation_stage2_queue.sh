@@ -17,9 +17,8 @@ VERL_ROOT="$(dirname "$(dirname "$RECIPE_DIR")")"
 LOG_DIR="$VERL_ROOT/outputs/ablation_stage2_logs"
 mkdir -p "$LOG_DIR"
 
-# Honor any externally-set WANDB_MODE (offline/disabled) but default to
-# online: ~/.netrc has a wandb API key, so wandb.init() should succeed.
-export WANDB_MODE="${WANDB_MODE:-online}"
+# Honor any externally-set WANDB_MODE, but keep ablation runs offline by default.
+export WANDB_MODE="${WANDB_MODE:-offline}"
 
 EXPERIMENTS=(
     "exp1_forward_ycor_s1r1:forward_y_cor_fv_s1r1.sh"

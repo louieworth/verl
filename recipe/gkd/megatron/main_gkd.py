@@ -22,7 +22,17 @@ import socket
 import hydra
 import ray
 from omegaconf import OmegaConf
-from recipe.gkd.ray_trainer import OnPolicyDistillTrainer
+
+try:
+    from .ray_trainer import OnPolicyDistillTrainer
+    from .opd_dataset import TokenizedPromptDataset
+except ImportError:
+    try:
+        from recipe.gkd.megatron.opd_dataset import TokenizedPromptDataset
+        from recipe.gkd.megatron.ray_trainer import OnPolicyDistillTrainer
+    except ImportError:
+        from opd_dataset import TokenizedPromptDataset
+        from ray_trainer import OnPolicyDistillTrainer
 
 RAY_RUNTIME_ENV = {
     "env_vars": {
@@ -35,6 +45,7 @@ RAY_RUNTIME_ENV = {
         # https://docs.vllm.ai/en/latest/usage/troubleshooting.html?h=nccl_cumem_enable#known-issues
         # https://github.com/vllm-project/vllm/blob/c6b0a7d3ba03ca414be1174e9bd86a97191b7090/vllm/worker/worker_base.py#L445
         "NCCL_CUMEM_ENABLE": "0",
+        "VERL_VLLM_USE_SHM_WEIGHT_SYNC": os.environ.get("VERL_VLLM_USE_SHM_WEIGHT_SYNC", "0"),
     },
 }
 
@@ -148,13 +159,24 @@ class TaskRunner:
         if config.actor_rollout_ref.actor.strategy == "megatron":
             from verl.single_controller.ray import RayWorkerGroup
 
-            from .megatron_workers import (
-                MegatronOnPolicyDistillActorWorker,
-                MegatronOnPolicyDistillRolloutWorker,
-            )
+            try:
+                from .megatron_workers import (
+                    MegatronOnPolicyDistillActorWorker,
+                    MegatronOnPolicyDistillRolloutWorker,
+                )
+            except ImportError:
+                try:
+                    from recipe.gkd.megatron.megatron_workers import (
+                        MegatronOnPolicyDistillActorWorker,
+                        MegatronOnPolicyDistillRolloutWorker,
+                    )
+                except ImportError:
+                    from megatron_workers import (
+                        MegatronOnPolicyDistillActorWorker,
+                        MegatronOnPolicyDistillRolloutWorker,
+                    )
 
-            rollout_cls = MegatronOnPolicyDistillRolloutWorker
-            actor_cls = MegatronOnPolicyDistillActorWorker
+            actor_rollout_cls = MegatronOnPolicyDistillActorWorker
             ray_worker_group_cls = RayWorkerGroup
 
         else:
@@ -163,31 +185,43 @@ class TaskRunner:
         # Worker mapping and resource pools
         from verl.trainer.ppo.ray_trainer import ResourcePoolManager, Role
 
-        # Map roles to their corresponding remote worker classes.
-        role_worker_mapping = {
-            Role.Rollout: ray.remote(rollout_cls),
-            Role.Actor: ray.remote(actor_cls),
-        }
-
-        # Define the resource pool specification.
-        # Map roles to the resource pool.
         assert config.trainer.n_gpus_per_node > 0, "config.trainer.n_gpus_per_node must be greater than 0"
         assert config.trainer.nnodes > 0, "config.trainer.nnodes must be greater than 0"
-        assert config.rollout.n_gpus_per_node > 0, "config.rollout.n_gpus_per_node must be greater than 0"
-        assert config.rollout.nnodes > 0, "config.rollout.nnodes must be greater than 0"
 
-        actor_pool = [config.trainer.n_gpus_per_node] * config.trainer.nnodes
-        rollout_pool = [config.rollout.n_gpus_per_node] * config.rollout.nnodes
+        hybrid_engine = bool(config.actor_rollout_ref.get("hybrid_engine", True))
+        gpus_per_node = config.trainer.n_gpus_per_node
 
-        resource_pool_spec = {
-            "rollout_pool": rollout_pool,
-            "actor_pool": actor_pool,
-        }
-        mapping = {
-            Role.Rollout: "rollout_pool",
-            Role.Actor: "actor_pool",
-        }
-        print(f"resource_pool_spec: {resource_pool_spec}")
+        if hybrid_engine:
+            # Original hybrid path: actor + rollout share GPUs in one pool.
+            role_worker_mapping = {
+                Role.ActorRollout: ray.remote(actor_rollout_cls),
+            }
+            actor_rollout_pool = [gpus_per_node] * config.trainer.nnodes
+            resource_pool_spec = {"actor_rollout_pool": actor_rollout_pool}
+            mapping = {Role.ActorRollout: "actor_rollout_pool"}
+        else:
+            # Split layout (y_r 3-node, or 1-/2-node share with teacher squeezed in):
+            # actor and rollout get separate Ray resource pools and can be
+            # placed on different nodes (or different GPU slices of the same
+            # node). ROLLOUT_GPUS_PER_NODE env var overrides if the rollout
+            # pool uses fewer GPUs than the actor pool — e.g. 1-node H200
+            # share layout: actor=4 GPUs, rollout=3 GPUs, teacher takes the
+            # remaining 1 GPU outside Ray.
+            role_worker_mapping = {
+                Role.Actor: ray.remote(actor_rollout_cls),  # MegatronOnPolicyDistillActorWorker
+                Role.Rollout: ray.remote(MegatronOnPolicyDistillRolloutWorker),
+            }
+            configured_rollout_gpus = OmegaConf.select(config, "rollout.n_gpus_per_node", default=None)
+            rollout_gpus_per_node = int(os.environ.get("ROLLOUT_GPUS_PER_NODE", configured_rollout_gpus or gpus_per_node))
+            resource_pool_spec = {
+                "actor_pool": [gpus_per_node],
+                "rollout_pool": [rollout_gpus_per_node],
+            }
+            mapping = {
+                Role.Actor: "actor_pool",
+                Role.Rollout: "rollout_pool",
+            }
+        print(f"resource_pool_spec: {resource_pool_spec}  (hybrid_engine={hybrid_engine})")
 
         resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
 
@@ -195,10 +229,24 @@ class TaskRunner:
         from verl.utils.dataset.rl_dataset import RLHFDataset, collate_fn
 
         # Create training and validation datasets.
-        train_dataset = RLHFDataset(config.data.train_files, tokenizer, config.data, None)
+        train_dataset = RLHFDataset(
+            config.data.train_files,
+            tokenizer,
+            config.data,
+            None,
+            max_samples=config.data.get("max_samples", -1),
+        )
+        train_dataset = TokenizedPromptDataset(train_dataset, tokenizer, config.data, config.get("opd", {}))
 
         if config.data.val_files:
-            val_dataset = RLHFDataset(config.data.val_files, tokenizer, config.data, None)
+            val_dataset = RLHFDataset(
+                config.data.val_files,
+                tokenizer,
+                config.data,
+                None,
+                max_samples=config.data.get("val_max_samples", -1),
+            )
+            val_dataset = TokenizedPromptDataset(val_dataset, tokenizer, config.data, config.get("opd", {}))
         else:
             val_dataset = None
 

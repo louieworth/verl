@@ -13,7 +13,7 @@ from verl.utils.reward_score.math_reward import remove_boxed
 instruction_following = "Please reason step by step, and put your final answer within \\boxed{}."
 
 
-def make_map_fn_stage1(question_key="problem", data_source="deepscaleR"):
+def make_map_fn_stage1(question_key="problem", data_source="deepscaleR", index_offset=0):
     """
     Prepare data for Stage 1 generation.
     Preserves expert solution for Stage 2 correction.
@@ -27,7 +27,7 @@ def make_map_fn_stage1(question_key="problem", data_source="deepscaleR"):
         extra_info = {}
         extra_info['expert_cot'] = example.get('solution', '')
         extra_info[question_key] = question_raw
-        extra_info['index'] = idx
+        extra_info['index'] = index_offset + idx
 
         # Store original answer in extra_info
         extra_info['answer'] = answer_raw
@@ -79,6 +79,18 @@ if __name__ == "__main__":
         default=None,
         help="Maximum number of samples to process (for testing)",
     )
+    parser.add_argument(
+        "--start_index",
+        type=int,
+        default=0,
+        help="Start offset into the prepared dataset before prompt mapping.",
+    )
+    parser.add_argument(
+        "--num_samples",
+        type=int,
+        default=None,
+        help="Number of samples to process from start_index. Omit for all remaining rows.",
+    )
     args = parser.parse_args()
 
     print(f"Loading dataset from: {args.input_path}")
@@ -100,9 +112,24 @@ if __name__ == "__main__":
         print(f"Limiting to first {args.max_samples} samples for testing...")
         ds_raw = ds_raw.select(range(min(args.max_samples, len(ds_raw))))
 
+    if args.start_index < 0:
+        raise ValueError("--start_index must be >= 0")
+    if args.num_samples is not None and args.num_samples <= 0:
+        raise ValueError("--num_samples must be > 0 when provided")
+
+    if args.start_index or args.num_samples is not None:
+        start = min(args.start_index, len(ds_raw))
+        stop = len(ds_raw) if args.num_samples is None else min(start + args.num_samples, len(ds_raw))
+        print(f"Selecting sample range [{start}, {stop}) from {len(ds_raw)} prepared examples...")
+        ds_raw = ds_raw.select(range(start, stop))
+
     print(f"Processing {len(ds_raw)} examples...")
     ds_processed = ds_raw.map(
-        make_map_fn_stage1(question_key=args.question_key, data_source=args.data_source),
+        make_map_fn_stage1(
+            question_key=args.question_key,
+            data_source=args.data_source,
+            index_offset=args.start_index,
+        ),
         with_indices=True,
         remove_columns=[col for col in ds_raw.column_names if col not in ['data_source', 'prompt', 'ability', 'reward_model', 'extra_info']],
     )

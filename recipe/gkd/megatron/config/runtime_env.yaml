@@ -5,9 +5,9 @@ env_vars:
   CUDA_LAUNCH_BLOCKING: "0"
   NVTE_DEBUG: "1"
   NVTE_DEBUG_LEVEL: "2"
-  NVTE_FLASH_ATTN: "1" 
-  NVTE_FUSED_ATTN: "0" 
-  NVTE_UNFUSED_ATTN: "0" 
+  NVTE_FLASH_ATTN: "1"
+  NVTE_FUSED_ATTN: "1"
+  NVTE_UNFUSED_ATTN: "1"
   RAY_DEBUG: "legacy"
   NCCL_DEBUG: "WARN"
   # NCCL_IB_DISABLE: "1"
@@ -16,6 +16,13 @@ env_vars:
   # NCCL_SOCKET_IFNAME: "xgbe0"
   VLLM_USE_V1: "1"
   VERL_VLLM_DISTRIBUTED_BACKEND: "ray"
+  # vLLM 0.11.0 hits a deterministic IMA at gpu_model_runner._to_list /
+  # transfer_event.synchronize once a long-generation batch has run ~14 min.
+  # Switching the sampler alone did NOT help (vllm#23023 ruled out);
+  # routing attention through flash-attn instead of FlashInfer is the next
+  # mitigation to try. Refs: vllm#19483, #23023, #28507.
+  VLLM_USE_FLASHINFER_SAMPLER: "0"
+  VLLM_ATTENTION_BACKEND: "FLASH_ATTN"
 
 
   # NVTE_UNFUSED_ATTN: "1"

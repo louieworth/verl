@@ -13,7 +13,8 @@ VERL_ROOT="$(dirname "$(dirname "$RECIPE_DIR")")"
 LOG_DIR="$VERL_ROOT/outputs/ablation_stage2_logs"
 mkdir -p "$LOG_DIR"
 
-export WANDB_MODE="${WANDB_MODE:-online}"
+# Honor any externally-set WANDB_MODE, but keep ablation runs offline by default.
+export WANDB_MODE="${WANDB_MODE:-offline}"
 
 EXPERIMENTS=(
     "exp6_forward_ycor_s1r0:forward_y_cor_fv_s1r0.sh"

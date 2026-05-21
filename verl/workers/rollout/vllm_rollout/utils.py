@@ -39,6 +39,17 @@ VLLM_LORA_PATH = "simon_lora_path"
 VLLM_ASCEND_REQUIRED_ENV_VARS = {"VLLM_ALL2ALL_BACKEND": "flashinfer_all2allv", "VLLM_ASCEND_ENABLE_NZ": "0"}
 
 
+def patch_transformers_tokenizer_compat():
+    """Keep vLLM worker subprocesses compatible with newer transformers."""
+    from transformers.tokenization_utils_base import PreTrainedTokenizerBase
+
+    if not hasattr(PreTrainedTokenizerBase, "all_special_tokens_extended"):
+        PreTrainedTokenizerBase.all_special_tokens_extended = property(lambda self: self.all_special_tokens)
+
+
+patch_transformers_tokenizer_compat()
+
+
 def set_death_signal():
     """Kill the current process when the parent process exits."""
     if platform.system() != "Linux":
@@ -253,6 +264,12 @@ class SuppressSignalInThread:
         signal.signal = self.original_signal
 
 
+_NEGATABLE_BOOL_ARGS = {
+    "enable_chunked_prefill",
+    "enable_prefix_caching",
+}
+
+
 def build_cli_args_from_config(config: dict[str, Any]) -> list[str]:
     """
     Convert a config dictionary to CLI arguments for vLLM server.
@@ -260,7 +277,8 @@ def build_cli_args_from_config(config: dict[str, Any]) -> list[str]:
     Handles different value types appropriately:
     - None: skipped
     - bool True: adds '--key'
-    - bool False: skipped
+    - bool False: adds '--no-key' for selected vLLM BooleanOptionalAction args,
+      otherwise skipped
     - list: expands to '--key item1 item2 ...'
     - empty list: skipped (vLLM uses nargs="+" which requires at least one value)
     - dict: JSON serialized
@@ -279,6 +297,8 @@ def build_cli_args_from_config(config: dict[str, Any]) -> list[str]:
         if isinstance(v, bool):
             if v:
                 cli_args.append(f"--{k}")
+            elif k in _NEGATABLE_BOOL_ARGS:
+                cli_args.append(f"--no-{k}")
         elif isinstance(v, list):
             if not v:
                 # Skip empty lists - vLLM uses nargs="+" which requires at least one value

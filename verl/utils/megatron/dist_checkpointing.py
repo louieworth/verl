@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import megatron.core
+import numpy as np
 import torch
 from megatron.core import dist_checkpointing, mpu
 from megatron.core.dist_checkpointing.serialization import (
@@ -24,6 +25,10 @@ from megatron.core.dist_checkpointing.strategies.fully_parallel import (
     FullyParallelSaveStrategyWrapper,
 )
 from packaging import version
+
+
+if not hasattr(np, "product"):
+    np.product = np.prod
 
 
 def save_dist_checkpointing(

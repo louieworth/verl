@@ -158,4 +158,7 @@ def vocab_parallel_kl_divergence(vocab_parallel_logits, target_topk_logps, targe
     Returns:
         loss: scalar tensor
     """
-    return _VocabParallelKLDivergence.apply(vocab_parallel_logits, target_topk_logps, target_topk_indices)
+    logits_fp32 = vocab_parallel_logits.float()
+    if logits_fp32.data_ptr() == vocab_parallel_logits.data_ptr():
+        logits_fp32 = logits_fp32.clone()
+    return _VocabParallelKLDivergence.apply(logits_fp32, target_topk_logps, target_topk_indices)

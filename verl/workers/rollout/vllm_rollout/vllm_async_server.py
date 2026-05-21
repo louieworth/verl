@@ -77,6 +77,17 @@ logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
 
 
+def _patch_transformers_tokenizer_compat():
+    """Keep vLLM tokenizer caching compatible with newer transformers."""
+    from transformers.tokenization_utils_base import PreTrainedTokenizerBase
+
+    if not hasattr(PreTrainedTokenizerBase, "all_special_tokens_extended"):
+        PreTrainedTokenizerBase.all_special_tokens_extended = property(lambda self: self.all_special_tokens)
+
+
+_patch_transformers_tokenizer_compat()
+
+
 class vLLMHttpServer:
     """vLLM http server in single node, this is equivalent to launch server with command line:
     ```
@@ -531,8 +542,7 @@ class vLLMHttpServer:
             # support sglang-style 'max_new_tokens' param
             max_tokens = sampling_params.pop("max_new_tokens")
         else:
-            # Default to a calculation that considers configured lengths
-            max_tokens = self.config.response_length + self.config.prompt_length - len(prompt_ids)
+            max_tokens = self.config.response_length
 
         # Clamp max_tokens to the valid range [0, max_possible_tokens]
         max_tokens = max(0, min(max_tokens, max_possible_tokens))
@@ -541,6 +551,8 @@ class vLLMHttpServer:
             f"max_tokens {max_tokens} exceeds available context space {max_possible_tokens}"
         )
         sampling_params["logprobs"] = 0 if sampling_params.pop("logprobs", False) else None
+        if sampling_params.get("top_k") == -1:
+            sampling_params["top_k"] = 0
         sampling_params.setdefault("repetition_penalty", self.config.get("repetition_penalty", 1.0))
         sampling_params = SamplingParams(max_tokens=max_tokens, **sampling_params)
         prompt_ids = _qwen2_5_vl_dedup_image_tokens(prompt_ids, self.model_config.processor)
@@ -620,7 +632,11 @@ class vLLMHttpServer:
             await self.engine.wake_up(tags=["kv_cache", "weights"])
             await self.engine.reset_prefix_cache()
         elif self.rollout_mode == RolloutMode.STANDALONE:
-            logger.info("skip wake_up in standalone mode")
+            if os.environ.get("VERL_ENABLE_STANDALONE_VLLM_SLEEP", "0") == "1":
+                await self.engine.wake_up(tags=["kv_cache", "weights"])
+                await self.engine.reset_prefix_cache()
+            else:
+                logger.info("skip wake_up in standalone mode")
 
     async def sleep(self):
         if self.node_rank != 0 or not self.config.free_cache_engine:
@@ -640,7 +656,11 @@ class vLLMHttpServer:
         elif self.rollout_mode == RolloutMode.COLOCATED:
             await self.engine.sleep(level=1)
         elif self.rollout_mode == RolloutMode.STANDALONE:
-            logger.info("skip sleep in standalone mode")
+            if os.environ.get("VERL_ENABLE_STANDALONE_VLLM_SLEEP", "0") == "1":
+                sleep_level = 1 if self.lora_as_adapter else 2
+                await self.engine.sleep(level=sleep_level)
+            else:
+                logger.info("skip sleep in standalone mode")
 
     async def start_profile(self, **kwargs):
         if (

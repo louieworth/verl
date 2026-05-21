@@ -201,8 +201,19 @@ class ResourcePoolManager:
             # For FSDP backend, using max_colocate_count=3: actor_critic_ref, rollout, reward model (optional)
             # For Megatron backend, we recommend using max_colocate_count>1
             # that can utilize different WorkerGroup for differnt models
+            # OPD split layouts label Ray nodes with custom resources such as
+            # {"actor": 1} and {"rollout": 1}. Bind matching pools to those
+            # labels so generic GPU placement cannot swap actor and rollout
+            # nodes when both have the same GPU count.
+            custom_resource = None
+            if resource_pool_name in {"actor_pool", "rollout_pool", "teacher_pool"}:
+                custom_resource = resource_pool_name.removesuffix("_pool")
             resource_pool = RayResourcePool(
-                process_on_nodes=process_on_nodes, use_gpu=True, max_colocate_count=3, name_prefix=resource_pool_name
+                process_on_nodes=process_on_nodes,
+                use_gpu=True,
+                max_colocate_count=3,
+                name_prefix=resource_pool_name,
+                accelerator_type=custom_resource,
             )
             self.resource_pool_dict[resource_pool_name] = resource_pool
 

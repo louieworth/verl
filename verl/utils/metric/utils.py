@@ -22,6 +22,40 @@ import numpy as np
 import torch
 
 
+def _as_numeric_array(value: Any) -> np.ndarray | None:
+    if isinstance(value, torch.Tensor):
+        value = value.detach().cpu().numpy()
+
+    try:
+        array = np.asarray(value)
+    except (TypeError, ValueError):
+        return None
+
+    if array.dtype == object:
+        scalar_values = []
+        values = value if isinstance(value, (list, tuple)) else [value]
+        for item in values:
+            if isinstance(item, torch.Tensor):
+                if item.numel() != 1:
+                    return None
+                item = item.detach().cpu().item()
+            elif isinstance(item, np.ndarray):
+                if item.size != 1:
+                    return None
+                item = item.item()
+            if not np.isscalar(item):
+                return None
+            scalar_values.append(item)
+        try:
+            array = np.asarray(scalar_values)
+        except (TypeError, ValueError):
+            return None
+
+    if array.size == 0 or not np.issubdtype(array.dtype, np.number):
+        return None
+    return array
+
+
 def reduce_metrics(metrics: dict[str, Union["Metric", list[Any]]]) -> dict[str, Any]:
     """
     Reduces a dictionary of metric lists by computing the mean, max, or min of each list.
@@ -46,16 +80,23 @@ def reduce_metrics(metrics: dict[str, Union["Metric", list[Any]]]) -> dict[str, 
         >>> reduce_metrics(metrics)
         {"loss": 2.0, "accuracy": 0.8, "max_reward": 8.0, "min_error": 0.05}
     """
+    reduced_metrics = {}
     for key, val in metrics.items():
         if isinstance(val, Metric):
-            metrics[key] = val.aggregate()
-        elif "max" in key:
-            metrics[key] = np.max(val)
+            reduced_metrics[key] = val.aggregate()
+            continue
+
+        numeric_val = _as_numeric_array(val)
+        if numeric_val is None:
+            continue
+
+        if "max" in key:
+            reduced_metrics[key] = np.max(numeric_val)
         elif "min" in key:
-            metrics[key] = np.min(val)
+            reduced_metrics[key] = np.min(numeric_val)
         else:
-            metrics[key] = np.mean(val)
-    return metrics
+            reduced_metrics[key] = np.mean(numeric_val)
+    return reduced_metrics
 
 
 class AggregationType(Enum):

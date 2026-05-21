@@ -37,6 +37,7 @@ from .config import KLTrainingConfig
 from .dataset.data_utils import create_kl_dataloader
 from recipe.math_evaluation.eval_utils import run_evaluation_suite
 from .kl_utils import compute_kl_divergence
+from .rollout_sync import sync_student_engine_to_resident_rollout
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -55,31 +56,42 @@ def build_eval_model_name(config: KLTrainingConfig) -> str:
 class KLTrainer:
     """Token-level KL training using verl's sharded FSDP engines."""
 
-    def __init__(self, config: KLTrainingConfig):
+    def __init__(self, config: KLTrainingConfig, *, sync_only: bool = False):
         self.config = config
         self.global_step = 0
         self.epoch = 0
+        self.sync_only = sync_only
 
         self.local_rank, self.rank, self.world_size = initialize_global_process_group()
         self.config.local_rank = self.local_rank
         self.config.world_size = self.world_size
 
-        self.tokenizer = self._load_tokenizer()
-        self.train_dataloader = self._create_dataloader()
-        self.total_training_steps = (
-            math.ceil(len(self.train_dataloader) / self.config.gradient_accumulation_steps) * self.config.total_epochs
-        )
+        if self.sync_only:
+            self.tokenizer = None
+            self.train_dataloader = None
+            self.total_training_steps = 1
+        else:
+            self.tokenizer = self._load_tokenizer()
+            self.train_dataloader = self._create_dataloader()
+            self.total_training_steps = (
+                math.ceil(len(self.train_dataloader) / self.config.gradient_accumulation_steps)
+                * self.config.total_epochs
+            )
 
         self.student_worker = self._build_student_worker()
-        self.teacher_worker = self._build_teacher_worker()
         self.student_engine = self.student_worker.engine
-        self.teacher_engine = self.teacher_worker.engine
+        if self.sync_only:
+            self.teacher_worker = None
+            self.teacher_engine = None
+        else:
+            self.teacher_worker = self._build_teacher_worker()
+            self.teacher_engine = self.teacher_worker.engine
 
         self.is_logging = (
             self.student_engine.is_mp_src_rank_with_outputs() and self.student_engine.get_data_parallel_rank() == 0
         )
 
-        if self.is_logging and HAS_WANDB:
+        if not self.sync_only and self.is_logging and HAS_WANDB:
             self._init_wandb()
 
         # T2: gradient cosine state. Cache the previous local-shard flat
@@ -87,9 +99,9 @@ class KLTrainer:
         self._prev_flat_grad = None
         # T3: resolve correction-token id list (full_vocab only — we need the
         # full teacher distribution to compute prob mass on those tokens).
-        self._correction_token_ids = self._resolve_correction_token_ids()
+        self._correction_token_ids = [] if self.sync_only else self._resolve_correction_token_ids()
 
-        logger.info("KL Trainer initialized with verl FSDP backend")
+        logger.info("KL Trainer initialized with verl FSDP backend%s", " (sync-only)" if self.sync_only else "")
         logger.info("  KL Type: %s", self.config.kl_type)
         logger.info("  KL Method: %s", self.config.kl_method)
         logger.info("  Student Model: %s", self.config.student_model_path)
@@ -102,7 +114,7 @@ class KLTrainer:
         logger.info("  Grad Accum Steps: %s", self.config.gradient_accumulation_steps)
 
     def close(self):
-        if HAS_WANDB and self.is_logging:
+        if not self.sync_only and HAS_WANDB and self.is_logging:
             wandb.finish()
         destroy_global_process_group()
 
@@ -111,6 +123,7 @@ class KLTrainer:
         wandb.init(
             project=self.config.wandb_project,
             name=self.config.wandb_run_name,
+            mode=os.environ.get("WANDB_MODE", "offline"),
             config={
                 "distill_mode": self.config.distill_mode,
                 "kl_type": self.config.kl_type,
@@ -496,7 +509,9 @@ class KLTrainer:
                 data.pop("teacher_logits")
 
             kl_chunks = []
-            chunk_size = 512
+            chunk_size = int(os.environ.get("KL_FULL_VOCAB_CHUNK_SIZE") or "512")
+            if chunk_size < 1:
+                raise ValueError(f"KL_FULL_VOCAB_CHUNK_SIZE must be positive, got {chunk_size}")
             T = self.config.temperature
 
             for i, (s_logits, t_logits, s_mask, t_mask) in enumerate(zip(
@@ -736,35 +751,56 @@ class KLTrainer:
             raise FileNotFoundError(f"No FSDP checkpoints found under {self.config.model_save_dir}")
         return max(ckpt_dirs, key=lambda path: int(path.rsplit("_", 1)[-1]))
 
-    def _maybe_resume_from_checkpoint(self) -> int:
-        """Load latest FSDP checkpoint if present. Returns resumed global_step (0 if fresh)."""
-        ckpt_dirs = glob.glob(os.path.join(self.config.model_save_dir, "global_step_*"))
-        if not ckpt_dirs:
-            if self.rank == 0:
-                print(
-                    f"[RESUME] No checkpoint found under {self.config.model_save_dir} — "
-                    f"training from scratch (global_step=0)",
-                    flush=True,
-                )
+    def _checkpoint_step_from_path(self, path: str) -> int:
+        try:
+            return int(path.rstrip("/").rsplit("_", 1)[-1])
+        except ValueError:
             return 0
-        latest = max(ckpt_dirs, key=lambda path: int(path.rsplit("_", 1)[-1]))
-        step = int(latest.rsplit("_", 1)[-1])
+
+    def _maybe_resume_from_checkpoint(self) -> int:
+        """Load an FSDP checkpoint when requested or present.
+
+        ``continue`` preserves the old same-run resume behavior and skips already
+        completed optimizer steps. ``initialize`` loads the checkpoint state as the
+        starting point for this batch, then resets ``self.global_step`` so this
+        short run still performs its optimizer step.
+        """
+        explicit = (self.config.resume_checkpoint_path or "").strip()
+        if explicit:
+            latest = explicit
+            if not os.path.isdir(latest):
+                raise FileNotFoundError(f"resume_checkpoint_path does not exist or is not a directory: {latest}")
+        else:
+            ckpt_dirs = glob.glob(os.path.join(self.config.model_save_dir, "global_step_*"))
+            if not ckpt_dirs:
+                if self.rank == 0:
+                    print(
+                        f"[RESUME] No checkpoint found under {self.config.model_save_dir} -- "
+                        f"training from scratch (global_step=0)",
+                        flush=True,
+                    )
+                return 0
+            latest = max(ckpt_dirs, key=self._checkpoint_step_from_path)
+
+        step = self._checkpoint_step_from_path(latest)
+        mode = self.config.resume_checkpoint_mode
         if self.rank == 0:
             print(
                 "\n" + "=" * 70 + "\n"
                 f"[RESUME] Loading FSDP checkpoint\n"
                 f"[RESUME]   path:        {latest}\n"
                 f"[RESUME]   global_step: {step}\n"
+                f"[RESUME]   mode:        {mode}\n"
                 f"[RESUME]   world_size:  {self.world_size}\n"
                 + "=" * 70,
                 flush=True,
             )
-        logger.info("Resuming from checkpoint %s (global_step=%s)", latest, step)
+        logger.info("Loading checkpoint %s (global_step=%s, mode=%s)", latest, step, mode)
         self.student_engine.load_checkpoint(local_path=latest, del_local_after_load=False)
-        self.global_step = step
+        self.global_step = step if mode == "continue" else 0
         if self.rank == 0:
-            print(f"[RESUME] Checkpoint loaded — resuming training at global_step={step}\n", flush=True)
-        return step
+            print(f"[RESUME] Checkpoint loaded -- trainer global_step={self.global_step}\n", flush=True)
+        return self.global_step
 
     def _broadcast_rank0_error(self, error_message: str | None) -> str | None:
         error_holder = [error_message]
@@ -808,6 +844,74 @@ class KLTrainer:
         exported_error = self._broadcast_rank0_error(rank0_error)
         if exported_error is not None:
             raise RuntimeError(f"FSDP checkpoint export failed on rank 0: {exported_error}") from rank0_exception
+
+    def _launch_hf_export_async(self):
+        latest_ckpt = self._find_latest_checkpoint()
+        merged_dir = os.path.join(self.config.model_save_dir, "hf_merged")
+        hf_assets_source = self.config.student_model_path
+        rank0_error = None
+
+        if self.rank == 0:
+            try:
+                os.makedirs(merged_dir, exist_ok=True)
+                log_path = os.path.join(self.config.model_save_dir, "hf_export_async.log")
+                cmd = [
+                    sys.executable,
+                    "-m",
+                    "verl.model_merger",
+                    "merge",
+                    "--backend",
+                    "fsdp",
+                    "--local_dir",
+                    latest_ckpt,
+                    "--hf_model_config_path",
+                    hf_assets_source,
+                    "--target_dir",
+                    merged_dir,
+                    "--trust-remote-code",
+                ]
+                logger.info("Launching async HF export %s -> %s (log=%s)", latest_ckpt, merged_dir, log_path)
+                log_f = open(log_path, "ab", buffering=0)
+                subprocess.Popen(
+                    cmd,
+                    stdout=log_f,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                    close_fds=True,
+                )
+            except Exception as e:
+                rank0_error = f"{type(e).__name__}: {e}"
+                logger.exception("Failed to launch async export checkpoint %s to %s", latest_ckpt, merged_dir)
+
+        exported_error = self._broadcast_rank0_error(rank0_error)
+        if exported_error is not None:
+            raise RuntimeError(f"Async FSDP checkpoint export launch failed on rank 0: {exported_error}")
+
+    def _sync_resident_rollout(self):
+        manifest = (self.config.resident_rollout_manifest or "").strip()
+        if not self.config.sync_resident_rollout or not manifest:
+            return
+        if self.rank == 0:
+            logger.info("Syncing student weights to resident y_o rollout: %s", manifest)
+        sync_student_engine_to_resident_rollout(
+            student_engine=self.student_engine,
+            manifest_path=manifest,
+            global_step=self.global_step,
+        )
+        if self.rank == 0:
+            logger.info("Resident y_o rollout sync complete")
+
+    def sync_resident_rollout_from_checkpoint(self):
+        if not (self.config.resume_checkpoint_path or "").strip():
+            raise ValueError("sync-only resident rollout requires resume_checkpoint_path")
+        if not self.config.sync_resident_rollout:
+            raise ValueError("sync-only resident rollout requires sync_resident_rollout=true")
+
+        checkpoint_step = self._checkpoint_step_from_path(self.config.resume_checkpoint_path)
+        self._maybe_resume_from_checkpoint()
+        if checkpoint_step > 0:
+            self.global_step = checkpoint_step
+        self._sync_resident_rollout()
 
     def train_epoch(self, skip_batches: int = 0) -> dict[str, float]:
         sampler = getattr(self.train_dataloader, "sampler", None)
@@ -989,9 +1093,13 @@ class KLTrainer:
             raise RuntimeError("Training finished without any optimizer step.")
 
         self._save_checkpoint()
+        self._sync_resident_rollout()
 
         if self.config.save_merged_model or self.config.run_eval_after_training:
-            self._export_hf_model()
+            if self.config.async_hf_export and not self.config.run_eval_after_training:
+                self._launch_hf_export_async()
+            else:
+                self._export_hf_model()
 
         # Evaluation is launched from the shell driver after this process exits,
         # so all FSDP/training state is released before vLLM claims the GPUs.

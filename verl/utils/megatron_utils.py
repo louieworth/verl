@@ -33,7 +33,7 @@ from megatron.core.enums import ModelType
 from megatron.core.optimizer import ChainedOptimizer
 from megatron.core.parallel_state import get_global_memory_buffer
 from megatron.core.transformer import MLATransformerConfig, TransformerConfig
-from megatron.core.transformer.module import Float16Module
+from megatron.core.transformer.module import Float16Module, float16_to_fp32, fp32_to_float16
 from megatron.core.transformer.multi_token_prediction import MTPLossLoggingHelper
 from megatron.core.utils import get_attr_wrapped_model
 from transformers import PretrainedConfig
@@ -47,6 +47,19 @@ from verl.workers.config import HFModelConfig, McoreEngineConfig
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
+
+class VerlFloat16Module(Float16Module):
+    def forward(self, *inputs, **kwargs):  # pylint: disable=missing-function-docstring
+        if parallel_state.is_pipeline_first_stage(ignore_virtual=False, vp_stage=self.vp_stage):
+            inputs = fp32_to_float16(inputs, self.float16_convertor)
+        outputs = self.module(*inputs, **kwargs)
+        if (
+            parallel_state.is_pipeline_last_stage(ignore_virtual=False, vp_stage=self.vp_stage)
+            and not getattr(self.config, "verl_skip_float16_output_conversion", False)
+        ):
+            outputs = float16_to_fp32(outputs)
+        return outputs
 
 
 def get_model_config(model):
@@ -139,7 +152,7 @@ def get_model(
     config.fp8 = None
     tfconfig: TransformerConfig = model[0].config
     if config.fp16 or config.bf16:  # the ModelParallelConfig in GPTModel
-        model = [Float16Module(config, model_module) for model_module in model]
+        model = [VerlFloat16Module(config, model_module) for model_module in model]
 
     if wrap_with_ddp:
         ddp_models = []

@@ -349,7 +349,7 @@ class SGLangHttpServer:
             # support vllm-style 'max_tokens' param
             max_new_tokens = sampling_params.pop("max_tokens")
         else:
-            max_new_tokens = self.config.response_length + self.config.prompt_length - len(prompt_ids)
+            max_new_tokens = self.config.response_length
 
         # Clamp max_new_tokens to the valid range [0, max_possible_tokens]
         max_new_tokens = max(0, min(max_new_tokens, max_possible_tokens))

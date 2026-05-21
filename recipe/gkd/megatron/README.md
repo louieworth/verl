@@ -29,7 +29,12 @@ The native (serial) on-policy distillation process is shown in the figure below.
 
 ![Zero-Step-Off Scheduler](https://raw.githubusercontent.com/eric-haibin-lin/verl-community/refs/heads/main/docs/zero-step-off-distill.png)
 
-This recipe supports optional schedulers that overlap generation, teacher querying, and updates to improve throughput without changing the distillation objective.
+This recipe uses the official async rollout path. Megatron actor and vLLM rollout
+are colocated through `actor_rollout_ref.hybrid_engine=True`, with rollout
+served by `AgentLoopManager` and weight sync handled by
+`CheckpointEngineManager`. Optional schedulers can overlap generation, teacher
+querying, and updates to improve throughput without changing the distillation
+objective.
 
 #### 3.1.1 One-Step-Off-Policy
 
@@ -47,7 +52,10 @@ This recipe supports optional schedulers that overlap generation, teacher queryi
 - Overlap pattern: rollout, actor update while teacher retrieving; interleave weight sync.
 - Timing keys: `sync_rollout_weights`, `max(wait_prev_gen, wait_prev_prev_teacher)`.
 
-Tip: Use `two_step_off` when teacher takes much more time than sync; `one_step_off` for simpler overlapping.
+Tip: Use `scheduler=auto` unless you need a specific pipeline. Auto selects
+`one_step` for `trainer.optimization_mode=one_step`; otherwise it selects the
+official `one_step_off` async pipeline. Use `two_step_off` when teacher takes
+much more time than sync.
 
 Practical details:
 
@@ -55,10 +63,10 @@ Practical details:
 - Loss injection: last pipeline stage computes KL via a logits processor; earlier stages remain unchanged.
 - Optional dynamic micro-batching groups sequences by density to reduce padding overhead.
 
-The pipeline:
+The current async pipeline:
 
-1. Actor parameters are synchronized to a rollout worker group (nccl broadcast) with a little bit latency.
-2. Rollout workers (vLLM-backed) generate sequences asynchronously (`async_generate_sequences`).
+1. Actor parameters are synchronized to the colocated async rollout replicas.
+2. vLLM async servers generate sequences through `AgentLoopManager.generate_sequences`.
 3. Teacher client service (ZeroMQ based) returns top-k log-probabilities + token indices for each sequence (batched micro-requests), enabling KL-based guidance.
 4. Megatron actor performs a KL divergence computation between student logits and teacher top-k distributions (custom TP-aware kernel in `megatron_kl_loss.py`).
 5. Scheduling strategies (`one_step_off_scheduler`, `two_step_off_scheduler`) can overlap phases (optional for throughput):
@@ -76,9 +84,9 @@ We initially followed the weight synchronization path from the One-Step-Off-Poli
 ```
 Driver (TaskRunner)
   ├─ Initialize Ray, tokenizer, datasets, worker groups
-  ├─ Build ResourcePoolManager (actor vs rollout GPU layouts)
+  ├─ Build ResourcePoolManager for colocated actor_rollout GPUs
   ├─ Trainer.fit()
-      ├─ init_workers(): build actor + rollout groups, broadcast weight metadata, create nccl collective group
+      ├─ init_workers(): build actor_rollout group, create AgentLoopManager and CheckpointEngineManager
       ├─ continuous_iterator(): epochs → batches
       ├─ scheduler (see Section 6)
         • _async_gen_next_batch(): optional weight sync + non-blocking rollout
@@ -105,8 +113,10 @@ Driver (TaskRunner)
 - KL Loss injection via `logits_processor` during forward on pipeline last stage.
 
 ### 5.3 Rollout Worker (vLLM / SGLang)
-- Pure inference mode (`init_model` builds model; no optimizer). 
-- `async_generate_sequences` returns a Ray future for overlapping.
+- The current OPD path uses the official async rollout manager and colocated
+  vLLM server.
+- `AgentLoopManager.generate_sequences` receives raw prompt batches and returns
+  generated token tensors for the trainer.
 
 ### 5.4 Teacher Service (`teacher/`)
 - Proxy + worker architecture (ZMQ REQ/REP) for batched top-k retrieval.
@@ -122,10 +132,13 @@ Driver (TaskRunner)
 | Section | Purpose | Notable Keys |
 |---------|---------|-------------|
 | actor_rollout_ref.teacher | Teacher server | server_ip, server_port, n_server_workers |
-| trainer | Global training control | total_epochs, save_freq, scheduler (one_step_off | two_step_off), n_gpus_per_node, nnodes |
-| rollout | Resource split for rollout | n_gpus_per_node, nnodes |
+| actor_rollout_ref.rollout | Async rollout server | mode=async, agent.num_workers, checkpoint_engine.update_weights_bucket_megabytes |
+| trainer | Global training control | total_epochs, save_freq, scheduler, optimization_mode, n_gpus_per_node, nnodes |
+| opd | OPD compatibility | y_mode, distill_mode, teacher_training_prompt, kl_type, top_k, kl_token_clip |
 
-**Remember to set `trainer.n_gpus_per_node`, `trainer.nnodes`, `rollout.n_gpus_per_node` and `rollout.nnodes` to allocate GPU resources.**
+**Remember to set `trainer.n_gpus_per_node` and `trainer.nnodes` for the
+colocated actor_rollout pool. The legacy top-level `rollout.*` resource split is
+not used by the OPD async path.**
 
 ### Dynamic Batch Size
 
@@ -140,8 +153,7 @@ Improves utilization under variable sequence lengths.
 
 ### Resource Guidelines
 
-- Actor pool: `trainer.nnodes * trainer.n_gpus_per_node` GPUs.
-- Rollout pool: `rollout.nnodes * rollout.n_gpus_per_node` GPUs.
+- Actor/rollout pool: `trainer.nnodes * trainer.n_gpus_per_node` colocated GPUs.
 - Ensure teacher server capacity ≈ `n_server_workers` to avoid stalls (monitor `wait_prev_teacher`).
 
 ## 7. Usage Examples
@@ -150,16 +162,20 @@ Improves utilization under variable sequence lengths.
 
 Before training process, you should have a teacher server to provide logp information.
 
-We provide a toy teacher server example with vLLM. It needs `telnet` to check proxy status, and `python` command to run. So if you have not installed `telnet`, you can just delete these code in `start_server.sh`. And some OS use `python3` rather than `python`, so you also need to modify it. Also you can change the port of teacher if you meet port conflict.
+We provide a toy teacher server example with vLLM. The current
+`start_server.sh` uses a Python socket readiness check and supports overriding
+ports through environment variables.
 
 There are 3 arguments can be set for vllm backend `--tp-size`, `--n-logprobs` and `--ckpt-path` in `start_server.sh` / `worker.py`. You should set before you start server.
 
 We also provide a toy multi-node teacher server. You can start the main node using `start_server.sh` and start the slave nodes using `join_server.sh`. Still remember to set args in `join_server.sh`, especially the `$PROXY_IP` and `$PROXY_BACKEND_PORT` of main node.
 
-When training, student will automatically use the teacher's topk (n-logprobs) to set its own topk argument at line 83 of `recipe/gkd/megatron_kl_loss.py`, so you don't need to set student's topk argument.
+When training, student loss consumes the teacher server's returned top-k rows.
+For OPD compatibility, `opd.top_k=0` uses all returned rows and `opd.top_k=N`
+truncates the returned support to `N`.
 
 ```bash
-cd recipe/gkd/teacher
+cd recipe/gkd/megatron/teacher
 bash start_server.sh
 # Exports ports and launches proxy + worker (default vLLM backend)
 ```
@@ -173,16 +189,16 @@ telnet localhost 15555
 ### 7.2 Minimal Local (Megatron + vLLM) Run
 
 ```bash
-python3 -m recipe.gkd.main_gkd \
-  --config-path=recipe/gkd/config \
+python -m recipe.gkd.megatron.main_gkd \
+  --config-path=recipe/gkd/megatron/config \
   --config-name=on_policy_distill_trainer \
   actor_rollout_ref.model.path=/path/to/MODEL \
   data.train_files=/path/to/train.parquet \
   trainer.total_epochs=2 \
-  trainer.n_gpus_per_node=4 rollout.n_gpus_per_node=2 \
+  trainer.n_gpus_per_node=4 \
   actor_rollout_ref.teacher.server_ip=127.0.0.1 \
   actor_rollout_ref.teacher.server_port=15555 \
-  trainer.scheduler=one_step_off
+  trainer.scheduler=auto
 ```
 
 (Requires a running teacher server).
@@ -199,7 +215,7 @@ See `run_moonlight_dsv3_training.sh` for a full script including:
 Submit (after adjusting paths):
 
 ```bash
-bash recipe/gkd/run_moonlight_dsv3_training.sh
+bash recipe/gkd/megatron/run_moonlight_dsv3_training.sh
 ```
 
 ## 8. Metrics & Monitoring
@@ -215,7 +231,7 @@ Interpretation Tips:
 
 - High `wait_prev_teacher` → scale `n_server_workers` and allocate more teacher GPUs or reduce per-request batch size, or just use `two_step_off`.
 - High `wait_prev_gen` with uniform lengths → allocate more rollout GPUs.
-- High `sync_rollout_weights` → check NCCL env / network congestion and try to modify `actor_rollout_ref.rollout.update_weights_bucket_megabytes`.
+- High `sync_rollout_weights` → check NCCL env / network congestion and try to modify `actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes`.
 
 ## 9. Extensibility Notes
 
@@ -229,7 +245,28 @@ Interpretation Tips:
 | Train engine | Megatron |
 | Rollout engine | vLLM |
 | Distillation signal | Teacher top-k logprobs & indices |
-| Scheduling | one_step_off, two_step_off |
+| Scheduling | auto, one_step, one_step_off, two_step_off |
+
+### OPD Compatibility Layer
+
+This directory also includes an OPD compatibility layer for the non-ablation
+`recipe/opd/run` variants, including `y_o`/`y_r`, forward/reverse/JSD loss
+selection, forward-KL clip and reverse-KL top-K shell entry points, and
+full-dataset one-step optimization. This path expects raw prompt data and
+generates `y_o`/`y_r` online through the Megatron async rollout and teacher
+services; it supports chat parquet/json data and HuggingFace `save_to_disk`
+directories, appends the math instruction to online prompts by default, and
+does not consume cached generated data. It saves runs by default under
+`/scratch/l/luli/jiangli/ckpt/${DISTILL_MODE_ID}/${STUDENT_MODEL_ID}/${EXPERIMENT_NAME}`, where
+the generated experiment name records KL type, optimization mode, computed
+steps, `y_o`/`y_r`, `opd`/`opsd`, teacher model, and date. It can also merge the
+final Megatron actor checkpoint and run async math evaluation with `PASS_K=16`.
+The canonical `y_o` Slurm entry points are `run/sbatch/opd/multi_step_forward_y_o.sh`
+for 2-node 8xH100 and `run/sbatch/opd/multi_step_forward_y_o_h200.sh` for 1-node
+8xH200. Both use the same logical 1+3+4 split: one teacher GPU, three student
+rollout GPUs, and four Megatron actor GPUs. See
+[`OPD_MEGATRON_PORT.md`](OPD_MEGATRON_PORT.md) for the exact mapping and run
+commands.
 
 ## 11. Quick Checklist Before Running
 

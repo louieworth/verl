@@ -180,7 +180,8 @@ async def generate(
 @hydra.main(config_path="config", config_name="ppo_trainer", version_base=None)
 def main(config):
     with temporarily_clear_torch_launch_env():
-        ray.init(runtime_env=build_generation_server_runtime_env())
+        ray_address = os.environ.get("RAY_ADDRESS") or None
+        ray.init(address=ray_address, runtime_env=build_generation_server_runtime_env())
 
         pprint(OmegaConf.to_container(config, resolve=True))  # resolve=True will eval symbol values
         OmegaConf.resolve(config)

@@ -49,15 +49,36 @@ def collate_fn(data_list: list[dict]) -> dict:
         (batch_size, \\*dims) and non-tensor entries are converted to
         np.ndarray of dtype object with shape (batch_size,).
     """
-    tensors = defaultdict(list)
-    non_tensors = defaultdict(list)
-
+    tensor_keys = set()
+    non_tensor_keys = set()
     for data in data_list:
         for key, val in data.items():
             if isinstance(val, torch.Tensor):
-                tensors[key].append(val)
+                tensor_keys.add(key)
             else:
-                non_tensors[key].append(val)
+                non_tensor_keys.add(key)
+
+    mixed_keys = tensor_keys & non_tensor_keys
+    if mixed_keys:
+        raise TypeError(f"Mixed tensor/non-tensor values for keys: {sorted(mixed_keys)}")
+
+    tensors = defaultdict(list)
+    non_tensors = defaultdict(list)
+
+    for idx, data in enumerate(data_list):
+        for key in tensor_keys:
+            if key not in data:
+                raise KeyError(f"Missing tensor key {key!r} in sample {idx}")
+            val = data[key]
+            if not isinstance(val, torch.Tensor):
+                raise TypeError(f"Expected tensor key {key!r} in sample {idx}, got {type(val)}")
+            tensors[key].append(val)
+
+        for key in non_tensor_keys:
+            val = data.get(key, None)
+            if isinstance(val, torch.Tensor):
+                raise TypeError(f"Expected non-tensor key {key!r} in sample {idx}, got tensor")
+            non_tensors[key].append(val)
 
     for key, val in tensors.items():
         tensors[key] = torch.stack(val, dim=0)
@@ -155,12 +176,20 @@ class RLHFDataset(Dataset):
         dataframes = []
         for parquet_file in self.data_files:
             # read files and cache
-            if parquet_file.endswith(".parquet"):
+            if os.path.isdir(parquet_file):
+                dataframe = datasets.load_from_disk(parquet_file)
+                if isinstance(dataframe, datasets.DatasetDict):
+                    split = "train" if "train" in dataframe else next(iter(dataframe.keys()))
+                    dataframe = dataframe[split]
+            elif parquet_file.endswith(".parquet"):
                 dataframe = datasets.load_dataset("parquet", data_files=parquet_file)["train"]
             elif parquet_file.endswith(".json") or parquet_file.endswith(".jsonl"):
                 dataframe = datasets.load_dataset("json", data_files=parquet_file)["train"]
             else:
-                raise ValueError(f"Unsupported file format: {parquet_file}")
+                raise ValueError(
+                    f"Unsupported file format: {parquet_file}. "
+                    "Expected parquet/json/jsonl or a HuggingFace dataset directory saved by save_to_disk()."
+                )
             dataframes.append(dataframe)
         self.dataframe: datasets.Dataset = datasets.concatenate_datasets(dataframes)
 
@@ -249,8 +278,9 @@ class RLHFDataset(Dataset):
                         apply_kwargs.pop("return_dict", None)
                         apply_kwargs.pop("return_tensors", None)
 
+                        messages = self._build_messages(dict(doc))
                         tokenized_prompt = tokenizer.apply_chat_template(
-                            doc[prompt_key], add_generation_prompt=True, tokenize=True, **apply_kwargs
+                            messages, add_generation_prompt=True, tokenize=True, **apply_kwargs
                         )
                         return len(normalize_token_ids(tokenized_prompt))
                     except Exception:
@@ -289,6 +319,14 @@ class RLHFDataset(Dataset):
     def __len__(self):
         return len(self.dataframe)
 
+    def _resolve_prompt_key(self, example: dict) -> str:
+        if self.prompt_key != "auto":
+            return self.prompt_key
+        for key in ("prompt", "problem", "question"):
+            if key in example and example[key] is not None:
+                return key
+        raise KeyError("prompt_key=auto could not find any of: prompt, problem, question")
+
     def _build_messages(self, example: dict):
         """Replace <image> and <video> placeholder in messages with corresponding image and video
         which is required by processor.apply_chat_template.
@@ -301,7 +339,10 @@ class RLHFDataset(Dataset):
         Returns:
             messages: List of messages with replaced placeholder.
         """
-        messages: list = example[self.prompt_key]
+        prompt_key = self._resolve_prompt_key(example)
+        messages = example[prompt_key]
+        if isinstance(messages, str):
+            messages = [{"role": "user", "content": messages}]
         # When concatenating image and video datasets, pop will return None for image or video sample
         images = example.pop(self.image_key, None) or []
         videos = example.pop(self.video_key, None) or []
@@ -348,6 +389,12 @@ class RLHFDataset(Dataset):
     def __getitem__(self, item):
         """For rollout, apply_chat_template has been moved to AgentLoop, so we only return raw_prompt here."""
         row_dict: dict = self.dataframe[item]
+        if "data_source" not in row_dict or row_dict["data_source"] is None:
+            row_dict["data_source"] = self.config.get("default_data_source", "math")
+        if "reward_model" not in row_dict or row_dict["reward_model"] is None:
+            ground_truth = row_dict.get("answer") or row_dict.get("solution")
+            if ground_truth is not None:
+                row_dict["reward_model"] = {"style": "rule", "ground_truth": ground_truth}
         row_dict["raw_prompt"] = self._build_messages(row_dict)
 
         # TODO(wuxibin): We still need a dummy tensor to make sure DataProto.batch is not empty.
@@ -357,6 +404,9 @@ class RLHFDataset(Dataset):
         # add index for each prompt
         if "extra_info" not in row_dict or row_dict["extra_info"] is None:
             row_dict["extra_info"] = dict()
+        for key in ("problem", "question", "solution", "answer", "clean_status"):
+            if key in row_dict and row_dict[key] is not None and key not in row_dict["extra_info"]:
+                row_dict["extra_info"][key] = row_dict[key]
         index = row_dict.get("extra_info", {}).get("index", 0)
         tools_kwargs = row_dict.get("extra_info", {}).get("tools_kwargs", {})
         interaction_kwargs = row_dict.get("extra_info", {}).get("interaction_kwargs", {})

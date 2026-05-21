@@ -41,6 +41,18 @@ def mylog(message: str, filename: str = "distill_loss.log"):
         f.write(f"({get_data_parallel_rank()}, {get_tensor_model_parallel_rank()}): {message}\n")
 
 
+def _fp32_loss_inputs(vocab_parallel_logits, target_topk_logps):
+    # Match recipe/opd: keep model forward in bf16, but do probability math in fp32.
+    logits_fp32 = vocab_parallel_logits.float()
+    # The custom vocab-parallel losses below intentionally use in-place
+    # softmax math on their logits buffer. If the model output is already fp32,
+    # Tensor.float() returns the same autograd-tracked view, and those in-place
+    # mutations can invalidate backward for the caller. Clone only in that case.
+    if logits_fp32.data_ptr() == vocab_parallel_logits.data_ptr():
+        logits_fp32 = logits_fp32.clone()
+    return logits_fp32, target_topk_logps.float()
+
+
 # ============================================================
 # 1) Forward KL (teacher top-k truncated): KL(P_topk || Q_full)
 # ============================================================
@@ -130,6 +142,7 @@ class _VocabParallelKLDivergence(torch.autograd.Function):
 
 
 def vocab_parallel_kl_divergence(vocab_parallel_logits, target_topk_logps, target_topk_indices):
+    vocab_parallel_logits, target_topk_logps = _fp32_loss_inputs(vocab_parallel_logits, target_topk_logps)
     return _VocabParallelKLDivergence.apply(vocab_parallel_logits, target_topk_logps, target_topk_indices)
 
 
@@ -264,6 +277,7 @@ class _VocabParallelRKLDivergence(torch.autograd.Function):
 
 
 def vocab_parallel_rkl_divergence(vocab_parallel_logits, target_topk_logps, target_topk_indices):
+    vocab_parallel_logits, target_topk_logps = _fp32_loss_inputs(vocab_parallel_logits, target_topk_logps)
     return _VocabParallelRKLDivergence.apply(vocab_parallel_logits, target_topk_logps, target_topk_indices)
 
 
@@ -428,6 +442,7 @@ class _VocabParallelWeightedKLRKLDivergence(torch.autograd.Function):
 def vocab_parallel_kl_rkl_divergence(
     vocab_parallel_logits, target_topk_logps, target_topk_indices, rkl_ratio: float = 0.1
 ):
+    vocab_parallel_logits, target_topk_logps = _fp32_loss_inputs(vocab_parallel_logits, target_topk_logps)
     return _VocabParallelWeightedKLRKLDivergence.apply(
         vocab_parallel_logits, target_topk_logps, target_topk_indices, rkl_ratio
     )
@@ -586,6 +601,7 @@ class _VocabParallelJSDivergence(torch.autograd.Function):
 
 
 def vocab_parallel_jsd_divergence(vocab_parallel_logits, target_topk_logps, target_topk_indices, beta: float = 0.5):
+    vocab_parallel_logits, target_topk_logps = _fp32_loss_inputs(vocab_parallel_logits, target_topk_logps)
     return _VocabParallelJSDivergence.apply(vocab_parallel_logits, target_topk_logps, target_topk_indices, beta)
 
 
