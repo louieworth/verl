@@ -195,40 +195,25 @@ def score_predictions_frame(
 
 
 def upsert_result_json(result_file: Path, model_key: str, payload: dict) -> None:
-    """Insert-or-update a single model_key in result_file under an exclusive lock.
-
-    Parallel sbatch array tasks writing to the same result.json would race on
-    read-modify-write. We hold an fcntl.flock on a sidecar lock file for the
-    full read-update-write cycle so concurrent writers serialize safely.
-    """
-    import fcntl
-
+    """Insert-or-update a single model_key in result_file."""
     result_file.parent.mkdir(parents=True, exist_ok=True)
-    lock_file = result_file.with_suffix(result_file.suffix + ".lock")
+    result = {}
+    if result_file.exists() and result_file.stat().st_size > 0:
+        with result_file.open("r", encoding="utf-8") as f:
+            content = f.read().strip()
+        if content:
+            existing = json.loads(content)
+            if not isinstance(existing, dict):
+                raise ValueError(f"Expected {result_file} to contain a JSON object.")
+            result = existing
 
-    with lock_file.open("w") as lock_fp:
-        fcntl.flock(lock_fp.fileno(), fcntl.LOCK_EX)
-        try:
-            result = {}
-            if result_file.exists() and result_file.stat().st_size > 0:
-                with result_file.open("r", encoding="utf-8") as f:
-                    content = f.read().strip()
-                if content:
-                    existing = json.loads(content)
-                    if not isinstance(existing, dict):
-                        raise ValueError(f"Expected {result_file} to contain a JSON object.")
-                    result = existing
+    result[model_key] = payload
 
-            result[model_key] = payload
-
-            # Atomic replace: write to a temp file in the same directory, then rename.
-            tmp_path = result_file.with_suffix(result_file.suffix + f".tmp.{os.getpid()}")
-            with tmp_path.open("w", encoding="utf-8") as f:
-                json.dump(result, f, ensure_ascii=False, indent=2)
-                f.write("\n")
-            os.replace(tmp_path, result_file)
-        finally:
-            fcntl.flock(lock_fp.fileno(), fcntl.LOCK_UN)
+    tmp_path = result_file.with_suffix(result_file.suffix + f".tmp.{os.getpid()}")
+    with tmp_path.open("w", encoding="utf-8") as f:
+        json.dump(result, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+    os.replace(tmp_path, result_file)
 
 
 def main() -> None:

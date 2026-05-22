@@ -285,6 +285,14 @@ class ReferenceLogpsWorker:
         self.max_batched_tokens = worker_config["max_batched_tokens"]
         self.average_log_prob = bool(worker_config.get("average_log_prob", False))
 
+    def ping(self) -> bool:
+        # No-op readiness probe so callers can serialize actor __init__ via
+        # ray.get(w.ping.remote()) — needed because parallel CUDA driver
+        # init across N workers on a fresh node hits cudaErrorDevicesUnavailable
+        # (Run E 13587777 on g19: all 8 workers crashed on .to(device) with
+        # 0 MiB GPU usage and clean nvidia-smi → driver concurrent-init race).
+        return True
+
     def compute(self, prompts: list[Any], responses: list[Any]) -> list[float]:
         table = pa.table(
             {
@@ -311,6 +319,13 @@ class ReferenceLogpsWorker:
 class ReferenceWorkerPool:
     workers: list[Any]
     rows_per_task: int
+    # Round-robin index persists across compute() calls so all workers rotate
+    # in across multiple parquet row_groups. Bug pre-patch: this was a local
+    # var inside compute() that reset to 0 every call → with a row_group
+    # containing fewer chunks than num_workers (10k rows / 2048 rows_per_task
+    # = ~5 chunks vs 7 workers), workers[5] and workers[6] never received any
+    # task (Run E 13587777 rerun4: 5/7 GPUs at 99% util, 6,7 idle for whole run).
+    next_worker_idx: int = 0
 
     def close(self) -> None:
         for worker in self.workers:
@@ -328,12 +343,10 @@ class ReferenceWorkerPool:
 
         outputs = np.empty((len(prompts),), dtype=np.float32)
         pending: dict[Any, tuple[int, int]] = {}
-        next_worker_idx = 0
 
         def submit(start: int, end: int) -> None:
-            nonlocal next_worker_idx
-            worker = self.workers[next_worker_idx]
-            next_worker_idx = (next_worker_idx + 1) % num_workers
+            worker = self.workers[self.next_worker_idx]
+            self.next_worker_idx = (self.next_worker_idx + 1) % num_workers
             object_ref = worker.compute.remote(prompts[start:end], responses[start:end])
             pending[object_ref] = (start, end)
 
@@ -445,7 +458,22 @@ def _build_worker_pool(config: DictConfig) -> ReferenceWorkerPool | None:
         "average_log_prob": bool(config.algorithm.get("average_log_prob", False)),
         "device": "cuda",
     }
-    workers = [ReferenceLogpsWorker.remote(worker_config) for _ in range(num_workers)]
+    # Serialize actor __init__ to dodge concurrent CUDA driver init race that
+    # produces cudaErrorDevicesUnavailable on H100 (Run E 13587777 on g19:
+    # 8 parallel ReferenceLogpsWorker.__init__ → all 8 crashed at .to(device)
+    # despite GPUs being 0 MiB / Default mode / no other processes).
+    # Each ray.get(w.ping.remote()) blocks until that worker's __init__
+    # (model_load + .to(device)) completes, so the next worker's CUDA init
+    # starts on a settled driver. Adds ~10 s × num_workers serial wait
+    # (vs ~10 s parallel + crash). 2 s buffer between for driver settle.
+    import time
+    workers = []
+    for i in range(num_workers):
+        w = ReferenceLogpsWorker.remote(worker_config)
+        ray.get(w.ping.remote())
+        workers.append(w)
+        if i < num_workers - 1:
+            time.sleep(2)
     return ReferenceWorkerPool(workers=workers, rows_per_task=rows_per_task)
 
 

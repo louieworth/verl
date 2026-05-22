@@ -1,0 +1,343 @@
+{
+  "model": "qwen3-4b-instruct-2507",
+  "evaluation": {
+    "benchmark": "PENS personalized headline generation",
+    "metric": "ROUGE F1 with Porter stemming and multi-reference max F1",
+    "reference_file": "/project/6093645/lijiang3/hf_cache/data/Microsoft-PeNS/PENS/personalized_test.tsv"
+  },
+  "runs": {
+    "B_vanilla_dpo_raw_base": {
+      "description": "Vanilla pointwise DPO on raw base, implemented through prospect_dpo with symmetric alpha/lambda.",
+      "parameters": {
+        "base": "raw",
+        "loss_type": "prospect_dpo",
+        "beta": 0.3,
+        "alpha_max": 1.0,
+        "lambda_max": 1.0,
+        "actor_lr": "1e-5",
+        "lr_scheduler": "cosine, warmup_ratio=0.03, min_ratio=0.1, num_cycles=0.5",
+        "average_log_prob": true,
+        "eval_format": "boxed",
+        "thinking_mode": false
+      },
+      "best": {
+        "checkpoint_step": 1000,
+        "rouge_1_f1": 0.2725684881250904,
+        "rouge_2_f1": 0.0928517498806238,
+        "rouge_l_f1": 0.21921555348782623,
+        "count": 20465,
+        "joined_count": 20554,
+        "skipped_count": 89
+      },
+      "checkpoints": {
+        "200": {
+          "rouge_1_f1": 0.2717250979153329,
+          "rouge_2_f1": 0.09253897572090046,
+          "rouge_l_f1": 0.2184925367622258,
+          "count": 20465,
+          "joined_count": 20554,
+          "skipped_count": 89
+        },
+        "1000": {
+          "rouge_1_f1": 0.2725684881250904,
+          "rouge_2_f1": 0.0928517498806238,
+          "rouge_l_f1": 0.21921555348782623,
+          "count": 20465,
+          "joined_count": 20554,
+          "skipped_count": 89
+        },
+        "2000": {
+          "rouge_1_f1": 0.27259933675605896,
+          "rouge_2_f1": 0.09284026471404815,
+          "rouge_l_f1": 0.2187259970168831,
+          "count": 20465,
+          "joined_count": 20554,
+          "skipped_count": 89
+        },
+        "4000": {
+          "rouge_1_f1": 0.2720656495040337,
+          "rouge_2_f1": 0.09249189470921992,
+          "rouge_l_f1": 0.2184450937225563,
+          "count": 20465,
+          "joined_count": 20554,
+          "skipped_count": 89
+        },
+        "4600": {
+          "rouge_1_f1": 0.27224050679810496,
+          "rouge_2_f1": 0.09283257493434624,
+          "rouge_l_f1": 0.2185874465064704,
+          "count": 20465,
+          "joined_count": 20554,
+          "skipped_count": 89
+        }
+      },
+      "source_file": "results/qwen3-4b-instruct-2507_20260424_102309.json"
+    },
+    "C_aggressive_prospect_dpo_raw_base": {
+      "description": "Aggressive Prospect-DPO on raw base. This run collapses after the early checkpoint.",
+      "parameters": {
+        "base": "raw",
+        "loss_type": "prospect_dpo",
+        "beta": 0.1,
+        "alpha_max": 2.0,
+        "lambda_max": 2.0,
+        "actor_lr": "1e-5",
+        "lr_scheduler": "cosine, warmup_ratio=0.03, min_ratio=0.1, num_cycles=0.5",
+        "average_log_prob": true,
+        "eval_format": "boxed",
+        "thinking_mode": false
+      },
+      "best": {
+        "checkpoint_step": 200,
+        "rouge_1_f1": 0.25001818426624334,
+        "rouge_2_f1": 0.08352876631447595,
+        "rouge_l_f1": 0.20573883398774154,
+        "count": 20465,
+        "joined_count": 20554,
+        "skipped_count": 89
+      },
+      "checkpoints": {
+        "200": {
+          "rouge_1_f1": 0.25001818426624334,
+          "rouge_2_f1": 0.08352876631447595,
+          "rouge_l_f1": 0.20573883398774154,
+          "count": 20465,
+          "joined_count": 20554,
+          "skipped_count": 89
+        },
+        "1000": {
+          "rouge_1_f1": 0.00948446213672142,
+          "rouge_2_f1": 0.0027058378736956917,
+          "rouge_l_f1": 0.008016977444494554,
+          "count": 901,
+          "joined_count": 20554,
+          "skipped_count": 19653
+        },
+        "2000": {
+          "rouge_1_f1": 0.002865729922630011,
+          "rouge_2_f1": 0.0007477724253575146,
+          "rouge_l_f1": 0.002420575547463255,
+          "count": 263,
+          "joined_count": 20554,
+          "skipped_count": 20291
+        },
+        "4000": {
+          "rouge_1_f1": 0.003246040943723849,
+          "rouge_2_f1": 0.0008751998288521939,
+          "rouge_l_f1": 0.0027571374958856643,
+          "count": 287,
+          "joined_count": 20554,
+          "skipped_count": 20267
+        },
+        "4500": {
+          "rouge_1_f1": 0.0022878677929755098,
+          "rouge_2_f1": 0.0005738854572842467,
+          "rouge_l_f1": 0.0019185398125788188,
+          "count": 183,
+          "joined_count": 20554,
+          "skipped_count": 20371
+        }
+      },
+      "source_file": "results/qwen3-4b-instruct-2507_20260428_222403.json"
+    },
+    "D_mild_prospect_dpo_raw_base_low_lr": {
+      "description": "Mild Prospect-DPO on raw base with lower LR. Stable but close to no-op.",
+      "parameters": {
+        "base": "raw",
+        "loss_type": "prospect_dpo",
+        "beta": 0.1,
+        "alpha_max": 1.5,
+        "lambda_max": 1.5,
+        "actor_lr": "1e-6",
+        "lr_scheduler": "cosine, warmup_ratio=0.03, min_ratio=0.1, num_cycles=0.5",
+        "average_log_prob": true,
+        "eval_format": "boxed",
+        "thinking_mode": false
+      },
+      "best": {
+        "checkpoint_step": 200,
+        "rouge_1_f1": 0.27222221878168684,
+        "rouge_2_f1": 0.09252007333261769,
+        "rouge_l_f1": 0.2188087872532664,
+        "count": 20465,
+        "joined_count": 20554,
+        "skipped_count": 89
+      },
+      "checkpoints": {
+        "200": {
+          "rouge_1_f1": 0.27222221878168684,
+          "rouge_2_f1": 0.09252007333261769,
+          "rouge_l_f1": 0.2188087872532664,
+          "count": 20465,
+          "joined_count": 20554,
+          "skipped_count": 89
+        },
+        "1000": {
+          "rouge_1_f1": 0.27123630445450336,
+          "rouge_2_f1": 0.09204561429873985,
+          "rouge_l_f1": 0.21774701210932038,
+          "count": 20465,
+          "joined_count": 20554,
+          "skipped_count": 89
+        },
+        "2000": {
+          "rouge_1_f1": 0.2713519629637077,
+          "rouge_2_f1": 0.09201687446705177,
+          "rouge_l_f1": 0.21804420695248675,
+          "count": 20465,
+          "joined_count": 20554,
+          "skipped_count": 89
+        },
+        "3000": {
+          "rouge_1_f1": 0.2714009017550381,
+          "rouge_2_f1": 0.09206919758089836,
+          "rouge_l_f1": 0.21814084213293478,
+          "count": 20465,
+          "joined_count": 20554,
+          "skipped_count": 89
+        },
+        "4000": {
+          "rouge_1_f1": 0.27205590456958073,
+          "rouge_2_f1": 0.09237205091720099,
+          "rouge_l_f1": 0.21840359031238854,
+          "count": 20465,
+          "joined_count": 20554,
+          "skipped_count": 89
+        },
+        "5341": {
+          "rouge_1_f1": 0.27181991224126795,
+          "rouge_2_f1": 0.09254509924548317,
+          "rouge_l_f1": 0.21840419615289378,
+          "count": 20465,
+          "joined_count": 20554,
+          "skipped_count": 89
+        }
+      },
+      "source_file": "results/qwen3-4b-instruct-2507_20260503_050655.json"
+    },
+    "E_prospect_dpo_sft_warmed_base": {
+      "description": "Prospect-DPO on SFT-positive warmed base. Best current algorithm run.",
+      "parameters": {
+        "base": "sft_positive_warmup",
+        "base_checkpoint": "sft_warmup_pos_qwen3-4b-instruct-2507/global_step_50/hf_merged",
+        "loss_type": "prospect_dpo",
+        "beta": 0.1,
+        "alpha_max": 2.0,
+        "lambda_max": 2.0,
+        "actor_lr": "5e-6",
+        "lr_scheduler": "cosine, warmup_ratio=0.03, min_ratio=0.1, num_cycles=0.5",
+        "average_log_prob": true,
+        "eval_format": "boxed",
+        "thinking_mode": false
+      },
+      "best": {
+        "checkpoint_step": 1400,
+        "rouge_1_f1": 0.2924435461194794,
+        "rouge_2_f1": 0.10652704301424319,
+        "rouge_l_f1": 0.2407764061589391,
+        "count": 20465,
+        "joined_count": 20554,
+        "skipped_count": 89
+      },
+      "checkpoints": {
+        "200": {
+          "rouge_1_f1": 0.29153504746776004,
+          "rouge_2_f1": 0.10579418989551019,
+          "rouge_l_f1": 0.2395524507417842,
+          "count": 20465,
+          "joined_count": 20554,
+          "skipped_count": 89
+        },
+        "400": {
+          "rouge_1_f1": 0.2924669324624668,
+          "rouge_2_f1": 0.10618777636923721,
+          "rouge_l_f1": 0.24038583444140493,
+          "count": 20465,
+          "joined_count": 20554,
+          "skipped_count": 89
+        },
+        "600": {
+          "rouge_1_f1": 0.2921422026807481,
+          "rouge_2_f1": 0.10582876975608285,
+          "rouge_l_f1": 0.24022000537064608,
+          "count": 20465,
+          "joined_count": 20554,
+          "skipped_count": 89
+        },
+        "800": {
+          "rouge_1_f1": 0.29203395100153073,
+          "rouge_2_f1": 0.1058813661895198,
+          "rouge_l_f1": 0.24024524935348704,
+          "count": 20465,
+          "joined_count": 20554,
+          "skipped_count": 89
+        },
+        "1000": {
+          "rouge_1_f1": 0.2930000510624994,
+          "rouge_2_f1": 0.10650189268315799,
+          "rouge_l_f1": 0.24062640511371527,
+          "count": 20465,
+          "joined_count": 20554,
+          "skipped_count": 89
+        },
+        "1200": {
+          "rouge_1_f1": 0.2917322085869011,
+          "rouge_2_f1": 0.10584368004833536,
+          "rouge_l_f1": 0.24021515312524155,
+          "count": 20465,
+          "joined_count": 20554,
+          "skipped_count": 89
+        },
+        "1400": {
+          "rouge_1_f1": 0.2924435461194794,
+          "rouge_2_f1": 0.10652704301424319,
+          "rouge_l_f1": 0.2407764061589391,
+          "count": 20465,
+          "joined_count": 20554,
+          "skipped_count": 89
+        },
+        "1600": {
+          "rouge_1_f1": 0.2923377764531262,
+          "rouge_2_f1": 0.10614940992437825,
+          "rouge_l_f1": 0.24053564543313266,
+          "count": 20465,
+          "joined_count": 20554,
+          "skipped_count": 89
+        },
+        "1800": {
+          "rouge_1_f1": 0.2918940510960653,
+          "rouge_2_f1": 0.10569417907742684,
+          "rouge_l_f1": 0.24012115238458706,
+          "count": 20465,
+          "joined_count": 20554,
+          "skipped_count": 89
+        },
+        "2000": {
+          "rouge_1_f1": 0.2924542090346715,
+          "rouge_2_f1": 0.1063058120777045,
+          "rouge_l_f1": 0.24064248191709844,
+          "count": 20465,
+          "joined_count": 20554,
+          "skipped_count": 89
+        },
+        "2200": {
+          "rouge_1_f1": 0.29224572164887846,
+          "rouge_2_f1": 0.10587382000186663,
+          "rouge_l_f1": 0.24009546651509553,
+          "count": 20465,
+          "joined_count": 20554,
+          "skipped_count": 89
+        },
+        "2400": {
+          "rouge_1_f1": 0.29216479387317,
+          "rouge_2_f1": 0.10574696423208388,
+          "rouge_l_f1": 0.24000263393535354,
+          "count": 20465,
+          "joined_count": 20554,
+          "skipped_count": 89
+        }
+      },
+      "source_file": "results/qwen3-4b-instruct-2507_20260509_130948.json"
+    }
+  }
+}

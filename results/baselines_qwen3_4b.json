@@ -1,0 +1,47 @@
+{
+  "qwen3-4b-instruct-2507__thinkOFF__20260422": {
+    "backend": "rouge",
+    "count": 20465,
+    "joined_count": 20554,
+    "skipped_count": 89,
+    "rouge_1_f1": 0.27313834920020563,
+    "rouge_2_f1": 0.09201063550327657,
+    "rouge_l_f1": 0.2208891883300408,
+    "non_empty_prediction_count": 20465,
+    "parse_status_counts": {
+      "fenced_json": 20465,
+      "empty": 89
+    }
+  },
+  "qwen3-8b__thinkOFF__20260415": {
+    "backend": "rouge",
+    "count": 20456,
+    "joined_count": 20554,
+    "skipped_count": 98,
+    "rouge_1_f1": 0.2824983004326565,
+    "rouge_2_f1": 0.09831534437285439,
+    "rouge_l_f1": 0.22747126411372232,
+    "non_empty_prediction_count": 20456,
+    "parse_status_counts": {
+      "fenced_json": 20456,
+      "empty": 97,
+      "missing_structured_output": 1
+    }
+  },
+  "qwen3-8b__thinkON__20260415": {
+    "backend": "rouge",
+    "count": 20461,
+    "joined_count": 20554,
+    "skipped_count": 93,
+    "rouge_1_f1": 0.24896227689934594,
+    "rouge_2_f1": 0.07749621978815187,
+    "rouge_l_f1": 0.20121017566526841,
+    "non_empty_prediction_count": 20461,
+    "parse_status_counts": {
+      "inline_json": 17335,
+      "fenced_json": 3126,
+      "empty": 89,
+      "reasoning_no_answer": 4
+    }
+  }
+}

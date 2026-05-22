@@ -19,7 +19,7 @@ tensorflow/my_graph/*
 .idea/
 # C extensions
 *.so
-
+.agents/
 # Distribution / packaging
 .Python
 # env/
@@ -29,6 +29,8 @@ dist/
 downloads/
 eggs/
 .eggs/
+.codex/
+.vscode/
 lib/
 lib64/
 parts/

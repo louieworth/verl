@@ -94,13 +94,25 @@ def normalize_text(text: str) -> str:
 
 
 def compute_with_rouge_package(hyps: list[str], refs: list[str]) -> tuple[list[float], list[float], list[float]]:
-    import rouge
+    """Single-reference ROUGE via rouge_score (Google) with Porter stemmer.
 
-    evaluator = rouge.Rouge(metrics=["rouge-1", "rouge-2", "rouge-l"])
-    scores = evaluator.get_scores([normalize_text(h) for h in hyps], [normalize_text(r) for r in refs])
-    rouge1 = [score["rouge-1"]["f"] for score in scores]
-    rouge2 = [score["rouge-2"]["f"] for score in scores]
-    rougel = [score["rouge-l"]["f"] for score in scores]
+    Aligns with PENS paper benchmark (`pyrouge -m`) which enables Porter
+    stemming. Older pltrdy `rouge` package didn't support stemming → ~0.03
+    RL undercount vs paper. Switching to rouge_score(use_stemmer=True)
+    closes that gap.
+    """
+    from rouge_score import rouge_scorer
+
+    scorer = rouge_scorer.RougeScorer(["rouge1", "rouge2", "rougeL"], use_stemmer=True)
+    rouge1, rouge2, rougel = [], [], []
+    for h, r in zip(hyps, refs):
+        if not h or not r:
+            rouge1.append(0.0); rouge2.append(0.0); rougel.append(0.0)
+            continue
+        s = scorer.score(normalize_text(r), normalize_text(h))
+        rouge1.append(s["rouge1"].fmeasure)
+        rouge2.append(s["rouge2"].fmeasure)
+        rougel.append(s["rougeL"].fmeasure)
     return rouge1, rouge2, rougel
 
 
@@ -245,38 +257,37 @@ def score_with_rouge_package_multi(
     hypotheses: list[str],
     reference_lists: list[list[str]],
 ) -> tuple[list[float], list[float], list[float]]:
-    import rouge
+    """Multi-reference max-F1 ROUGE via rouge_score with Porter stemmer.
 
-    evaluator = rouge.Rouge(metrics=["rouge-1", "rouge-2", "rouge-l"])
+    Aligns with PENS paper benchmark `pyrouge -a -c 95 -m -n 4 -w 1.2`:
+    - `-a` (avg across refs)   → multi-ref max F1 here
+    - `-m` (Porter stemmer)    → use_stemmer=True
+    Older pltrdy `rouge` package didn't support stemming → ~0.03 RL
+    undercount vs paper. Switching closes that gap (~+0.030 RL on PENS).
+    """
+    from rouge_score import rouge_scorer
+
+    scorer = rouge_scorer.RougeScorer(["rouge1", "rouge2", "rougeL"], use_stemmer=True)
     rouge1 = []
     rouge2 = []
     rougel = []
     for hypothesis, references in zip(hypotheses, reference_lists):
         norm_hyp = normalize_text(hypothesis)
         if not references or not norm_hyp.strip():
-            rouge1.append(0.0)
-            rouge2.append(0.0)
-            rougel.append(0.0)
+            rouge1.append(0.0); rouge2.append(0.0); rougel.append(0.0)
             continue
         norm_refs = [normalize_text(ref) for ref in references]
         norm_refs = [r for r in norm_refs if r.strip()]
         if not norm_refs:
-            rouge1.append(0.0)
-            rouge2.append(0.0)
-            rougel.append(0.0)
+            rouge1.append(0.0); rouge2.append(0.0); rougel.append(0.0)
             continue
-        try:
-            scores = evaluator.get_scores(
-                [norm_hyp] * len(norm_refs),
-                norm_refs,
-            )
-            rouge1.append(max(score["rouge-1"]["f"] for score in scores))
-            rouge2.append(max(score["rouge-2"]["f"] for score in scores))
-            rougel.append(max(score["rouge-l"]["f"] for score in scores))
-        except ValueError:
-            rouge1.append(0.0)
-            rouge2.append(0.0)
-            rougel.append(0.0)
+        b1 = b2 = bL = 0.0
+        for ref in norm_refs:
+            s = scorer.score(ref, norm_hyp)
+            b1 = max(b1, s["rouge1"].fmeasure)
+            b2 = max(b2, s["rouge2"].fmeasure)
+            bL = max(bL, s["rougeL"].fmeasure)
+        rouge1.append(b1); rouge2.append(b2); rougel.append(bL)
     return rouge1, rouge2, rougel
 
 
