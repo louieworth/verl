@@ -108,6 +108,7 @@ PASS_K=${PASS_K:-1}
 GEN_OUTPUT_BASE_DIR=${GEN_OUTPUT_BASE_DIR:-gen_results/eval}
 RESULTS_BASE_DIR=${RESULTS_BASE_DIR:-results}
 WRITE_PASS16_AGGREGATES=${WRITE_PASS16_AGGREGATES:-true}
+WRITE_RESULTS_CSV=${WRITE_RESULTS_CSV:-true}
 
 ################################################################################
 # Per-model evaluation
@@ -205,6 +206,16 @@ with open(tmp, "w") as f:
     json.dump(results, f, indent=2, ensure_ascii=False)
 os.replace(tmp, results_file)
 PY
+    fi
+
+    if [ "${WRITE_RESULTS_CSV}" = "true" ] && [ -f "${RESULTS_FILE}" ]; then
+        local CSV_RESULTS_FILE="${EVAL_RESULTS_CSV_FILE:-${RESULTS_FILE%.json}.csv}"
+        local BASE_RESULTS_FILE="${EVAL_BASE_RESULTS_FILE:-${RESULTS_BASE_DIR}/base/${BASE_MODEL_NAME}.json}"
+        "${PYTHON_BIN}" "$SCRIPT_DIR/results_json_to_csv.py" \
+            --results_file "${RESULTS_FILE}" \
+            --output_file "${CSV_RESULTS_FILE}" \
+            --base_results_file "${BASE_RESULTS_FILE}" \
+            --base_model_name "${BASE_MODEL_NAME}"
     fi
 
     echo ""

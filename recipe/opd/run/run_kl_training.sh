@@ -204,7 +204,7 @@ if [ "$RESIDENT_STUDENT_ROLLOUT" = "true" ] && [ "$Y_MODE" = "y_r" ] && [ "$DIST
 fi
 
 # Evaluation Settings
-RUN_EVAL_AFTER_TRAINING=${RUN_EVAL_AFTER_TRAINING:-"true"}
+RUN_EVAL_AFTER_TRAINING=${RUN_EVAL_AFTER_TRAINING:-"false"}
 # EVAL_DATASETS=${EVAL_DATASETS:-"aime24,aime25,math500,hmmt25"} DEFAULT_DATASETS="math500 hmmt25 beyondaime amobench gsm8k"
 EVAL_DATASETS=${EVAL_DATASETS:-"aime24,aime25,hmmt25,beyondaime,amobench"}
 EVAL_DATASETS_DIR=${EVAL_DATASETS_DIR:-"/data/data/jiangli/huggingface/datasets"}
@@ -506,7 +506,22 @@ if [ "$DISTILL_MODE" = "opd" ]; then
 else
     MODEL_RUN_NAME="$RUN_DESCRIPTOR"
 fi
-RESULTS_MODEL_KEY="${MODEL_NAME}_${DISTILL_FAMILY}_${MODEL_RUN_NAME}"
+
+case "$USE_LORA" in
+    true|True|1|yes|Yes|y|Y)
+        TUNING_MODE_TAG="lora"
+        RESULTS_TUNING_SUFFIX="_LORA"
+        SIGNATURE_LORA_RANK="$LORA_RANK"
+        SIGNATURE_LORA_ALPHA="$LORA_ALPHA"
+        ;;
+    *)
+        TUNING_MODE_TAG="nolora"
+        RESULTS_TUNING_SUFFIX="_NO_LORA"
+        SIGNATURE_LORA_RANK="0"
+        SIGNATURE_LORA_ALPHA="0"
+        ;;
+esac
+RESULTS_MODEL_KEY="${MODEL_NAME}_${DISTILL_FAMILY}_${MODEL_RUN_NAME}${RESULTS_TUNING_SUFFIX}"
 RESULTS_BASE_MODEL_NAME="${DISTILL_FAMILY}/${MODEL_NAME}"
 RESULTS_FILE="$VERL_ROOT/results/${DISTILL_FAMILY}/${MODEL_NAME}.json"
 
@@ -585,6 +600,10 @@ model_name=$MODEL_NAME
 model_path=$MODEL_PATH
 teacher_model_name=$TEACHER_MODEL_NAME
 teacher_model_path=${TEACHER_MODEL_PATH:-$MODEL_PATH}
+tuning_mode=$TUNING_MODE_TAG
+use_lora=$USE_LORA
+lora_rank=$SIGNATURE_LORA_RANK
+lora_alpha=$SIGNATURE_LORA_ALPHA
 prompt_mode=$PROMPT_MODE_TAG
 y_mode=$Y_MODE
 kl_type=$KL_TYPE
@@ -638,7 +657,7 @@ if [ -n "$GEN_RESULTS_ENV_BASE_DIR" ]; then
 fi
 
 if [ "$PIPELINE_RESUME_MODE" = "resume_matching" ] && [ -z "$GEN_RESULTS_ENV_RUN_ID" ] && [ -z "$GEN_RESULTS_ENV_BASE_DIR" ]; then
-    MATCHED_GEN_RESULTS_METADATA="$(find_matching_gen_results_metadata "$GEN_RESULTS_RUN_SIGNATURE")"
+    MATCHED_GEN_RESULTS_METADATA="$(find_matching_gen_results_metadata "$GEN_RESULTS_RUN_SIGNATURE" || true)"
     if [ -n "$MATCHED_GEN_RESULTS_METADATA" ]; then
         MATCHED_GEN_RESULTS_BASE_DIR="$(gen_results_metadata_value "$MATCHED_GEN_RESULTS_METADATA" gen_results_base_dir)"
         [ -z "$MATCHED_GEN_RESULTS_BASE_DIR" ] && MATCHED_GEN_RESULTS_BASE_DIR="$(dirname "$MATCHED_GEN_RESULTS_METADATA")"
@@ -1421,9 +1440,9 @@ prune_pipeline_temp_checkpoints() {
     local total_updates="$2"
     local keep_dir dir
 
-    [ "$RESIDENT_STUDENT_ROLLOUT" = "true" ] || return
-    [ -n "$PIPELINE_TEMP_MODEL_DIR" ] || return
-    [ -d "$PIPELINE_TEMP_MODEL_DIR" ] || return
+    [ "$RESIDENT_STUDENT_ROLLOUT" = "true" ] || return 0
+    [ -n "$PIPELINE_TEMP_MODEL_DIR" ] || return 0
+    [ -d "$PIPELINE_TEMP_MODEL_DIR" ] || return 0
 
     if [ "$current_update" -ge "$total_updates" ]; then
         echo "Removing rolling temporary FSDP checkpoints after final save: $PIPELINE_TEMP_MODEL_DIR"
@@ -1989,6 +2008,7 @@ gen_results_base_dir: $GEN_RESULTS_BASE_DIR
 gen_results_metadata_file: $GEN_RESULTS_METADATA_FILE
 student_model_path: $current_model_path
 teacher_model_path: ${current_teacher_model_path:-$current_model_path}
+tuning_mode: $TUNING_MODE_TAG
 use_lora: $USE_LORA
 lora_rank: $LORA_RANK
 lora_alpha: $LORA_ALPHA
@@ -2350,6 +2370,7 @@ max_samples: ${MAX_SAMPLES:-all}
 data_path: ${DATA_PATH:-}
 train_data_path: $TRAIN_DATA_PATH
 corrected_responses_path: ${CORRECTED_RESPONSES_PATH:-}
+tuning_mode: $TUNING_MODE_TAG
 use_lora: $USE_LORA
 lora_rank: $LORA_RANK
 lora_alpha: $LORA_ALPHA

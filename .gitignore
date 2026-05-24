@@ -7,8 +7,6 @@
 **/*.tar.gz
 **/playground
 **/wandb
-results_opsd/
-results/
 recipe/opd/anlysis/
 recipe/opd/improvement/
 .agent/
@@ -28,6 +26,8 @@ tensorflow/my_graph/*
 .Python
 # env/
 build/
+.pytest_cache/
+.vscode/
 develop-eggs/
 dist/
 downloads/

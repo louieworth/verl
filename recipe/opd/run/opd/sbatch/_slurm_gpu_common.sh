@@ -1,6 +1,6 @@
 #!/bin/bash
-# Common launcher for offline OPD multi-step runs on 4 H100 nodes.
-# Resource shape: 4 nodes x 4 H100 = 16 GPUs total.
+# Common launcher for offline OPD multi-step runs on Slurm GPU nodes.
+# Resource shape is controlled by NNODES, NGPUS_PER_NODE, and SLURM_GPU_TYPE.
 
 opd_is_true() {
     case "${1:-}" in true|True|1|yes|Yes|y|Y) return 0 ;; *) return 1 ;; esac
@@ -28,60 +28,151 @@ opd_host_ip() {
 ' "$ip"
 }
 
-opd_disable_keepalive_trap() {
+opd_ntfy_endpoint() {
+    if [ -n "${NTFY_URL:-}" ]; then
+        printf '%s\n' "$NTFY_URL"
+        return 0
+    fi
+    local topic="${NTFY_TOPIC:-mila_lijiang_2026}"
+    local server="${NTFY_SERVER:-https://ntfy.sh}"
+    case "$topic" in
+        http://*|https://*) printf '%s\n' "$topic" ;;
+        *) printf '%s/%s\n' "${server%/}" "$topic" ;;
+    esac
+}
+
+opd_ntfy_send() {
+    local title="$1" message="$2" tags="${3:-rocket}" priority="${4:-default}" endpoint=""
+    endpoint="$(opd_ntfy_endpoint)"
+    if [ -z "$endpoint" ]; then
+        echo "[ntfy] NTFY_URL/NTFY_TOPIC not set; notification skipped."
+        return 0
+    fi
+    if ! command -v curl >/dev/null 2>&1; then
+        echo "[ntfy] curl not found; start notification skipped." >&2
+        return 0
+    fi
+
+    local auth_args=()
+    if [ -n "${NTFY_TOKEN:-}" ]; then
+        auth_args=(-H "Authorization: Bearer $NTFY_TOKEN")
+    elif [ -n "${NTFY_USER:-}" ] || [ -n "${NTFY_PASSWORD:-}" ]; then
+        auth_args=(-u "${NTFY_USER:-}:${NTFY_PASSWORD:-}")
+    fi
+
+    curl -fsS -m "${NTFY_TIMEOUT:-5}" \
+        "${auth_args[@]}" \
+        -H "Title: $title" \
+        -H "Tags: ${NTFY_TAGS:-$tags}" \
+        -H "Priority: ${NTFY_PRIORITY:-$priority}" \
+        -d "$message" \
+        "$endpoint" >/dev/null || echo "[ntfy] notification failed: $endpoint" >&2
+}
+
+opd_notify_started() {
+    local node_list="${SLURM_NODELIST:-unknown}"
+    if [ "${#ALLOCATED_NODES[@]}" -gt 0 ]; then
+        node_list="${ALLOCATED_NODES[*]}"
+    fi
+
+    local title="OPD started: ${SLURM_JOB_NAME:-job} ${SLURM_JOB_ID:-unknown}"
+    local message
+    message=$(cat <<EOF_NTFY_START
+job: ${SLURM_JOB_ID:-unknown}
+name: ${SLURM_JOB_NAME:-unknown}
+partition: ${SLURM_JOB_PARTITION:-unknown}
+nodes: ${node_list}
+gpus: ${NNODES:-?} x ${NGPUS_PER_NODE:-?} ${SLURM_GPU_TYPE:-gpu}
+time_limit: ${SLURM_TIMELIMIT:-unknown}
+run_script: ${RUN_SCRIPT:-unknown}
+work_dir: ${OPD_JOB_WORK_DIR:-unknown}
+EOF_NTFY_START
+)
+    opd_ntfy_send "$title" "$message" "rocket"
+}
+
+opd_elapsed_since_start() {
+    local start="${OPD_JOB_START_EPOCH:-}" now total
+    if [[ ! "$start" =~ ^[0-9]+$ ]]; then
+        printf '%s
+' "unknown"
+        return 0
+    fi
+    now="$(date +%s 2>/dev/null || true)"
+    if [[ ! "$now" =~ ^[0-9]+$ ]] || [ "$now" -lt "$start" ]; then
+        printf '%s
+' "unknown"
+        return 0
+    fi
+    total=$((now - start))
+    printf '%02d:%02d:%02d
+' $((total / 3600)) $(((total % 3600) / 60)) $((total % 60))
+}
+
+opd_notify_finished() {
+    local status="${1:-0}" state="${2:-finished}" reason="${3:-}" node_list="${SLURM_NODELIST:-unknown}"
+    if [ "${#ALLOCATED_NODES[@]}" -gt 0 ]; then
+        node_list="${ALLOCATED_NODES[*]}"
+    fi
+
+    local title tags priority
+    case "$state" in
+        failed)
+            title="OPD failed: ${SLURM_JOB_NAME:-job} ${SLURM_JOB_ID:-unknown}"
+            tags="x"
+            priority="high"
+            ;;
+        *)
+            title="OPD finished: ${SLURM_JOB_NAME:-job} ${SLURM_JOB_ID:-unknown}"
+            tags="white_check_mark"
+            priority="default"
+            ;;
+    esac
+
+    local message
+    message=$(cat <<EOF_NTFY_FINISH
+job: ${SLURM_JOB_ID:-unknown}
+name: ${SLURM_JOB_NAME:-unknown}
+state: ${state}
+exit_status: ${status}
+elapsed: $(opd_elapsed_since_start)
+partition: ${SLURM_JOB_PARTITION:-unknown}
+nodes: ${node_list}
+run_script: ${RUN_SCRIPT:-unknown}
+work_dir: ${OPD_JOB_WORK_DIR:-unknown}
+${reason:+reason: ${reason}}
+EOF_NTFY_FINISH
+)
+    opd_ntfy_send "$title" "$message" "$tags" "$priority"
+}
+
+opd_disable_failure_trap() {
     trap - EXIT ERR
 }
 
-opd_keepalive_on_failure() {
+opd_exit_on_failure() {
     local status="${1:-$?}"
-    opd_disable_keepalive_trap
+    opd_disable_failure_trap
 
     if [ "$status" -eq 0 ]; then
         return 0
-    fi
-    if ! opd_is_true "${KEEP_ALIVE_ON_FAILURE:-true}"; then
-        exit "$status"
-    fi
-    if [ -z "${SLURM_JOB_ID:-}" ]; then
-        exit "$status"
     fi
 
     echo ""
     echo "=========================================="
     echo "OPD sbatch failed before normal completion"
     echo "  exit status: $status"
-    echo "  keeping allocation alive for debugging"
+    echo "  exiting so Slurm releases the allocation"
     echo "=========================================="
 
-    if [ -z "${OPD_JOB_WORK_DIR:-}" ]; then
-        export OPD_JOB_WORK_DIR="/scratch/l/luli/openclaw/tmp/opd_offline/${SLURM_JOB_ID}"
-    fi
-    mkdir -p "$OPD_JOB_WORK_DIR" || true
-    if [ -z "${RERUN_ENV_FILE:-}" ]; then
-        RERUN_ENV_FILE="$OPD_JOB_WORK_DIR/rerun_env.sh"
-    fi
-
-    if declare -F opd_write_rerun_env >/dev/null 2>&1 && [ -n "${VERL_ROOT:-}" ] && [ -n "${RUN_SCRIPT:-}" ]; then
-        opd_write_rerun_env || true
-    else
-        cat > "$RERUN_ENV_FILE" <<EOF_KEEPALIVE_RERUN
-# Minimal rerun helper written after early sbatch failure.
-cd ${VERL_ROOT:-/scratch/l/luli/src/verl}
-export KEEP_ALIVE_ON_FAILURE=true
-${RUN_SCRIPT:+bash $RUN_SCRIPT}
-EOF_KEEPALIVE_RERUN
-        echo "Minimal rerun environment written to $RERUN_ENV_FILE"
-    fi
-
-    echo "Debug shell: srun --jobid=${SLURM_JOB_ID} --overlap --pty bash"
-    echo "Then: source $RERUN_ENV_FILE"
-    sleep infinity
+    opd_notify_finished "$status" "failed" "sbatch failed before normal completion; allocation released" || true
+    exit "$status"
 }
 
-opd_install_keepalive_trap() {
+opd_install_failure_trap() {
     set -E
-    trap 'opd_keepalive_on_failure $?' EXIT
-    trap 'opd_keepalive_on_failure $?' ERR
+    trap 'opd_exit_on_failure $?' EXIT
+    trap 'opd_exit_on_failure $?' ERR
 }
 
 opd_wait_ray_cluster() {
@@ -115,7 +206,7 @@ PYRAYCHECK
 
 opd_write_rerun_env() {
     cat > "$RERUN_ENV_FILE" <<EOF_RERUN
-# Source inside the held allocation to rerun the same OPD job.
+# Source inside an allocation to rerun the same OPD job.
 cd $VERL_ROOT
 export HF_HOME=$HF_HOME
 export TRANSFORMERS_CACHE=$TRANSFORMERS_CACHE
@@ -133,6 +224,9 @@ export TORCHINDUCTOR_CACHE_DIR=$TORCHINDUCTOR_CACHE_DIR
 export TRITON_CACHE_DIR=$TRITON_CACHE_DIR
 export TORCH_EXTENSIONS_DIR=$TORCH_EXTENSIONS_DIR
 export VLLM_CACHE_ROOT=$VLLM_CACHE_ROOT
+export USE_LORA=${USE_LORA:-true}
+export LORA_RANK=${LORA_RANK:-64}
+export LORA_ALPHA=${LORA_ALPHA:-128}
 export KL_FULL_VOCAB_CHUNK_SIZE=${KL_FULL_VOCAB_CHUNK_SIZE:-}
 export GEN_RESULTS_ROOT=${GEN_RESULTS_ROOT:-}
 export GEN_RESULTS_RUN_ID=${GEN_RESULTS_RUN_ID:-}
@@ -161,9 +255,53 @@ export WANDB_MODE=${WANDB_MODE:-offline}
 export ROLLOUT_MAX_NUM_SEQS=$ROLLOUT_MAX_NUM_SEQS
 export ROLLOUT_MAX_NUM_BATCHED_TOKENS=$ROLLOUT_MAX_NUM_BATCHED_TOKENS
 export ROLLOUT_GPU_MEMORY_UTILIZATION=$ROLLOUT_GPU_MEMORY_UTILIZATION
+export NTFY_URL=${NTFY_URL:-}
+export NTFY_TOPIC=${NTFY_TOPIC:-mila_lijiang_2026}
+export NTFY_SERVER=${NTFY_SERVER:-https://ntfy.sh}
+export NTFY_TOKEN=${NTFY_TOKEN:-}
+export NTFY_USER=${NTFY_USER:-}
+export NTFY_PASSWORD=${NTFY_PASSWORD:-}
+export NTFY_PRIORITY=${NTFY_PRIORITY:-default}
+export NTFY_TAGS=${NTFY_TAGS:-rocket}
+export NTFY_TIMEOUT=${NTFY_TIMEOUT:-5}
+set +e
 bash $RUN_SCRIPT
+rerun_status=\$?
+set -e
+
+if [ -n "\${SLURM_JOB_ID:-}" ] && command -v scancel >/dev/null 2>&1; then
+    if [ "\$rerun_status" -eq 0 ]; then
+        echo "OPD rerun completed successfully; releasing allocation \$SLURM_JOB_ID."
+    else
+        echo "OPD rerun exited with status \$rerun_status; releasing allocation \$SLURM_JOB_ID."
+    fi
+    scancel "\$SLURM_JOB_ID" || true
+fi
+
+return "\$rerun_status" 2>/dev/null || exit "\$rerun_status"
 EOF_RERUN
     echo "Rerun environment written to $RERUN_ENV_FILE"
+}
+
+opd_wait_local_pids() {
+    local timeout="$1"
+    shift || true
+    local pids=("$@")
+    local deadline=$((SECONDS + timeout))
+    local pid alive
+
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        alive=0
+        for pid in "${pids[@]}"; do
+            if kill -0 "$pid" >/dev/null 2>&1; then
+                alive=1
+                break
+            fi
+        done
+        [ "$alive" -eq 0 ] && return 0
+        sleep 1
+    done
+    return 1
 }
 
 opd_stop_ray_cluster() {
@@ -171,21 +309,40 @@ opd_stop_ray_cluster() {
         return 0
     fi
     echo "Stopping Ray cluster..."
+    local shutdown_timeout="${RAY_SHUTDOWN_TIMEOUT:-30}"
+    local stop_timeout="${RAY_STOP_TIMEOUT:-20}"
+    local node stop_pids=()
+
+    if [ "${#RAY_STEP_PIDS[@]}" -gt 0 ]; then
+        echo "Stopping Ray launcher srun steps: ${RAY_STEP_PIDS[*]}"
+        kill "${RAY_STEP_PIDS[@]}" >/dev/null 2>&1 || true
+        if ! opd_wait_local_pids "$shutdown_timeout" "${RAY_STEP_PIDS[@]}"; then
+            echo "Ray launcher steps did not exit within ${shutdown_timeout}s; sending SIGKILL."
+            kill -KILL "${RAY_STEP_PIDS[@]}" >/dev/null 2>&1 || true
+        fi
+        wait "${RAY_STEP_PIDS[@]}" >/dev/null 2>&1 || true
+        RAY_STEP_PIDS=()
+    fi
+
     for node in "${ALLOCATED_NODES[@]}"; do
         srun --overlap --nodes=1 --ntasks=1 --nodelist="$node" --gres="gpu:${SLURM_GPU_TYPE}:${NGPUS_PER_NODE}" \
             bash -lc "export PATH='$(dirname "$PYTHON_BIN")':\$PATH; ray stop --force >/dev/null 2>&1 || true" &
+        stop_pids+=("$!")
     done
-    wait || true
-    if [ "${#RAY_STEP_PIDS[@]}" -gt 0 ]; then
-        kill "${RAY_STEP_PIDS[@]}" >/dev/null 2>&1 || true
-        wait "${RAY_STEP_PIDS[@]}" >/dev/null 2>&1 || true
+    if [ "${#stop_pids[@]}" -gt 0 ]; then
+        if ! opd_wait_local_pids "$stop_timeout" "${stop_pids[@]}"; then
+            echo "Ray stop commands exceeded ${stop_timeout}s; killing cleanup srun steps."
+            kill -KILL "${stop_pids[@]}" >/dev/null 2>&1 || true
+        fi
+        wait "${stop_pids[@]}" >/dev/null 2>&1 || true
     fi
+    echo "Ray cluster stopped."
 }
 
-opd_run_h100_4node() {
+opd_run_slurm_gpu() {
     set -E
     set -o pipefail
-    opd_install_keepalive_trap
+    opd_install_failure_trap
 
     if [ -z "${SLURM_JOB_ID:-}" ]; then
         echo "ERROR: this launcher must run under sbatch/salloc." >&2
@@ -270,7 +427,7 @@ opd_run_h100_4node() {
     mkdir -p "$TORCHINDUCTOR_CACHE_DIR" "$TRITON_CACHE_DIR" "$TORCH_EXTENSIONS_DIR" "$VLLM_CACHE_ROOT"
 
     echo "=========================================="
-    echo "OPD offline multi-step on 4-node H100"
+    echo "OPD offline multi-step on Slurm GPU nodes"
     echo "  job:           $SLURM_JOB_ID"
     echo "  nodes:         ${ALLOCATED_NODES[*]}"
     echo "  GPUs:          $NNODES x $NGPUS_PER_NODE $SLURM_GPU_TYPE = $((NNODES * NGPUS_PER_NODE))"
@@ -291,6 +448,9 @@ opd_run_h100_4node() {
     [ -n "${GEN_RESULTS_BASE_DIR:-}" ] && echo "  gen dir:       $GEN_RESULTS_BASE_DIR"
     echo "  work dir:      $OPD_JOB_WORK_DIR"
     echo "=========================================="
+
+    export OPD_JOB_START_EPOCH="${OPD_JOB_START_EPOCH:-$(date +%s)}"
+    opd_notify_started
 
     echo "Starting Ray head on $HEAD_NODE ($HEAD_IP)..."
     srun --overlap --nodes=1 --ntasks=1 --nodelist="$HEAD_NODE" --gres="gpu:${SLURM_GPU_TYPE}:${NGPUS_PER_NODE}" \
@@ -329,9 +489,12 @@ opd_run_h100_4node() {
     done
 
     opd_wait_ray_cluster "$((NNODES * NGPUS_PER_NODE))" 300 || {
-        echo "Ray cluster startup failed. Keeping allocation for debugging."
-        opd_write_rerun_env
-        sleep infinity
+        local startup_status=$?
+        echo "Ray cluster startup failed. Cleaning up and exiting so Slurm releases the allocation."
+        opd_stop_ray_cluster || true
+        opd_notify_finished "$startup_status" "failed" "Ray cluster startup failed; allocation released" || true
+        opd_disable_failure_trap
+        return "$startup_status"
     }
     opd_write_rerun_env
 
@@ -341,14 +504,20 @@ opd_run_h100_4node() {
     set -e
 
     echo "OPD run exited with status $run_status"
-    if [ "$run_status" -ne 0 ] && opd_is_true "${KEEP_ALIVE_ON_FAILURE:-true}"; then
-        echo "Keeping allocation alive for debugging."
-        echo "Debug shell: srun --jobid=$SLURM_JOB_ID --overlap --pty bash"
-        echo "Then: source $RERUN_ENV_FILE"
-        sleep infinity
+    if [ "$run_status" -ne 0 ]; then
+        echo "RUN_SCRIPT exited nonzero; cleaning up and exiting so Slurm releases the allocation."
     fi
 
     opd_stop_ray_cluster || true
-    opd_disable_keepalive_trap
+    if [ "$run_status" -eq 0 ]; then
+        opd_notify_finished "$run_status" "finished" "Ray cleanup completed" || true
+    else
+        opd_notify_finished "$run_status" "failed" "RUN_SCRIPT exited nonzero; allocation released" || true
+    fi
+    opd_disable_failure_trap
     return "$run_status"
+}
+
+opd_run_h100_4node() {
+    opd_run_slurm_gpu "$@"
 }

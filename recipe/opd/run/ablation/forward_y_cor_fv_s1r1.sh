@@ -57,7 +57,6 @@ export MODEL_SAVE_DIR="${MODEL_SAVE_DIR:-/data/data/jiangli/models/Qwen3-8B_${TA
 export WANDB_RUN_NAME="${WANDB_RUN_NAME:-${TAG}}"
 
 # Eval after training
-export RUN_EVAL_AFTER_TRAINING="${RUN_EVAL_AFTER_TRAINING:-true}"
 export PASS_K="${PASS_K:-16}"
 export EVAL_DATASETS="${EVAL_DATASETS:-aime24,aime25,hmmt25,beyondaime,amobench}"
 

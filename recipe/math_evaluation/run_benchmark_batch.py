@@ -19,6 +19,7 @@ from recipe.math_evaluation.eval_utils import (
     shutdown_generation_server,
     slice_responses_in_generation_file,
 )
+from recipe.math_evaluation.results_json_to_csv import default_base_results_file, default_csv_path, write_results_csv
 
 
 def parse_args():
@@ -96,6 +97,36 @@ def print_model_summary(results_file: str, model_name: str, dataset_names: list[
                 print(f"  {normalized_name} pass@{pass_k}: {value:.2%}")
             else:
                 print(f"  {normalized_name} pass@{pass_k}: (missing)")
+
+
+def truthy_config(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() not in {"0", "false", "no", "off"}
+
+
+def write_comparison_csv(results_file: str, model_config: dict, config: dict, base_model_name: str):
+    if not truthy_config(model_config.get("write_csv", config.get("write_csv", True))):
+        return
+
+    csv_file = os.path.abspath(
+        os.path.expanduser(model_config.get("csv_file", config.get("csv_file", default_csv_path(results_file))))
+    )
+    base_results_file = os.path.abspath(
+        os.path.expanduser(
+            model_config.get(
+                "base_results_file",
+                config.get("base_results_file", default_base_results_file(results_file, base_model_name)),
+            )
+        )
+    )
+    output_file = write_results_csv(
+        results_file,
+        csv_file,
+        base_results_file=base_results_file,
+        base_model_name=base_model_name,
+    )
+    print(f"CSV comparison: {output_file}")
 
 
 def evaluate_from_generation_file(
@@ -186,6 +217,7 @@ def main():
         if not missing_passes_by_dataset:
             print("All requested results already exist. Skipping model.")
             print_model_summary(results_file, model_name, dataset_names, pass_k_values)
+            write_comparison_csv(results_file, model_config, config, base_model_name)
             continue
 
         print("Pending evaluations:")
@@ -263,6 +295,7 @@ def main():
             shutdown_generation_server(server_handles)
 
         print_model_summary(results_file, model_name, dataset_names, pass_k_values)
+        write_comparison_csv(results_file, model_config, config, base_model_name)
 
 
 if __name__ == "__main__":

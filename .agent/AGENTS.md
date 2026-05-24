@@ -23,3 +23,8 @@ Recent history uses short prefixes such as `ADD: ...` and scoped conventional me
 
 ## Security & Configuration Tips
 Do not commit secrets, tokens, or machine-specific paths. Prefer environment variables for dataset roots, model paths, and W&B settings. Large checkpoints and generated results belong outside git; keep reproducible scripts under `recipe/` and document required GPUs, nodes, and external services in the PR description.
+
+## Slurm Resource Handling
+For Slurm ML jobs, do not leave completed allocations idle. A top-level `sbatch` or top-level `srun` should exit normally after successful completion so Slurm releases its resources. If a recovery command is run inside an existing allocation with `srun --jobid=<jobid> --overlap` or a generated `rerun_env.sh`, it should preserve its exit code and release the parent allocation when it exits, normally with `scancel ""`.
+
+Before releasing resources after success, verify the final marker/checkpoint/model exists when feasible. The default rule is: successful completion releases the allocation, and failures should exit nonzero so Slurm also releases the allocation. Do not keep failed jobs alive for debugging.

@@ -39,7 +39,6 @@ export LOG_DIFFICULTY_BUCKETS="${LOG_DIFFICULTY_BUCKETS:-true}"
 export SCORE_STAGE1="${SCORE_STAGE1:-true}"
 
 # Eval after training
-export RUN_EVAL_AFTER_TRAINING="${RUN_EVAL_AFTER_TRAINING:-true}"
 export PASS_K="${PASS_K:-16}"
 export EVAL_DATASETS="${EVAL_DATASETS:-aime24,aime25,hmmt25,beyondaime,amobench}"
 
