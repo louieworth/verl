@@ -38,7 +38,6 @@ export TOP_K=0
 # Vanilla training prompt: teacher conditions only on x, no y_o (original OPD spec).
 export TEACHER_TRAINING_PROMPT="${TEACHER_TRAINING_PROMPT:-vanilla}"
 
-export LEARNING_RATE="${LEARNING_RATE:-2e-6}"
 export TEMPERATURE="${TEMPERATURE:-1.0}"
 export TOTAL_EPOCHS="${TOTAL_EPOCHS:-1}"
 export MULTI_STEP="${MULTI_STEP:-40}"

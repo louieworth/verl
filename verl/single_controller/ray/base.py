@@ -14,6 +14,7 @@
 import inspect
 import logging
 import os
+import random
 import socket
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -86,27 +87,39 @@ def sort_placement_group_by_node_ip(pgs: list[PlacementGroup]) -> list[Placement
     return sorted(pgs, key=lambda pg: pg_ip[pg.id])
 
 
+def _parse_port_range(value: str | None) -> Optional[list[int]]:
+    if not value:
+        return None
+    normalized = value.replace(":", "-").replace(",", "-")
+    parts = [part.strip() for part in normalized.split("-") if part.strip()]
+    if len(parts) != 2:
+        raise ValueError(f"Invalid port range {value!r}; expected START-END")
+    start, end = int(parts[0]), int(parts[1])
+    if not (0 < start < end <= 65535):
+        raise ValueError(f"Invalid port range {value!r}; expected 0 < START < END <= 65535")
+    return [start, end]
+
+
 @ray.remote
 def get_master_addr_port(master_port_range: Optional[list[int]] = None) -> tuple[str, str]:
     addr = ray.util.get_node_ip_address().strip("[]")
 
     if master_port_range is None:
-        with socket.socket() as s:
-            s.bind(("", 0))
-            port = s.getsockname()[1]
-    else:
-        port = master_port_range[0]
-        while port < master_port_range[1]:
-            try:
-                with socket.socket() as s:
-                    s.bind(("", port))
-                    break
-            except OSError:
-                port += 1  # Increment port number if already in use
-                logger.info("Port %d is already in use, trying port %d", port - 1, port)
-        else:
-            raise RuntimeError(f"Could not find a free port in range {master_port_range}")
-    return addr, str(port)
+        master_port_range = _parse_port_range(os.getenv("VERL_RAY_MASTER_PORT_RANGE")) or [12000, 20000]
+
+    start, end = master_port_range
+    candidates = list(range(start, end))
+    offset = random.randrange(len(candidates)) if candidates else 0
+    candidates = candidates[offset:] + candidates[:offset]
+    for port in candidates:
+        try:
+            with socket.socket() as s:
+                s.bind(("", port))
+                return addr, str(port)
+        except OSError:
+            logger.info("Port %d is already in use, trying another Ray MASTER_PORT", port)
+
+    raise RuntimeError(f"Could not find a free port in range {master_port_range}")
 
 
 class RayResourcePool(ResourcePool):

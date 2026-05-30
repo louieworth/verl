@@ -59,7 +59,6 @@ export KL_TOKEN_CLIP="${KL_TOKEN_CLIP:-0}"
 # teacher prompt = π(·|x, y*) (no initial response).
 export Y_MODE="${Y_MODE:-y_raw}"
 export TOP_K="${TOP_K:-32}"
-export LEARNING_RATE="${LEARNING_RATE:-2e-6}"
 export WARMUP_RATIO="${WARMUP_RATIO:-0}"
 export WEIGHT_DECAY="${WEIGHT_DECAY:-0.0}"
 

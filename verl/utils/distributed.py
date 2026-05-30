@@ -25,6 +25,24 @@ from verl.utils.device import get_device_name, get_nccl_backend, get_torch_devic
 from verl.utils.net_utils import is_ipv6
 
 
+_PORT_IN_USE_MARKERS = (
+    "EADDRINUSE",
+    "address already in use",
+    "failed to listen",
+)
+
+
+def _is_port_in_use_error(exc: BaseException) -> bool:
+    message = str(exc)
+    return any(marker in message for marker in _PORT_IN_USE_MARKERS)
+
+
+def _reserve_free_local_port() -> str:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("", 0))
+        return str(sock.getsockname()[1])
+
+
 def set_numa_affinity():
     if is_npu_available:
         # TODO (FightingZhen) libnuma.so is not available in e2e_ascend CI image, remove this code after image update.
@@ -83,13 +101,28 @@ def initialize_global_process_group_ray(timeout_second=None, backend=None):
     if not torch.distributed.is_initialized():
         rank = int(os.environ.get("RANK", 0))
         world_size = int(os.environ.get("WORLD_SIZE", 1))
-        torch.distributed.init_process_group(
-            backend=backend,
-            rank=rank,
-            world_size=world_size,
-            timeout=timeout,
-            init_method=os.environ.get("DIST_INIT_METHOD", None),
-        )
+        max_attempts = int(os.getenv("VERL_RAY_PROCESS_GROUP_PORT_RETRY_ATTEMPTS", "8"))
+        for attempt in range(max_attempts):
+            try:
+                torch.distributed.init_process_group(
+                    backend=backend,
+                    rank=rank,
+                    world_size=world_size,
+                    timeout=timeout,
+                    init_method=os.environ.get("DIST_INIT_METHOD", None),
+                )
+                break
+            except torch.distributed.DistNetworkError as exc:
+                if not (rank == 0 and world_size == 1 and _is_port_in_use_error(exc) and attempt + 1 < max_attempts):
+                    raise
+                old_port = os.environ.get("MASTER_PORT")
+                os.environ["MASTER_PORT"] = _reserve_free_local_port()
+                print(
+                    "Ray process group MASTER_PORT is in use"
+                    f" ({old_port}); retrying with {os.environ['MASTER_PORT']}"
+                    f" ({attempt + 1}/{max_attempts - 1})",
+                    flush=True,
+                )
 
 
 def stateless_init_process_group(master_address, master_port, rank, world_size, device):

@@ -27,7 +27,6 @@ export BETA="${BETA:-0}"                           # OPSD 8B: --beta 0 (forward 
 export KL_TOKEN_CLIP="${KL_TOKEN_CLIP:-0}"      # OPSD 8B: --jsd_token_clip 0.06
 export TEMPERATURE="${TEMPERATURE:-1}"           # OPSD 8B: --temperature 1.1
 
-export LEARNING_RATE="${LEARNING_RATE:-5e-6}"      # OPSD 8B: --learning_rate 5e-6
 export TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-2}"   # OPSD 8B: --per_device_train_batch_size 2
 export GRADIENT_ACCUMULATION_STEPS="${GRADIENT_ACCUMULATION_STEPS:-2}"  # OPSD 8B: --gradient_accumulation_steps 2
 export WEIGHT_DECAY="${WEIGHT_DECAY:-0.0}"

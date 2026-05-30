@@ -29,6 +29,7 @@ from typing import Any, Dict
 import datasets
 
 instruction_following = "Please reason step by step, and put your final answer within \\boxed{}."
+code_instruction_following = "Return only the corrected Python code inside a single ```python code block."
 
 
 # refine OPSD: teacher sees problem + expert solution + initial response.
@@ -69,6 +70,42 @@ Your task is to rewrite your mathematical solution.
 """
 
 
+
+PROMPT_TEMPLATE_CODE_OPSD_REFINE = """
+Your task is to rewrite your Python solution using the reference solution as guidance.
+
+**Problem:**
+{PROBLEM}
+
+**Reference Solution:**
+```python
+{EXPERT_SOLUTION}
+```
+
+**Your Initial Solution:**
+{INITIAL_RESPONSE}
+
+**Instructions:**
+1. Fix correctness issues and edge cases
+2. Preserve useful parts of the original approach when appropriate
+3. Output ONLY the rewritten Python solution
+"""
+
+PROMPT_TEMPLATE_CODE_OPD_REFINE = """
+Your task is to rewrite your Python solution.
+
+**Problem:**
+{PROBLEM}
+
+**Your Initial Solution:**
+{INITIAL_RESPONSE}
+
+**Instructions:**
+1. Fix correctness issues and edge cases
+2. Preserve useful parts of the original approach when appropriate
+3. Output ONLY the rewritten Python solution
+"""
+
 def _normalize_reward_value(val: Any) -> int:
     if isinstance(val, list):
         val = val[0] if val else 0
@@ -78,7 +115,7 @@ def _normalize_reward_value(val: Any) -> int:
         return 0
 
 
-def make_map_fn(distill_mode: str):
+def make_map_fn(distill_mode: str, task: str = "math"):
     def process_fn(example: Dict[str, Any]):
         extra_info = (example.get("extra_info", {}) or {}).copy()
         extra_info["reward"] = _normalize_reward_value(extra_info.get("reward", 0))
@@ -90,12 +127,28 @@ def make_map_fn(distill_mode: str):
         problem = extra_info.get("problem", "")
         expert_solution = extra_info.get("expert_cot", "")
 
-        if distill_mode == "opd":
+        if task == "code":
+            if distill_mode == "opd":
+                prompt_content = (
+                    PROMPT_TEMPLATE_CODE_OPD_REFINE
+                    .replace("{PROBLEM}", problem)
+                    .replace("{INITIAL_RESPONSE}", initial_response)
+                )
+            else:
+                prompt_content = (
+                    PROMPT_TEMPLATE_CODE_OPSD_REFINE
+                    .replace("{PROBLEM}", problem)
+                    .replace("{INITIAL_RESPONSE}", initial_response)
+                    .replace("{EXPERT_SOLUTION}", expert_solution)
+                )
+            prompt_content = prompt_content + " " + code_instruction_following
+        elif distill_mode == "opd":
             prompt_content = (
                 PROMPT_TEMPLATE_OPD_REFINE
                 .replace("{PROBLEM}", problem)
                 .replace("{INITIAL_RESPONSE}", initial_response)
             )
+            prompt_content = prompt_content + " " + instruction_following
         else:  # opsd
             prompt_content = (
                 PROMPT_TEMPLATE_OPSD_REFINE
@@ -103,15 +156,17 @@ def make_map_fn(distill_mode: str):
                 .replace("{INITIAL_RESPONSE}", initial_response)
                 .replace("{EXPERT_SOLUTION}", expert_solution)
             )
-        prompt_content = prompt_content + " " + instruction_following
+            prompt_content = prompt_content + " " + instruction_following
 
-        return {
+        row = {
             "data_source": example.get("data_source", "deepscaleR"),
             "prompt": [{"role": "user", "content": prompt_content}],
-            "ability": example.get("ability", "math"),
-            "reward_model": example.get("reward_model"),
+            "ability": example.get("ability", "code" if task == "code" else "math"),
             "extra_info": extra_info,
         }
+        if task != "code":
+            row["reward_model"] = example.get("reward_model")
+        return row
 
     return process_fn
 
@@ -129,6 +184,12 @@ def main() -> None:
         help="Output parquet for y_r prompts.",
     )
     parser.add_argument(
+        "--task",
+        choices=["math", "code"],
+        default="math",
+        help="Task-specific rewrite prompt adapter.",
+    )
+    parser.add_argument(
         "--distill_mode",
         choices=["opsd", "opd"],
         default="opsd",
@@ -142,7 +203,7 @@ def main() -> None:
 
     print(f"Building y_r prompts ({len(ds_raw)} rows, refine {args.distill_mode.upper()})...")
     ds_out = ds_raw.map(
-        function=make_map_fn(args.distill_mode),
+        function=make_map_fn(args.distill_mode, args.task),
         remove_columns=["responses"],
     )
 

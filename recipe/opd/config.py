@@ -24,6 +24,7 @@ class KLTrainingConfig:
     # opsd: on-policy self-distillation — teacher = student, teacher prompt embeds y* (expert solution).
     # opd : on-policy distillation       — teacher ≠ student, teacher prompt has NO expert reference.
     distill_mode: Literal["opsd", "opd"] = "opsd"
+    task: Literal["math", "code"] = "math"
 
     # KL Settings
     kl_type: Literal["reverse", "forward", "jsd"] = "reverse"
@@ -186,6 +187,14 @@ class KLTrainingConfig:
                 "resume_checkpoint_mode must be 'continue' or 'initialize', "
                 f"got {self.resume_checkpoint_mode!r}"
             )
+
+        if self.task == "code":
+            self.eval_dataset_paths = {
+                "humaneval_plus": "evalplus:humaneval",
+                "mbpp_plus": "evalplus:mbpp",
+                "livecodebench_v6": "livecodebench:release_v6",
+            }
+            return
 
         self.eval_dataset_paths = {
             "aime24": f"{self.eval_datasets_dir}/aime24/aime24_test.parquet",

@@ -4,6 +4,7 @@
 # KL divergence trainer backed by verl FSDP TrainingWorker engines.
 
 import glob
+import json
 import logging
 import math
 import os
@@ -126,6 +127,7 @@ class KLTrainer:
             mode=os.environ.get("WANDB_MODE", "offline"),
             config={
                 "distill_mode": self.config.distill_mode,
+                "task": self.config.task,
                 "kl_type": self.config.kl_type,
                 "kl_method": self.config.kl_method,
                 "temperature": self.config.temperature,
@@ -179,6 +181,7 @@ class KLTrainer:
             prompt_truncation=getattr(self.config, "prompt_truncation", False),
             log_difficulty_buckets=getattr(self.config, "log_difficulty_buckets", False),
             distill_mode=getattr(self.config, "distill_mode", "opsd"),
+            task=getattr(self.config, "task", "math"),
         )
 
     def _build_model_config(self, model_path: str, *, trainable: bool) -> HFModelConfig:
@@ -517,40 +520,42 @@ class KLTrainer:
             for i, (s_logits, t_logits, s_mask, t_mask) in enumerate(zip(
                 student_rows, teacher_rows, student_mask_rows, teacher_mask_rows, strict=True
             )):
-                s_resp = s_logits[s_mask.to(torch.bool)]
-                t_resp = t_logits[t_mask.to(torch.bool)]
-                # Free this row's full logits immediately
-                student_rows[i] = None
-                teacher_rows[i] = None
-                del s_logits, t_logits
-
-                common = min(s_resp.shape[0], t_resp.shape[0])
+                s_idx = s_mask.to(torch.bool).nonzero(as_tuple=False).flatten()
+                t_idx = t_mask.to(torch.bool).nonzero(as_tuple=False).flatten()
+                common = min(s_idx.shape[0], t_idx.shape[0])
                 if common == 0:
-                    kl_chunks.append(s_resp.new_zeros(1))
-                    del s_resp, t_resp
+                    kl_chunks.append(s_logits.new_zeros(1))
+                    student_rows[i] = None
+                    teacher_rows[i] = None
+                    del s_logits, t_logits, s_idx, t_idx
                     continue
-                s_resp = s_resp[:common]
-                t_resp = t_resp[:common]
+                s_idx = s_idx[:common]
+                t_idx = t_idx[:common]
 
                 # T3: teacher prob mass on correction tokens at every response
                 # position. Done at T=1 (the model's own distribution), before
-                # the temperature scaling that the KL loss applies.
+                # the temperature scaling that the KL loss applies. Keep this
+                # chunked as well; otherwise long responses materialize
+                # response_len x vocab logits and can OOM before KL chunking.
                 if correction_ids:
                     with torch.no_grad():
-                        t_probs = torch.softmax(t_resp.float(), dim=-1)
-                        mass = t_probs[:, correction_ids].sum(dim=-1)
-                        correction_mass_num += float(mass.sum().item())
-                        correction_mass_den += float(mass.numel())
-                        del t_probs, mass
+                        for start in range(0, common, chunk_size):
+                            end = min(start + chunk_size, common)
+                            t_slice = t_logits.index_select(0, t_idx[start:end])
+                            t_probs = torch.softmax(t_slice.float(), dim=-1)
+                            mass = t_probs[:, correction_ids].sum(dim=-1)
+                            correction_mass_num += float(mass.sum().item())
+                            correction_mass_den += float(mass.numel())
+                            del t_slice, t_probs, mass
 
-                if T != 1.0:
-                    s_resp = s_resp / T
-                    t_resp = t_resp / T
                 sample_kl = []
                 for start in range(0, common, chunk_size):
                     end = min(start + chunk_size, common)
-                    s_slice = s_resp[start:end]
-                    t_slice = t_resp[start:end]
+                    s_slice = s_logits.index_select(0, s_idx[start:end])
+                    t_slice = t_logits.index_select(0, t_idx[start:end])
+                    if T != 1.0:
+                        s_slice = s_slice / T
+                        t_slice = t_slice / T
                     if top_k > 0:
                         # Top-K teacher local support matching (paper Eq. 7-8).
                         if self.config.kl_type == "reverse":
@@ -565,8 +570,12 @@ class KLTrainer:
                         sample_kl.append(
                             _generalized_jsd_chunk(s_slice, t_slice, beta=self.config.beta)
                         )
+                    del s_slice, t_slice
                 kl_chunks.append(torch.cat(sample_kl))
-                del s_resp, t_resp, sample_kl
+                # Free this row's full logits immediately after all chunks finish.
+                student_rows[i] = None
+                teacher_rows[i] = None
+                del s_logits, t_logits, s_idx, t_idx, sample_kl
 
             del student_rows, teacher_rows
 
@@ -743,6 +752,17 @@ class KLTrainer:
             global_step=self.global_step,
             max_ckpt_to_keep=max_keep,
         )
+        if self.config.use_lora and self.rank == 0:
+            lora_meta = {
+                "r": int(self.config.lora_rank),
+                "lora_alpha": int(self.config.lora_alpha),
+                "task_type": "CAUSAL_LM",
+            }
+            lora_meta_path = os.path.join(ckpt_dir, "lora_train_meta.json")
+            os.makedirs(ckpt_dir, exist_ok=True)
+            with open(lora_meta_path, "w", encoding="utf-8") as f:
+                json.dump(lora_meta, f, ensure_ascii=False, indent=4)
+            logger.info("Saved LoRA rank/alpha metadata to %s", lora_meta_path)
         logger.info("Checkpoint saved to %s", ckpt_dir)
 
     def _find_latest_checkpoint(self) -> str:

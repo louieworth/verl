@@ -22,6 +22,11 @@ def parse_args():
 
     # Distillation Mode
     parser.add_argument(
+        "--task", type=str, default="math", choices=["math", "code"],
+        help="Training/evaluation task adapter: math uses DeepScaleR-style prompts; code uses TACO/code prompts.",
+    )
+
+    parser.add_argument(
         "--distill_mode", type=str, default="opsd", choices=["opsd", "opd"],
         help="opsd: teacher = student, teacher prompt embeds expert solution. "
              "opd: teacher != student, teacher prompt has no expert reference.",
@@ -168,6 +173,7 @@ def main():
     config = KLTrainingConfig(
         # Distillation Mode
         distill_mode=args.distill_mode,
+        task=args.task,
         # KL Settings
         kl_type=args.kl_type,
         kl_method=args.kl_method,

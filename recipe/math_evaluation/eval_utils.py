@@ -219,6 +219,7 @@ def _evaluate_generated_output(
     pass_k: int,
     output_json_path: Optional[str],
     model_name: Optional[str],
+    model_path: Optional[str],
 ) -> float:
     eval_cmd = [
         sys.executable,
@@ -237,6 +238,7 @@ def _evaluate_generated_output(
                 f"+output_json_path={output_json_path}",
                 f"+model_name={model_name}",
                 f"+pass_k={pass_k}",
+                f"+model_path={model_path}",
             ]
         )
 
@@ -261,6 +263,7 @@ def evaluate_generated_output(
     pass_k: int,
     output_json_path: Optional[str],
     model_name: Optional[str],
+    model_path: Optional[str],
 ) -> float:
     return _evaluate_generated_output(
         dataset_name,
@@ -269,6 +272,7 @@ def evaluate_generated_output(
         pass_k=pass_k,
         output_json_path=output_json_path,
         model_name=model_name,
+        model_path=model_path,
     )
 
 
@@ -381,6 +385,7 @@ def run_evaluation_suite(
                 pass_k=pass_k,
                 output_json_path=output_json_path,
                 model_name=model_name,
+                model_path=model_path,
             )
             eval_results[dataset_name] = accuracy
 
@@ -433,6 +438,7 @@ def save_eval_results(
     output_path: str,
     model_name: str,
     config: Dict = None,
+    model_path: Optional[str] = None,
 ):
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
@@ -447,7 +453,10 @@ def save_eval_results(
         key = f"{dataset}_pass1_generation_pass_1"
         formatted_results[key] = accuracy
 
-    all_results[model_name] = formatted_results
+    existing_results = dict(all_results.get(model_name, {}))
+    existing_results["model_path"] = model_path
+    existing_results.update(formatted_results)
+    all_results[model_name] = existing_results
 
     with open(output_path, "w") as f:
         json.dump(all_results, f, indent=4)
@@ -458,6 +467,7 @@ def save_eval_results(
         detailed_path = output_path.replace(".json", "_detailed.json")
         detailed_output = {
             "model_name": model_name,
+            "model_path": model_path,
             "results": formatted_results,
             "config": config,
         }

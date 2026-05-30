@@ -29,6 +29,7 @@ When working with Megatron:
 import logging
 import os
 import time
+from pathlib import Path
 from typing import Any, Generator, Optional
 
 import ray
@@ -46,6 +47,20 @@ from verl.workers.rollout.vllm_rollout.utils import get_device_uuid
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
+
+
+def _env_truthy(name: str, default: str = "") -> bool:
+    return os.getenv(name, default).lower() in ("1", "true", "yes", "y")
+
+
+def _should_force_shm_for_cuda_ipc_permission() -> bool:
+    if not _env_truthy("VERL_VLLM_AUTO_SHM_ON_PTRACE_SCOPE", "true"):
+        return False
+    try:
+        ptrace_scope = int(Path("/proc/sys/kernel/yama/ptrace_scope").read_text().strip())
+    except Exception:
+        return False
+    return ptrace_scope > 0
 
 
 def _check_vllm_version_for_sleep_level():
@@ -97,16 +112,22 @@ class ServerAdapter(BaseRollout):
         self.device_uuid = get_device_uuid(get_device_id())
         self.zmq_handle = f"ipc:///tmp/rl-colocate-zmq-{self.device_uuid}.sock"
 
-        force_shm = os.getenv("VERL_VLLM_USE_SHM_WEIGHT_SYNC", "").lower() in ("1", "true", "yes", "y")
-        self.use_shm = force_shm or not is_support_ipc()
+        force_shm = _env_truthy("VERL_VLLM_USE_SHM_WEIGHT_SYNC")
+        auto_shm_for_ptrace = _should_force_shm_for_cuda_ipc_permission()
+        self.use_shm = force_shm or auto_shm_for_ptrace or not is_support_ipc()
         if force_shm:
             logger.warning("Forcing shared-memory vLLM weight sync because VERL_VLLM_USE_SHM_WEIGHT_SYNC is set.")
+        elif auto_shm_for_ptrace:
+            logger.warning(
+                "Forcing shared-memory vLLM weight sync because kernel yama/ptrace_scope blocks CUDA IPC "
+                "pidfd_getfd between the trainer and resident rollout processes. Set "
+                "VERL_VLLM_AUTO_SHM_ON_PTRACE_SCOPE=false to disable this fallback."
+            )
         if self.use_shm:
             logger.warning(
-                "IPC is not supported on your devices. Falling back to shared memory for weight transfer, "
-                "which may cause performance degradation. If you are using Ascend NPUs, please ensure that "
-                "your software and CANN toolkit versions meet the requirements for IPC support. (Ascend HDK version "
-                ">= 25.3.rc1 and CANN toolkit version >= 8.3.RC1)"
+                "Falling back to shared memory for vLLM weight transfer, which may cause performance degradation. "
+                "This avoids CUDA IPC permission failures on restricted systems and is also used when device IPC "
+                "is unavailable."
             )
 
     async def _execute_method(

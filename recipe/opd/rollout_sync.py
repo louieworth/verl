@@ -58,6 +58,11 @@ def _build_rollout_adapter(manifest: dict[str, Any]) -> ServerAdapter:
         mesh_shape=(world_size // infer_world_size, infer_tp, infer_pp),
         mesh_dim_names=["dp", "infer_tp", "infer_pp"],
     )
+
+    if "RAY_LOCAL_WORLD_SIZE" not in os.environ:
+        local_world_size = os.environ.get("LOCAL_WORLD_SIZE") or manifest.get("n_gpus_per_node") or world_size
+        os.environ["RAY_LOCAL_WORLD_SIZE"] = str(local_world_size)
+
     return ServerAdapter(config=rollout_config, model_config=model_config, device_mesh=rollout_device_mesh)
 
 

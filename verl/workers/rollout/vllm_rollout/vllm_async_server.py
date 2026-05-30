@@ -17,6 +17,7 @@ import inspect
 import json
 import logging
 import os
+import traceback
 from pprint import pprint
 from typing import Any, Callable, Optional
 
@@ -75,6 +76,24 @@ else:
 
 logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
+
+
+_PORT_CONFLICT_MARKERS = (
+    "EADDRINUSE",
+    "address already in use",
+    "server socket has failed to listen",
+    # vLLM may raise only this wrapper while the root TCPStore EADDRINUSE
+    # is logged from a background worker process. Retry a few times so a
+    # transient local port collision does not kill the whole rollout.
+    "Engine core initialization failed",
+    "WorkerProc initialization failed",
+)
+
+
+def _is_port_conflict_error(exc: BaseException) -> bool:
+    error_text = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    error_text = error_text.lower()
+    return any(marker.lower() in error_text for marker in _PORT_CONFLICT_MARKERS)
 
 
 def _patch_transformers_tokenizer_compat():
@@ -450,20 +469,65 @@ class vLLMHttpServer:
             await asyncio.sleep(3)
             await self.run_headless(server_args)
 
+    def _refresh_dp_master_port_for_retry(self):
+        if self.node_rank != 0:
+            return
+        sock = getattr(self, "_dp_master_sock", None)
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
+        self._dp_master_port, self._dp_master_sock = get_free_port(self._server_address, with_alive_sock=True)
+
+    def _release_dp_master_port_reservation(self):
+        sock = getattr(self, "_dp_master_sock", None)
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
+            self._dp_master_sock = None
+
+    async def _create_engine_client_with_port_retry(self, engine_args: AsyncEngineArgs, usage_context: UsageContext):
+        max_attempts = int(os.getenv("VERL_VLLM_PORT_RETRY_ATTEMPTS", "5"))
+        delay_seconds = float(os.getenv("VERL_VLLM_PORT_RETRY_DELAY_SECONDS", "2"))
+
+        fn_args = set(dict(inspect.signature(AsyncLLM.from_vllm_config).parameters).keys())
+        for attempt in range(1, max_attempts + 1):
+            if attempt > 1:
+                self._refresh_dp_master_port_for_retry()
+            vllm_config = engine_args.create_engine_config(usage_context=usage_context)
+            vllm_config.parallel_config.data_parallel_master_port = self._dp_master_port
+            self._release_dp_master_port_reservation()
+
+            kwargs = {}
+            if "enable_log_requests" in fn_args:
+                kwargs["enable_log_requests"] = engine_args.enable_log_requests
+            if "disable_log_stats" in fn_args:
+                kwargs["disable_log_stats"] = engine_args.disable_log_stats
+
+            try:
+                engine_client = AsyncLLM.from_vllm_config(
+                    vllm_config=vllm_config, usage_context=usage_context, **kwargs
+                )
+                return engine_client, vllm_config
+            except Exception as exc:
+                if not _is_port_conflict_error(exc) or attempt >= max_attempts:
+                    raise
+                logger.warning(
+                    "vLLM engine startup hit a local port/startup conflict on attempt %s/%s; "
+                    "retrying with a freshly generated engine config and data_parallel_master_port.",
+                    attempt,
+                    max_attempts,
+                    exc_info=True,
+                )
+                await asyncio.sleep(delay_seconds)
+
     async def run_server(self, args: argparse.Namespace):
         engine_args = AsyncEngineArgs.from_cli_args(args)
         usage_context = UsageContext.OPENAI_API_SERVER
-        vllm_config = engine_args.create_engine_config(usage_context=usage_context)
-        vllm_config.parallel_config.data_parallel_master_port = self._dp_master_port
-
-        fn_args = set(dict(inspect.signature(AsyncLLM.from_vllm_config).parameters).keys())
-        kwargs = {}
-        if "enable_log_requests" in fn_args:
-            kwargs["enable_log_requests"] = engine_args.enable_log_requests
-        if "disable_log_stats" in fn_args:
-            kwargs["disable_log_stats"] = engine_args.disable_log_stats
-
-        engine_client = AsyncLLM.from_vllm_config(vllm_config=vllm_config, usage_context=usage_context, **kwargs)
+        engine_client, vllm_config = await self._create_engine_client_with_port_retry(engine_args, usage_context)
 
         # Don't keep the dummy data in memory
         await engine_client.reset_mm_cache()

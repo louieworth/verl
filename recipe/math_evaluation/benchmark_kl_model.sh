@@ -104,7 +104,7 @@ DATASETS_TO_TEST=${DATASETS:-"${DEFAULT_DATASETS}"}
 DATASETS_TO_TEST_CSV=$(echo "${DATASETS_TO_TEST}" | tr ' ' ',')
 
 # Pass@k
-PASS_K=${PASS_K:-1}
+PASS_K=${PASS_K:-16}
 GEN_OUTPUT_BASE_DIR=${GEN_OUTPUT_BASE_DIR:-gen_results/eval}
 RESULTS_BASE_DIR=${RESULTS_BASE_DIR:-results}
 WRITE_PASS16_AGGREGATES=${WRITE_PASS16_AGGREGATES:-true}
@@ -185,6 +185,7 @@ evaluate_one_model() {
             --gen_dir "${GEN_OUTPUT_DIR}" \
             --results_file "${RESULTS_FILE}" \
             --model_name "${MODEL_NAME}" \
+            --model_path "${MODEL_PATH}" \
             --datasets "${DATASETS_TO_TEST_CSV}"
     fi
 

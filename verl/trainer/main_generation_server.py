@@ -16,6 +16,7 @@ Generate responses given a dataset of prompts
 """
 
 import os
+import re
 
 import aiohttp
 import hydra
@@ -30,6 +31,7 @@ import asyncio
 from pprint import pprint
 
 import pandas as pd
+import pyarrow.lib
 from omegaconf import OmegaConf
 from openai.types.chat import ChatCompletion
 from tqdm import tqdm
@@ -40,6 +42,22 @@ from verl.trainer.generation_server_env import (
 )
 from verl.utils.hdfs_io import makedirs
 from verl.workers.rollout.replica import get_rollout_replica_class
+
+
+def read_parquet_compat(path: str) -> pd.DataFrame:
+    try:
+        return pd.read_parquet(path)
+    except pyarrow.lib.ArrowNotImplementedError:
+        import pyarrow.parquet as pq
+
+        parquet_file = pq.ParquetFile(path)
+        batches = [
+            batch.to_pandas()
+            for batch in parquet_file.iter_batches(batch_size=1024)
+        ]
+        if not batches:
+            return pd.DataFrame()
+        return pd.concat(batches, axis=0, ignore_index=True)
 
 
 async def start_server(config):
@@ -83,6 +101,23 @@ async def submit_request(server_address, max_retries=5, retry_base_delay=2.0, **
                     data = await resp.json()
                     if resp.status != 200:
                         error_msg = data.get("error", {}).get("message", str(data))
+                        match = re.search(
+                            r"maximum context length is (\d+) tokens and your request has (\d+) input tokens",
+                            error_msg,
+                        )
+                        current_max_tokens = chat_complete_request.get("max_tokens")
+                        if resp.status == 400 and match and current_max_tokens is not None:
+                            max_model_len = int(match.group(1))
+                            prompt_tokens = int(match.group(2))
+                            adjusted_max_tokens = max(1, max_model_len - prompt_tokens)
+                            if adjusted_max_tokens < int(current_max_tokens):
+                                chat_complete_request["max_tokens"] = adjusted_max_tokens
+                                print(
+                                    f"[Adjust max_tokens] Request to {server_address}: "
+                                    f"{current_max_tokens} -> {adjusted_max_tokens} "
+                                    f"for prompt_tokens={prompt_tokens}, max_model_len={max_model_len}"
+                                )
+                                continue
                         raise RuntimeError(f"Server returned {resp.status}: {error_msg}")
                     return ChatCompletion(**data)
             finally:
@@ -209,7 +244,7 @@ def main(config):
 
         datasets = []
         for train_file in train_files:
-            dataset = pd.read_parquet(train_file)
+            dataset = read_parquet_compat(train_file)
             datasets.append(dataset)
 
         # concat dataset

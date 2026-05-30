@@ -98,6 +98,7 @@ class BucketedWeightSender:
         self.socket = None
         self.buffer = None
         self.shm = None
+        self.socket_timeout_ms = int(float(os.getenv("VERL_WEIGHT_SYNC_ZMQ_TIMEOUT_SECONDS", "300")) * 1000)
 
     async def async_send_weights(self, weights):
         """
@@ -156,6 +157,8 @@ class BucketedWeightSender:
     def _init_socket(self):
         """Initialize ZMQ REQ socket and bind."""
         self.socket = self.zmq_context.socket(zmq.REQ)
+        self.socket.setsockopt(zmq.RCVTIMEO, self.socket_timeout_ms)
+        self.socket.setsockopt(zmq.SNDTIMEO, self.socket_timeout_ms)
         self.socket.bind(self.zmq_handle)
 
     def _init_buffer(self):
@@ -224,6 +227,7 @@ class BucketedWeightReceiver:
         self.socket = None
         self.buffer = None
         self.shm = None
+        self.socket_timeout_ms = int(float(os.getenv("VERL_WEIGHT_SYNC_ZMQ_TIMEOUT_SECONDS", "300")) * 1000)
 
     def receive_weights(self, on_bucket_received: callable):
         """
@@ -264,6 +268,8 @@ class BucketedWeightReceiver:
     def _init_socket(self):
         """Initialize ZMQ REP socket and connect."""
         self.socket = self.zmq_context.socket(zmq.REP)
+        self.socket.setsockopt(zmq.RCVTIMEO, self.socket_timeout_ms)
+        self.socket.setsockopt(zmq.SNDTIMEO, self.socket_timeout_ms)
         self.socket.connect(self.zmq_handle)
 
     def _init_buffer(self):

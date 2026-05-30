@@ -57,7 +57,13 @@ def format_eval_results(metric_dict: dict[str, float], pass_k: int) -> dict[str,
     return formatted_results
 
 
-def save_eval_results(metric_dict: dict[str, float], output_json_path: str, model_name: str, pass_k: int):
+def save_eval_results(
+    metric_dict: dict[str, float],
+    output_json_path: str,
+    model_name: str,
+    pass_k: int,
+    model_path: str | None = None,
+):
     formatted_results = format_eval_results(metric_dict, pass_k=pass_k)
 
     os.makedirs(os.path.dirname(output_json_path), exist_ok=True)
@@ -72,6 +78,7 @@ def save_eval_results(metric_dict: dict[str, float], output_json_path: str, mode
             all_results = {}
 
     model_results = dict(all_results.get(model_name, {}))
+    model_results["model_path"] = model_path
     model_results.update(formatted_results)
     all_results[model_name] = model_results
 
@@ -131,6 +138,7 @@ def main(config):
             output_json_path=output_json_path,
             model_name=model_name,
             pass_k=config.get("pass_k", 1),
+            model_path=config.get("model_path"),
         )
 
 

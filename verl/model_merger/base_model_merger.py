@@ -376,8 +376,9 @@ class BaseModelMerger(ABC):
         if task_type is not None:
             peft_dict["task_type"] = task_type
         peft_config = peft.LoraConfig(**peft_dict).to_dict()
-        peft_config["task_type"] = peft_config["task_type"].value if peft_config["task_type"] else None
-        peft_config["peft_type"] = peft_config["peft_type"].value if peft_config["peft_type"] else None
+        for enum_key in ("task_type", "peft_type"):
+            enum_value = peft_config.get(enum_key)
+            peft_config[enum_key] = enum_value.value if hasattr(enum_value, "value") else enum_value
         peft_config["target_modules"] = list(peft_config["target_modules"])
 
         lora_path = os.path.join(self.config.target_dir, "lora_adapter")

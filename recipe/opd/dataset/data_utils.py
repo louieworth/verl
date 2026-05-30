@@ -13,6 +13,11 @@ from verl.utils.dataset.dataset_utils import DatasetPadMode, SFTTensorCollator
 
 # Instruction following format from existing pipeline
 instruction_following = "Please reason step by step, and put your final answer within \\boxed{}."
+code_instruction_following = (
+    "You will be given a programming problem. Write a correct Python program that solves it. "
+    "Return only the code inside a single ```python code block."
+)
+
 
 
 # =============================================================================
@@ -92,6 +97,61 @@ Your task is to rewrite your mathematical solution.
 """
 
 
+
+PROMPT_TEMPLATE_CODE_STUDENT = """
+{PROBLEM}
+"""
+
+PROMPT_TEMPLATE_CODE_OPSD_VANILLA_TEACHER = """
+{PROBLEM}
+
+Here is a reference Python solution:
+```python
+{EXPERT_SOLUTION}
+```
+
+After understanding the reference solution, write your own correct Python solution below.
+"""
+
+PROMPT_TEMPLATE_CODE_OPSD_REFINE_TEACHER = """
+Your task is to rewrite your Python solution using the reference solution as guidance.
+
+**Problem:**
+{PROBLEM}
+
+**Reference Solution:**
+```python
+{EXPERT_SOLUTION}
+```
+
+**Your Initial Solution:**
+{INITIAL_RESPONSE}
+
+**Instructions:**
+1. Fix correctness issues and edge cases
+2. Preserve useful parts of the original approach when appropriate
+3. Output ONLY the rewritten Python solution
+"""
+
+PROMPT_TEMPLATE_CODE_OPD_VANILLA_TEACHER = """
+{PROBLEM}
+"""
+
+PROMPT_TEMPLATE_CODE_OPD_REFINE_TEACHER = """
+Your task is to rewrite your Python solution.
+
+**Problem:**
+{PROBLEM}
+
+**Your Initial Solution:**
+{INITIAL_RESPONSE}
+
+**Instructions:**
+1. Fix correctness issues and edge cases
+2. Preserve useful parts of the original approach when appropriate
+3. Output ONLY the rewritten Python solution
+"""
+
 def build_teacher_prompt(
     problem: str,
     expert_solution: str,
@@ -99,6 +159,7 @@ def build_teacher_prompt(
     initial_response: str = "",
     use_initial_response: bool = False,
     distill_mode: str = "opsd",
+    task: str = "math",
 ) -> str:
     """Build the teacher-side prompt by (distill_mode × use_initial_response):
 
@@ -107,7 +168,36 @@ def build_teacher_prompt(
         opd  + False → vanilla OPD:  π_T(·|x)
         opd  + True  → refine  OPD:  π_T(·|x, y_o)
     """
-    if distill_mode == "opd":
+    if task == "code":
+        suffix = code_instruction_following
+        if distill_mode == "opd":
+            if use_initial_response:
+                prompt = (
+                    PROMPT_TEMPLATE_CODE_OPD_REFINE_TEACHER
+                    .replace("{PROBLEM}", problem)
+                    .replace("{INITIAL_RESPONSE}", initial_response)
+                    .strip()
+                )
+            else:
+                prompt = PROMPT_TEMPLATE_CODE_OPD_VANILLA_TEACHER.replace("{PROBLEM}", problem).strip()
+        else:
+            if use_initial_response:
+                prompt = (
+                    PROMPT_TEMPLATE_CODE_OPSD_REFINE_TEACHER
+                    .replace("{PROBLEM}", problem)
+                    .replace("{INITIAL_RESPONSE}", initial_response)
+                    .replace("{EXPERT_SOLUTION}", expert_solution)
+                    .strip()
+                )
+            else:
+                prompt = (
+                    PROMPT_TEMPLATE_CODE_OPSD_VANILLA_TEACHER
+                    .replace("{PROBLEM}", problem)
+                    .replace("{EXPERT_SOLUTION}", expert_solution)
+                    .strip()
+                )
+    elif distill_mode == "opd":
+        suffix = instruction_following
         if use_initial_response:
             prompt = (
                 PROMPT_TEMPLATE_OPD_REFINE_TEACHER
@@ -118,6 +208,7 @@ def build_teacher_prompt(
         else:
             prompt = PROMPT_TEMPLATE_OPD_VANILLA_TEACHER.replace("{PROBLEM}", problem).strip()
     else:  # opsd
+        suffix = instruction_following
         if use_initial_response:
             prompt = (
                 PROMPT_TEMPLATE_OPSD_REFINE_TEACHER
@@ -133,12 +224,13 @@ def build_teacher_prompt(
                 .replace("{EXPERT_SOLUTION}", expert_solution)
                 .strip()
             )
-    return prompt + " " + instruction_following
+    return prompt + " " + suffix
 
 
 _INIT_BLOCK_MARKER = "**Your Initial Solution:**"
 _INIT_BLOCK_END_MARKER = "**Instructions:**"
 _TRUNC_NOTICE = "\n[... initial solution truncated ...]\n"
+_REF_TRUNC_NOTICE = "\n[... reference solution truncated ...]\n"
 
 
 class KLTrainingDataset(Dataset):
@@ -156,6 +248,7 @@ class KLTrainingDataset(Dataset):
         prompt_truncation: bool = False,
         log_difficulty_buckets: bool = False,
         distill_mode: str = "opsd",
+        task: str = "math",
     ):
         self.tokenizer = tokenizer
         self.kl_type = kl_type
@@ -164,11 +257,12 @@ class KLTrainingDataset(Dataset):
         self.prompt_truncation = prompt_truncation
         self.log_difficulty_buckets = log_difficulty_buckets
         self.distill_mode = distill_mode
+        self.task = task
         if prompt_truncation:
             print(
                 "[KLTrainingDataset] prompt_truncation=ON: when prompt+response > max_length, "
-                "the **Your Initial Solution:** block will be truncated from its tail to "
-                "preserve the response (only applies to teacher-side correction prompts)."
+                "long **Your Initial Solution:** and reference-solution blocks will be truncated "
+                "from their tail to preserve response tokens."
             )
 
         print(f"Loading data from: {data_path}")
@@ -235,50 +329,79 @@ class KLTrainingDataset(Dataset):
     def _encode_text(self, text: str) -> list[int]:
         return self.tokenizer.encode(text, add_special_tokens=False)
 
-    def _truncate_initial_response(self, prompt: str, response: str) -> str:
-        """Trim the **Your Initial Solution:** block so that the full prompt+response
-        fits within ``max_length``. Returns the modified prompt; caller still applies
-        a final right-side safety cut. Returns the prompt unchanged if (a) it already
-        fits, (b) the markers are not present (e.g. student-side or non-correction
-        prompt), or (c) trimming the block alone is insufficient.
-        """
+    def _truncate_prompt_block(
+        self,
+        prompt: str,
+        response: str,
+        start_marker: str,
+        end_markers: tuple[str, ...],
+        notice: str,
+    ) -> str:
         prompt_ids = self._encode_text(prompt + "\n")
         response_ids = self._encode_text(response)
         if len(prompt_ids) + len(response_ids) <= self.max_length:
             return prompt
 
-        init_start_marker = prompt.find(_INIT_BLOCK_MARKER)
-        init_end_marker = prompt.find(_INIT_BLOCK_END_MARKER, init_start_marker + 1) if init_start_marker >= 0 else -1
-        if init_start_marker < 0 or init_end_marker <= init_start_marker:
+        start = prompt.find(start_marker)
+        if start < 0:
+            return prompt
+        block_text_start = start + len(start_marker)
+        end_candidates = [prompt.find(marker, block_text_start) for marker in end_markers]
+        end_candidates = [pos for pos in end_candidates if pos > block_text_start]
+        end = min(end_candidates) if end_candidates else -1
+        if end <= block_text_start:
             return prompt
 
-        block_text_start = init_start_marker + len(_INIT_BLOCK_MARKER)
-        block_text = prompt[block_text_start:init_end_marker]
+        block_text = prompt[block_text_start:end]
         block_ids = self._encode_text(block_text)
         if not block_ids:
             return prompt
 
-        # Tokens we need to drop from the prompt side, leaving a small margin so
-        # that the post-truncation re-encode still fits (re-tokenization can be
-        # off by a few tokens vs. the slice arithmetic).
         margin = 16
         overflow = len(prompt_ids) + len(response_ids) - self.max_length + margin
         keep_tokens = max(0, len(block_ids) - overflow)
         if keep_tokens >= len(block_ids):
-            return prompt  # nothing to do
+            return prompt
 
         truncated_block = self.tokenizer.decode(block_ids[:keep_tokens], skip_special_tokens=True)
-        new_prompt = (
-            prompt[:block_text_start]
-            + truncated_block
-            + _TRUNC_NOTICE
-            + prompt[init_end_marker:]
+        return prompt[:block_text_start] + truncated_block + notice + prompt[end:]
+
+    def _truncate_initial_response(self, prompt: str, response: str) -> str:
+        return self._truncate_prompt_block(
+            prompt,
+            response,
+            _INIT_BLOCK_MARKER,
+            (_INIT_BLOCK_END_MARKER,),
+            _TRUNC_NOTICE,
         )
-        return new_prompt
+
+    def _truncate_reference_solution(self, prompt: str, response: str) -> str:
+        prompt = self._truncate_prompt_block(
+            prompt,
+            response,
+            "**Reference Solution:**",
+            (_INIT_BLOCK_MARKER, _INIT_BLOCK_END_MARKER),
+            _REF_TRUNC_NOTICE,
+        )
+        prompt = self._truncate_prompt_block(
+            prompt,
+            response,
+            "Here is a reference Python solution:",
+            ("After understanding",),
+            _REF_TRUNC_NOTICE,
+        )
+        return self._truncate_prompt_block(
+            prompt,
+            response,
+            "Here is a reference solution:",
+            ("After understanding",),
+            _REF_TRUNC_NOTICE,
+        )
 
     def _build_sequence(self, prompt: str, response: str) -> tuple[torch.Tensor, torch.Tensor, int]:
         if self.prompt_truncation:
             prompt = self._truncate_initial_response(prompt, response)
+            prompt = self._truncate_reference_solution(prompt, response)
         prompt_ids = self._encode_text(prompt + "\n")
         response_ids = self._encode_text(response)
         full_ids = (prompt_ids + response_ids)[: self.max_length]
@@ -361,8 +484,12 @@ class KLTrainingDataset(Dataset):
         if not response:
             raise ValueError("Reverse KL requires stage1 responses in the 'responses' field.")
 
-        student_prompt = PROMPT_TEMPLATE_STUDENT.replace("{PROBLEM}", problem).strip()
-        student_prompt = student_prompt + " " + instruction_following
+        if self.task == "code":
+            student_prompt = PROMPT_TEMPLATE_CODE_STUDENT.replace("{PROBLEM}", problem).strip()
+            student_prompt = student_prompt + " " + code_instruction_following
+        else:
+            student_prompt = PROMPT_TEMPLATE_STUDENT.replace("{PROBLEM}", problem).strip()
+            student_prompt = student_prompt + " " + instruction_following
 
         teacher_prompt = build_teacher_prompt(
             problem,
@@ -370,6 +497,7 @@ class KLTrainingDataset(Dataset):
             initial_response=response,
             use_initial_response=self.use_initial_response,
             distill_mode=self.distill_mode,
+            task=self.task,
         )
 
         out = self._prepare_item(student_prompt=student_prompt, teacher_prompt=teacher_prompt, response=response)
@@ -400,13 +528,17 @@ class KLTrainingDataset(Dataset):
                     "Forward KL single-file mode requires extra_info['initial_response'] in the stage2 parquet."
                 )
 
-        student_prompt = problem + " " + instruction_following
+        if self.task == "code":
+            student_prompt = problem + " " + code_instruction_following
+        else:
+            student_prompt = problem + " " + instruction_following
         teacher_prompt = build_teacher_prompt(
             problem,
             expert_solution,
             initial_response=initial_response,
             use_initial_response=self.use_initial_response,
             distill_mode=self.distill_mode,
+            task=self.task,
         )
 
         out = self._prepare_item(
@@ -434,6 +566,7 @@ def create_kl_dataloader(
     prompt_truncation: bool = False,
     log_difficulty_buckets: bool = False,
     distill_mode: str = "opsd",
+    task: str = "math",
 ) -> DataLoader:
     dataset = KLTrainingDataset(
         data_path=data_path,
@@ -446,6 +579,7 @@ def create_kl_dataloader(
         prompt_truncation=prompt_truncation,
         log_difficulty_buckets=log_difficulty_buckets,
         distill_mode=distill_mode,
+        task=task,
     )
 
     sampler = None

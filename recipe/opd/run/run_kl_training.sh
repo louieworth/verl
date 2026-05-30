@@ -39,10 +39,24 @@ sanitize_path_component() {
 # all spawn vLLM — crash with "Expandable segments are not compatible with
 # memory pool").
 
+# Disable OpenTelemetry exporters in Ray/vLLM worker processes. The OTLP gRPC
+# metric exporter can segfault inside grpc/opentelemetry-cpp during long rollout
+# jobs; metrics/traces are not needed for this pipeline.
+export OTEL_SDK_DISABLED="${OTEL_SDK_DISABLED:-true}"
+export OTEL_METRICS_EXPORTER="${OTEL_METRICS_EXPORTER:-none}"
+export OTEL_TRACES_EXPORTER="${OTEL_TRACES_EXPORTER:-none}"
+export OTEL_LOGS_EXPORTER="${OTEL_LOGS_EXPORTER:-none}"
+
 # =============================================================================
 # Configuration
 # =============================================================================
-# Distillation Mode
+# Task / Distillation Mode
+TASK=${TASK:-"math"}  # math | code
+case "$TASK" in
+    math|code) ;;
+    *) echo "ERROR: TASK must be math or code (got: $TASK)" >&2; exit 1 ;;
+esac
+
 DISTILL_MODE=${DISTILL_MODE:-"opsd"}   # opsd: teacher = student, teacher prompt embeds y* (expert solution).
                                         # opd : teacher ≠ student, teacher prompt has NO expert reference.
 case "$DISTILL_MODE" in
@@ -81,6 +95,27 @@ GRAD_COSINE_INTERVAL=${GRAD_COSINE_INTERVAL:-0}                # T2: optimizer s
 CORRECTION_TOKEN_PHRASES=${CORRECTION_TOKEN_PHRASES:-""}        # T3: comma-separated correction phrases (e.g. "Wait,But,Actually,However,Hmm")
 CORRECTION_TOKEN_IDS=${CORRECTION_TOKEN_IDS:-""}                # T3: comma-separated explicit ids; overrides phrases
 LOG_DIFFICULTY_BUCKETS=${LOG_DIFFICULTY_BUCKETS:-"false"}        # T4: split kl_loss by stage1 reward bucket
+SCORE_STAGE1=${SCORE_STAGE1:-"auto"}                      # auto/true: score only when a downstream feature needs stage1 reward; force=always
+
+should_score_stage1() {
+    case "$SCORE_STAGE1" in
+        force|FORCE|always|ALWAYS) return 0 ;;
+        false|0|no|NO|off|OFF) return 1 ;;
+        true|1|yes|YES|on|ON|auto|AUTO) ;;
+    esac
+    if [ "$LOG_DIFFICULTY_BUCKETS" = "true" ]; then
+        return 0
+    fi
+    if [ "$FORWARD_FILTER_REQUIRE_STAGE1_FAILED" = "true" ]; then
+        return 0
+    fi
+    if [ "$Y_MODE" = "y_o" ]; then
+        case "$FORWARD_STAGE2_MODE" in
+            stage1_reward_0_only|stage1_reward_1_only) return 0 ;;
+        esac
+    fi
+    return 1
+}
 
 # Top-K teacher local support matching (Fu et al. 2026, arXiv:2603.25562).
 # When > 0 (and KL_METHOD=full_vocab), the per-position KL is replaced by a
@@ -95,7 +130,7 @@ LORA_RANK=${LORA_RANK:-64}
 LORA_ALPHA=${LORA_ALPHA:-128}
 
 # Training Settings
-LEARNING_RATE=${LEARNING_RATE:-2e-5}
+LEARNING_RATE=${LEARNING_RATE:-5e-6}
 TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-4}
 USER_GRADIENT_ACCUMULATION_STEPS="${GRADIENT_ACCUMULATION_STEPS:-}"
 GRADIENT_ACCUMULATION_STEPS=${GRADIENT_ACCUMULATION_STEPS:-8}
@@ -117,8 +152,15 @@ MULTI_STEP=${MULTI_STEP:-0}
 USER_PIPELINE_BATCH_SIZE="${PIPELINE_BATCH_SIZE:-}"
 PIPELINE_AUTO_CHUNK_SIZE=0  # Internal auto-computed chunk size when MULTI_STEP>0.
 PIPELINE_KEEP_STEPS=${PIPELINE_KEEP_STEPS:-""}      # Optional comma list, e.g. 0,8,16,24,32,39.
-PIPELINE_KEEP_INTERVAL=${PIPELINE_KEEP_INTERVAL:-""}  # Default = ceil(MULTI_STEP / 5).
+PIPELINE_KEEP_INTERVAL=${PIPELINE_KEEP_INTERVAL:-"0"}  # 0 = final only; >0 keeps every N updates.
+PIPELINE_LOCAL_KEEP_POLICY=${PIPELINE_LOCAL_KEEP_POLICY:-"last_hf_only"}  # last_hf_only | all_kept
+PIPELINE_ARCHIVE_PRUNED_MODE=${PIPELINE_ARCHIVE_PRUNED_MODE:-"delete"}  # delete | move
+PIPELINE_ARCHIVE_MODEL_ROOT=${PIPELINE_ARCHIVE_MODEL_ROOT:-"/opt/dlami/nvme/jiangli"}
+PIPELINE_ARCHIVE_MODEL_DIR=${PIPELINE_ARCHIVE_MODEL_DIR:-""}  # resolved after DISTILL_TASK_FAMILY/MODEL_NAME are known
+PIPELINE_ARCHIVE_KEEP_MODE=${PIPELINE_ARCHIVE_KEEP_MODE:-"off"}  # copy | off; fixed checkpoints for eval, not resume
 PIPELINE_CLEANUP_BATCH_DATA=${PIPELINE_CLEANUP_BATCH_DATA:-"true"}
+PIPELINE_STORE_RESUME_MODEL_IN_GEN_RESULTS=${PIPELINE_STORE_RESUME_MODEL_IN_GEN_RESULTS:-"true"}
+PIPELINE_CLEANUP_GEN_RESULTS_ON_COMPLETE=${PIPELINE_CLEANUP_GEN_RESULTS_ON_COMPLETE:-"true"}
 PIPELINE_TEMP_MODEL_DIR=${PIPELINE_TEMP_MODEL_DIR:-""}
 # Resume behavior:
 #   resume_matching : default; find an older gen_results run with the same semantic signature,
@@ -181,7 +223,7 @@ KEEP_LAST_N_CHECKPOINTS=${KEEP_LAST_N_CHECKPOINTS:-1}  # Rolling window; per-epo
 # by a long-lived student vLLM server and KL training syncs updated LoRA/student
 # weights back into it, so intermediate batches no longer need blocking HF merge.
 USER_RESIDENT_STUDENT_ROLLOUT="${RESIDENT_STUDENT_ROLLOUT:-}"
-RESIDENT_STUDENT_ROLLOUT=${RESIDENT_STUDENT_ROLLOUT:-"true"}
+RESIDENT_STUDENT_ROLLOUT=${RESIDENT_STUDENT_ROLLOUT:-"false"}
 RESIDENT_YO_MANIFEST=${RESIDENT_YO_MANIFEST:-""}
 RESIDENT_YO_AUTOSTART=${RESIDENT_YO_AUTOSTART:-"true"}
 RESIDENT_YO_LOAD_FORMAT=${RESIDENT_YO_LOAD_FORMAT:-"auto"}
@@ -204,11 +246,24 @@ if [ "$RESIDENT_STUDENT_ROLLOUT" = "true" ] && [ "$Y_MODE" = "y_r" ] && [ "$DIST
 fi
 
 # Evaluation Settings
-RUN_EVAL_AFTER_TRAINING=${RUN_EVAL_AFTER_TRAINING:-"false"}
+RUN_EVAL_AFTER_TRAINING=${RUN_EVAL_AFTER_TRAINING:-"true"}
 # EVAL_DATASETS=${EVAL_DATASETS:-"aime24,aime25,math500,hmmt25"} DEFAULT_DATASETS="math500 hmmt25 beyondaime amobench gsm8k"
-EVAL_DATASETS=${EVAL_DATASETS:-"aime24,aime25,hmmt25,beyondaime,amobench"}
+if [ "$TASK" = "code" ]; then
+    EVAL_DATASETS=${EVAL_DATASETS:-"humaneval_plus,mbpp_plus,livecodebench_v6"}
+    PASS_K=${PASS_K:-4}
+else
+    EVAL_DATASETS=${EVAL_DATASETS:-"aime24,aime25,hmmt25,beyondaime,amobench"}
+    PASS_K=${PASS_K:-16}
+fi
 EVAL_DATASETS_DIR=${EVAL_DATASETS_DIR:-"/data/data/jiangli/huggingface/datasets"}
-PASS_K=${PASS_K:-16}
+
+# Notification Settings
+NTFY_ENABLED=${NTFY_ENABLED:-"true"}
+NTFY_TOPIC=${NTFY_TOPIC:-"ec2_lijiang_2026"}
+NTFY_URL=${NTFY_URL:-"https://ntfy.sh/$NTFY_TOPIC"}
+NTFY_TIMEOUT_SECONDS=${NTFY_TIMEOUT_SECONDS:-10}
+NTFY_JOB_STARTED="false"
+NTFY_JOB_START_TS=$(date +%s)
 
 # Paths
 # Layout: recipe/opd/run/<this_script>.sh
@@ -220,7 +275,15 @@ VERL_ROOT="$(dirname "$(dirname "$RECIPE_DIR")")"               # repo root
 PIPELINE_DIR="$RECIPE_DIR/generation"                           # recipe/opd/generation
 
 # Training data path (for prompts)
-TRAIN_DATA_PATH=${TRAIN_DATA_PATH:-"/data/data/jiangli/data/DeepScaleR-Cleaned"}
+if [ "$TASK" = "code" ]; then
+    TRAIN_DATA_PATH=${TRAIN_DATA_PATH:-"/data/data/jiangli/huggingface/datasets/TACO"}
+    TRAIN_DATA_SOURCE=${TRAIN_DATA_SOURCE:-"BAAI/TACO"}
+    SCORE_STAGE1=${SCORE_STAGE1:-"auto"}
+else
+    TRAIN_DATA_PATH=${TRAIN_DATA_PATH:-"/data/data/jiangli/data/DeepScaleR-Cleaned"}
+    TRAIN_DATA_SOURCE=${TRAIN_DATA_SOURCE:-"deepscaleR"}
+    SCORE_STAGE1=${SCORE_STAGE1:-"auto"}
+fi
 
 # Model name from the original base model, not from epoch checkpoints. Preserve
 # an explicit outer value so local snapshot paths can still get readable names.
@@ -268,9 +331,15 @@ fi
 # Derived budgets are intentionally conservative so the default path does not
 # clip target responses. If a model cannot support the derived context length,
 # lower EXPERT_SOLUTION_PROMPT_LENGTH or MAX_RESPONSE_LENGTH explicitly.
-BASE_PROMPT_LENGTH=${BASE_PROMPT_LENGTH:-1024}
-MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-8192}
-EXPERT_SOLUTION_PROMPT_LENGTH=${EXPERT_SOLUTION_PROMPT_LENGTH:-3072}
+if [ "$TASK" = "code" ]; then
+    BASE_PROMPT_LENGTH=${BASE_PROMPT_LENGTH:-4096}
+    MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-16384}
+    EXPERT_SOLUTION_PROMPT_LENGTH=${EXPERT_SOLUTION_PROMPT_LENGTH:-4096}
+else
+    BASE_PROMPT_LENGTH=${BASE_PROMPT_LENGTH:-1024}
+    MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-8192}
+    EXPERT_SOLUTION_PROMPT_LENGTH=${EXPERT_SOLUTION_PROMPT_LENGTH:-3072}
+fi
 STAGE1_PROMPT_LENGTH=$BASE_PROMPT_LENGTH
 
 if [ "$DISTILL_MODE" = "opsd" ]; then
@@ -325,7 +394,7 @@ if [ "$STAGE2_ROLLOUT_MAX_NUM_BATCHED_TOKENS" -lt "$STAGE2_ROLLOUT_MAX_MODEL_LEN
     STAGE2_ROLLOUT_MAX_NUM_BATCHED_TOKENS=$STAGE2_ROLLOUT_MAX_MODEL_LEN
 fi
 if [ -z "$MAX_TOKEN_LEN_PER_GPU" ]; then
-    MAX_TOKEN_LEN_PER_GPU=49152
+    MAX_TOKEN_LEN_PER_GPU=24576
     if [ "$MAX_LENGTH" -gt "$MAX_TOKEN_LEN_PER_GPU" ]; then
         MAX_TOKEN_LEN_PER_GPU=$MAX_LENGTH
     fi
@@ -431,8 +500,8 @@ if [ "$MULTI_STEP" -gt 0 ]; then
         echo "ERROR: MULTI_STEP>0 is incompatible with CORRECTED_RESPONSES_PATH legacy override."
         exit 1
     fi
-    if [ -n "$PIPELINE_KEEP_INTERVAL" ] && ! [[ "$PIPELINE_KEEP_INTERVAL" =~ ^[1-9][0-9]*$ ]]; then
-        echo "ERROR: PIPELINE_KEEP_INTERVAL must be a positive integer when set (got: $PIPELINE_KEEP_INTERVAL)."
+    if [ -n "$PIPELINE_KEEP_INTERVAL" ] && ! [[ "$PIPELINE_KEEP_INTERVAL" =~ ^[0-9]+$ ]]; then
+        echo "ERROR: PIPELINE_KEEP_INTERVAL must be a non-negative integer when set (got: $PIPELINE_KEEP_INTERVAL)."
         exit 1
     fi
 fi
@@ -485,7 +554,7 @@ PYDATASETLEN_EARLY
         GRADIENT_ACCUMULATION_SOURCE="auto_one_update_per_chunk"
     fi
     if [ -z "$PIPELINE_KEEP_INTERVAL" ]; then
-        PIPELINE_KEEP_INTERVAL=$(((PIPELINE_TOTAL_STEPS + 4) / 5))
+        PIPELINE_KEEP_INTERVAL=0
     fi
     MULTISTEP_TAG="ms${PIPELINE_TOTAL_STEPS}"
     EXPERIMENT_TAG="${EXPERIMENT_TAG}_${MULTISTEP_TAG}"
@@ -498,6 +567,11 @@ fi
 
 # Base directories and run naming
 DISTILL_FAMILY="$(echo "$DISTILL_MODE" | tr '[:lower:]' '[:upper:]')"
+TASK_UPPER="$(echo "$TASK" | tr '[:lower:]' '[:upper:]')"
+DISTILL_TASK_FAMILY="${DISTILL_FAMILY}_${TASK_UPPER}"
+TASK_PATH_SUFFIX="/$TASK"
+TASK_FILE_SUFFIX="_${TASK}"
+TASK_RESULT_SUFFIX="_${TASK_UPPER}"
 RUN_DATE=${RUN_DATE:-$(date +%Y%m%d-%H%M%S)}
 OPTIMIZATION_STEP_TAG="${MULTISTEP_TAG:-ms1}"
 RUN_DESCRIPTOR="${PROMPT_MODE_TAG}_kl_${KL_TYPE}_${KL_METHOD}_${CLIP_TAG}${BETA_TAG}${TOPK_TAG}${Y_O_FILTER_TAG}_${TEACHER_TRAINING_PROMPT}_${OPTIMIZATION_STEP_TAG}_${RUN_DATE}"
@@ -521,20 +595,20 @@ case "$USE_LORA" in
         SIGNATURE_LORA_ALPHA="0"
         ;;
 esac
-RESULTS_MODEL_KEY="${MODEL_NAME}_${DISTILL_FAMILY}_${MODEL_RUN_NAME}${RESULTS_TUNING_SUFFIX}"
-RESULTS_BASE_MODEL_NAME="${DISTILL_FAMILY}/${MODEL_NAME}"
-RESULTS_FILE="$VERL_ROOT/results/${DISTILL_FAMILY}/${MODEL_NAME}.json"
+RESULTS_MODEL_KEY="${MODEL_NAME}_${DISTILL_FAMILY}${TASK_RESULT_SUFFIX}_${MODEL_RUN_NAME}${RESULTS_TUNING_SUFFIX}"
+RESULTS_BASE_MODEL_NAME="${DISTILL_FAMILY}${TASK_PATH_SUFFIX}/${MODEL_NAME}"
+RESULTS_FILE="$VERL_ROOT/results/${DISTILL_FAMILY}${TASK_PATH_SUFFIX}/${MODEL_NAME}${TASK_FILE_SUFFIX}.json"
 
 if [ -z "$OUTPUT_DIR" ]; then
-    OUTPUT_BASE_DIR="$VERL_ROOT/outputs/${DISTILL_FAMILY}/${MODEL_NAME}/${MODEL_RUN_NAME}"
+    OUTPUT_BASE_DIR="$VERL_ROOT/outputs/${DISTILL_FAMILY}${TASK_PATH_SUFFIX}/${MODEL_NAME}/${MODEL_RUN_NAME}"
 else
     OUTPUT_BASE_DIR="$OUTPUT_DIR"
 fi
 
-if [ -z "$MODEL_SAVE_DIR" ] || [ "$MODEL_SAVE_DIR" = "/data/data/jiangli/models" ]; then
-    MODEL_SAVE_BASE_DIR="/scratch/l/luli/jiangli/ckpt/${DISTILL_FAMILY}/${MODEL_NAME}/${MODEL_RUN_NAME}"
-else
-    MODEL_SAVE_BASE_DIR="$MODEL_SAVE_DIR"
+MODEL_SAVE_ROOT="${MODEL_SAVE_DIR:-/data/data/jiangli/models}"
+MODEL_SAVE_BASE_DIR="$MODEL_SAVE_ROOT/${DISTILL_TASK_FAMILY}/${MODEL_NAME}/${MODEL_RUN_NAME}"
+if [ -z "$PIPELINE_ARCHIVE_MODEL_DIR" ]; then
+    PIPELINE_ARCHIVE_MODEL_DIR="$PIPELINE_ARCHIVE_MODEL_ROOT/${DISTILL_TASK_FAMILY}/${MODEL_NAME}"
 fi
 
 RESIDENT_YO_MANIFEST_USER_VALUE="$RESIDENT_YO_MANIFEST"
@@ -594,6 +668,7 @@ compute_gen_results_signature() {
     # algorithm/data target. Operational knobs used for recovery, such as
     # TRAIN_BATCH_SIZE and KL_FULL_VOCAB_CHUNK_SIZE, are intentionally excluded.
     GEN_RESULTS_RUN_SIGNATURE_CONTENT="$(cat <<EOF
+task=$TASK
 distill_family=$DISTILL_FAMILY
 distill_mode=$DISTILL_MODE
 model_name=$MODEL_NAME
@@ -712,7 +787,7 @@ elif [ "$PIPELINE_RESUME_MODE" = "fresh" ]; then
     echo ""
 fi
 
-GEN_RESULTS_RUN_PREFIX_DEFAULT="gen"
+GEN_RESULTS_RUN_PREFIX_DEFAULT="gen_${TASK}_${OPTIMIZATION_STEP_TAG:-ms1}"
 GEN_RESULTS_RUN_PREFIX="$(sanitize_path_component "${GEN_RESULTS_RUN_PREFIX:-$GEN_RESULTS_RUN_PREFIX_DEFAULT}")"
 GEN_RESULTS_RUN_ID_FILE="${GEN_RESULTS_RUN_ID_FILE_USER_VALUE:-$MODEL_SAVE_BASE_DIR/gen_results_run_id.txt}"
 
@@ -757,7 +832,8 @@ GEN_RESULTS_RUN_SIGNATURE_FILE="${GEN_RESULTS_RUN_SIGNATURE_FILE_USER_VALUE:-$MO
 GEN_RESULTS_RUN_SIGNATURE_DETAILS_FILE="${GEN_RESULTS_RUN_SIGNATURE_DETAILS_FILE_USER_VALUE:-$MODEL_SAVE_BASE_DIR/gen_results_run_signature.txt}"
 GEN_RESULTS_LOCAL_SIGNATURE_FILE="$GEN_RESULTS_BASE_DIR/run_signature.sha256"
 GEN_RESULTS_LOCAL_SIGNATURE_DETAILS_FILE="$GEN_RESULTS_BASE_DIR/run_signature.txt"
-FULL_STAGE1_PROMPTS="$GEN_RESULTS_BASE_DIR/deepscaleR_stage1_prompts.parquet"
+TASK_INTERMEDIATE_PREFIX="${TASK}_stage"
+FULL_STAGE1_PROMPTS="$GEN_RESULTS_BASE_DIR/${TASK_INTERMEDIATE_PREFIX}1_prompts.parquet"
 
 if [ -s "$GEN_RESULTS_RUN_SIGNATURE_FILE" ]; then
     GEN_RESULTS_PERSISTED_SIGNATURE="$(tr -d '[:space:]' < "$GEN_RESULTS_RUN_SIGNATURE_FILE")"
@@ -838,12 +914,12 @@ resolve_data_path_in_dir() {
     # y_o: train on stage1 student rollouts (no qualifier — student rollouts
     #      depend only on the student model already in the path).
     if [ "$Y_MODE" = "y_r" ]; then
-        echo "$data_dir/deepscaleR_stage2_${PROMPT_MODE_TAG}_${DISTILL_MODE}_${TEACHER_MODEL_NAME}_responses.parquet"
+        echo "$data_dir/${TASK_INTERMEDIATE_PREFIX}2_${PROMPT_MODE_TAG}_${DISTILL_MODE}_${TEACHER_MODEL_NAME}_responses.parquet"
     else
         case "${FORWARD_STAGE2_MODE:-}" in
-            "stage1_reward_0_only") echo "$data_dir/deepscaleR_stage1_responses_reward0.parquet" ;;
-            "stage1_reward_1_only") echo "$data_dir/deepscaleR_stage1_responses_reward1.parquet" ;;
-            *) echo "$data_dir/deepscaleR_stage1_responses.parquet" ;;
+            "stage1_reward_0_only") echo "$data_dir/${TASK_INTERMEDIATE_PREFIX}1_responses_reward0.parquet" ;;
+            "stage1_reward_1_only") echo "$data_dir/${TASK_INTERMEDIATE_PREFIX}1_responses_reward1.parquet" ;;
+            *) echo "$data_dir/${TASK_INTERMEDIATE_PREFIX}1_responses.parquet" ;;
         esac
     fi
 }
@@ -1070,6 +1146,7 @@ sync_resident_y_o_from_checkpoint() {
         --sync_resident_rollout_only true \
         --nnodes $NNODES \
         --n_gpus_per_node $NGPUS_PER_NODE \
+        --task $TASK \
         --distill_mode $DISTILL_MODE \
         --kl_type $KL_TYPE \
         --kl_method $KL_METHOD \
@@ -1139,6 +1216,8 @@ invalidate_resident_generated_data_after_pre_sync() {
     esac
 
     echo "Invalidating existing resident-generated responses after pre-generation sync: $data_dir"
+    rm -f "$data_dir/${TASK_INTERMEDIATE_PREFIX}1_responses.parquet"
+    rm -f "$data_dir"/${TASK_INTERMEDIATE_PREFIX}2_*_responses*.parquet
     rm -f "$data_dir/deepscaleR_stage1_responses.parquet"
     rm -f "$data_dir"/deepscaleR_stage2_*_responses*.parquet
 }
@@ -1231,6 +1310,8 @@ ensure_full_stage1_prompts() {
     local args=(
         --input_path "$TRAIN_DATA_PATH"
         --output_file "$FULL_STAGE1_PROMPTS"
+        --task "$TASK"
+        --data_source "$TRAIN_DATA_SOURCE"
     )
     if [ -n "$MAX_SAMPLES" ]; then
         args+=(--max_samples "$MAX_SAMPLES")
@@ -1270,11 +1351,159 @@ PYCHUNKPROMPTS
     local args=(
         --input_path "$TRAIN_DATA_PATH"
         --output_file "$output_file"
+        --task "$TASK"
+        --data_source "$TRAIN_DATA_SOURCE"
     )
     if [ -n "$MAX_SAMPLES" ]; then
         args+=(--max_samples "$MAX_SAMPLES")
     fi
     python3 "$PIPELINE_DIR/y_o_prepare.py" "${args[@]}"
+}
+
+step1_reuse_ms_tag_for_path() {
+    local target_path="$1"
+
+    case "$target_path" in
+        */epoch1/ms*/batch00001/*)
+            local rest="${target_path#*/epoch1/}"
+            printf '%s\n' "${rest%%/*}"
+            return 0
+            ;;
+    esac
+
+    return 1
+}
+
+step1_reuse_enabled_for_path() {
+    local target_path="$1"
+
+    case "${STEP1_RESPONSE_REUSE:-${MS1_RESPONSE_REUSE:-auto}}" in
+        false|False|0|no|No|n|N|"") return 1 ;;
+    esac
+
+    step1_reuse_ms_tag_for_path "$target_path" >/dev/null
+}
+
+metadata_matches_step1_reuse_context() {
+    local meta="$1"
+    local expected_y_mode="$2"
+    local value
+
+    [ -f "$meta" ] || return 1
+
+    value="$(gen_results_metadata_value "$meta" task)"
+    if [ -n "$value" ]; then
+        [ "$value" = "$TASK" ] || return 1
+    fi
+    value="$(gen_results_metadata_value "$meta" student_model_name)"
+    [ -n "$value" ] || value="$(gen_results_metadata_value "$meta" model_name)"
+    [ "$value" = "$MODEL_NAME" ] || return 1
+    value="$(gen_results_metadata_value "$meta" student_model_path)"
+    [ -n "$value" ] || value="$(gen_results_metadata_value "$meta" model_path)"
+    [ "$value" = "$MODEL_PATH" ] || return 1
+    value="$(gen_results_metadata_value "$meta" teacher_model_name)"
+    [ "$value" = "$TEACHER_MODEL_NAME" ] || return 1
+    value="$(gen_results_metadata_value "$meta" teacher_model_path)"
+    [ "$value" = "${TEACHER_MODEL_PATH:-$MODEL_PATH}" ] || return 1
+    value="$(gen_results_metadata_value "$meta" y_mode)"
+    [ "$value" = "$expected_y_mode" ] || return 1
+    value="$(gen_results_metadata_value "$meta" train_data_path)"
+    [ "$value" = "$TRAIN_DATA_PATH" ] || return 1
+    value="$(gen_results_metadata_value "$meta" max_samples)"
+    [ "$value" = "${MAX_SAMPLES:-all}" ] || return 1
+    value="$(gen_results_metadata_value "$meta" multi_step)"
+    [ "$value" = "${MULTI_STEP:-0}" ] || return 1
+
+    return 0
+}
+
+find_canonical_step1_responses() {
+    local stage="$1"
+    local target_ms_tag="$2"
+    local expected_y_mode pattern candidate base meta
+
+    [ -d "$GEN_RESULTS_ROOT" ] || return 0
+    [ -n "$target_ms_tag" ] || return 0
+
+    case "$stage" in
+        stage1)
+            expected_y_mode="y_o"
+            pattern="*/epoch1/${target_ms_tag}/batch00001/${TASK_INTERMEDIATE_PREFIX}1_responses.parquet"
+            ;;
+        stage2)
+            expected_y_mode="y_r"
+            pattern="*/epoch1/${target_ms_tag}/batch00001/${TASK_INTERMEDIATE_PREFIX}2_*_responses.parquet"
+            ;;
+        *)
+            return 0
+            ;;
+    esac
+
+    while IFS= read -r candidate; do
+        base="${candidate%%/epoch1/*}"
+        meta="$base/run_metadata.yaml"
+        metadata_matches_step1_reuse_context "$meta" "$expected_y_mode" || continue
+        printf '%s\n' "$candidate"
+        return 0
+    done < <(
+        find "$GEN_RESULTS_ROOT" -path "$pattern" -type f -size +0c -printf '%T@ %p\n' 2>/dev/null \
+            | sort -n \
+            | awk '{ $1=""; sub(/^ /, ""); print }'
+    )
+}
+
+reuse_step1_responses_if_available() {
+    local stage="$1"
+    local target_path="$2"
+
+    step1_reuse_enabled_for_path "$target_path" || return 1
+    if [ "$stage" = "stage1" ] && [ "${target_path##*/}" != "${TASK_INTERMEDIATE_PREFIX}1_responses.parquet" ]; then
+        return 1
+    fi
+
+    local target_ms_tag setting source_path=""
+    target_ms_tag="$(step1_reuse_ms_tag_for_path "$target_path" || true)"
+    [ -n "$target_ms_tag" ] || return 1
+
+    case "$stage" in
+        stage1) setting="${STEP1_STAGE1_RESPONSE_REUSE_PATH:-${MS1_STAGE1_RESPONSE_REUSE_PATH:-${STEP1_RESPONSE_REUSE:-${MS1_RESPONSE_REUSE:-auto}}}}" ;;
+        stage2) setting="${STEP1_STAGE2_RESPONSE_REUSE_PATH:-${MS1_STAGE2_RESPONSE_REUSE_PATH:-${STEP1_RESPONSE_REUSE:-${MS1_RESPONSE_REUSE:-auto}}}}" ;;
+        *) return 1 ;;
+    esac
+
+    case "$setting" in
+        false|False|0|no|No|n|N|"") return 1 ;;
+    esac
+
+    if [ "$setting" != "auto" ]; then
+        source_path="$setting"
+    else
+        source_path="$(find_canonical_step1_responses "$stage" "$target_ms_tag" || true)"
+    fi
+
+    if [ -z "$source_path" ] || [ ! -s "$source_path" ]; then
+        return 1
+    fi
+
+    if [ -e "$target_path" ] && [ "$target_path" -ef "$source_path" ]; then
+        echo "  [step1 reuse] Already using canonical $stage responses: $target_path"
+        return 0
+    fi
+
+    mkdir -p "$(dirname "$target_path")"
+    if [ -e "$target_path" ] || [ -L "$target_path" ]; then
+        echo "  [step1 reuse] Replacing non-canonical $stage responses: $target_path"
+        rm -f "$target_path"
+    fi
+    ln -s "$source_path" "$target_path"
+    echo "  [step1 reuse] Reusing canonical $stage responses:"
+    echo "    source: $source_path"
+    echo "    target: $target_path"
+    return 0
+}
+
+reuse_ms1_responses_if_available() {
+    reuse_step1_responses_if_available "$@"
 }
 
 train_dataset_num_rows() {
@@ -1334,7 +1563,165 @@ pipeline_should_keep_update() {
 }
 
 pipeline_progress_dir() {
-    echo "$MODEL_SAVE_BASE_DIR/pipeline_progress"
+    echo "$GEN_RESULTS_BASE_DIR/pipeline_progress"
+}
+
+pipeline_latest_model_state_file() {
+    echo "$GEN_RESULTS_BASE_DIR/latest_model.env"
+}
+
+pipeline_completed_steps_file() {
+    echo "$GEN_RESULTS_BASE_DIR/completed_steps.tsv"
+}
+
+pipeline_resume_models_dir() {
+    echo "$GEN_RESULTS_BASE_DIR/pipeline_models"
+}
+
+pipeline_resume_model_dir() {
+    local update="$1"
+    echo "$(pipeline_resume_models_dir)/step$(format_pipeline_batch_id "$update")/hf_merged"
+}
+
+cleanup_old_gen_results_resume_models() {
+    local keep_update="$1"
+    local keep_dir dir step_dir
+
+    [ -d "$(pipeline_resume_models_dir)" ] || return 0
+    keep_dir="$(dirname "$(pipeline_resume_model_dir "$keep_update")")"
+    for step_dir in "$(pipeline_resume_models_dir)"/step*; do
+        [ -d "$step_dir" ] || continue
+        [ "$step_dir" = "$keep_dir" ] && continue
+        echo "Deleting old gen_results resume model: $step_dir" >&2
+        rm -rf "$step_dir"
+    done
+}
+
+archive_pipeline_keep_model() {
+    local update="$1"
+    local total_updates="$2"
+    local batches_per_epoch="$3"
+    local source_model_dir="$4"
+    local rel target_model_dir
+
+    [ "$PIPELINE_ARCHIVE_KEEP_MODE" = "copy" ] || return 0
+    pipeline_should_keep_update "$update" "$total_updates" || return 0
+    [ -d "$source_model_dir" ] || {
+        echo "WARNING: fixed keep checkpoint source missing, not archiving: $source_model_dir" >&2
+        return 0
+    }
+
+    rel="${source_model_dir#$MODEL_SAVE_BASE_DIR/}"
+    target_model_dir="$PIPELINE_ARCHIVE_MODEL_DIR/$(basename "$MODEL_SAVE_BASE_DIR")/$rel"
+    rm -rf "$target_model_dir"
+    mkdir -p "$(dirname "$target_model_dir")"
+    echo "Archiving fixed keep checkpoint step $update: $source_model_dir -> $target_model_dir" >&2
+    cp -a "$source_model_dir" "$target_model_dir"
+}
+
+persist_pipeline_model_for_resume() {
+    local update="$1"
+    local total_updates="$2"
+    local source_model_dir="$3"
+    local target_model_dir target_step_dir
+
+    if [ "$PIPELINE_STORE_RESUME_MODEL_IN_GEN_RESULTS" != "true" ] || [ "$update" -ge "$total_updates" ]; then
+        printf "%s\n" "$source_model_dir"
+        return
+    fi
+
+    [ -d "$source_model_dir" ] || {
+        echo "ERROR: cannot persist missing resume model: $source_model_dir" >&2
+        exit 1
+    }
+
+    target_model_dir="$(pipeline_resume_model_dir "$update")"
+    target_step_dir="$(dirname "$target_model_dir")"
+    rm -rf "$target_step_dir"
+    mkdir -p "$target_step_dir"
+    echo "Moving resume model into gen_results: $source_model_dir -> $target_model_dir" >&2
+    mv "$source_model_dir" "$target_model_dir"
+    cleanup_old_gen_results_resume_models "$update"
+    printf "%s\n" "$target_model_dir"
+}
+
+cleanup_pipeline_gen_results_after_complete() {
+    [ "$PIPELINE_CLEANUP_GEN_RESULTS_ON_COMPLETE" = "true" ] || return 0
+    [ "$MULTI_STEP" -gt 1 ] || return 0
+
+    if [ -d "$(pipeline_resume_models_dir)" ]; then
+        echo "Deleting gen_results resume models after completed pipeline: $(pipeline_resume_models_dir)"
+        rm -rf "$(pipeline_resume_models_dir)"
+    fi
+
+    local ms_dir
+    for ms_dir in "$GEN_RESULTS_BASE_DIR"/epoch*/ms*; do
+        [ -d "$ms_dir" ] || continue
+        echo "Deleting completed multi-step gen_results data: $ms_dir"
+        rm -rf "$ms_dir"
+    done
+}
+
+write_pipeline_latest_model_state() {
+    local update="$1"
+    local total_updates="$2"
+    local batches_per_epoch="$3"
+    local model_path="$4"
+    local status="$5"
+    local epoch batch marker latest_file completed_file
+
+    epoch="$(((update - 1) / batches_per_epoch + 1))"
+    batch="$(((update - 1) % batches_per_epoch + 1))"
+    latest_file="$(pipeline_latest_model_state_file)"
+    completed_file="$(pipeline_completed_steps_file)"
+    marker="$(pipeline_done_marker "$update")"
+
+    mkdir -p "$(dirname "$latest_file")"
+    {
+        printf "latest_step=%s\n" "$update"
+        printf "total_steps=%s\n" "$total_updates"
+        printf "epoch=%s\n" "$epoch"
+        printf "batch=%s\n" "$batch"
+        printf "batch_id=%s\n" "$(format_pipeline_batch_id "$batch")"
+        printf "status=%s\n" "$status"
+        printf "model_path=%s\n" "$model_path"
+        printf "model_save_base_dir=%s\n" "$MODEL_SAVE_BASE_DIR"
+        printf "done_marker=%s\n" "$marker"
+        printf "updated_at=%s\n" "$(date +%Y-%m-%dT%H:%M:%S%z)"
+    } > "$latest_file"
+
+    if [ ! -s "$completed_file" ]; then
+        printf "step\tepoch\tbatch\tstatus\tmodel_path\n" > "$completed_file"
+    fi
+    awk -F "\t" -v step="$update" 'NR == 1 || $1 != step' "$completed_file" > "${completed_file}.tmp" 2>/dev/null || cp "$completed_file" "${completed_file}.tmp"
+    printf "%s\t%s\t%s\t%s\t%s\n" "$update" "$epoch" "$batch" "$status" "$model_path" >> "${completed_file}.tmp"
+    mv "${completed_file}.tmp" "$completed_file"
+}
+
+read_pipeline_latest_model_path_for_step() {
+    local expected_step="$1"
+    local latest_file latest_step latest_model
+    latest_file="$(pipeline_latest_model_state_file)"
+    [ -s "$latest_file" ] || return 1
+    latest_step="$(awk -F= '$1 == "latest_step" {print substr($0, index($0, "=") + 1); exit}' "$latest_file")"
+    latest_model="$(awk -F= '$1 == "model_path" {print substr($0, index($0, "=") + 1); exit}' "$latest_file")"
+    [ "$latest_step" = "$expected_step" ] || return 1
+    [ -n "$latest_model" ] || return 1
+    [ -d "$latest_model" ] || return 1
+    printf "%s\n" "$latest_model"
+}
+
+read_pipeline_done_model_path_for_step() {
+    local expected_step="$1"
+    local marker model_path marker_step
+    marker="$(pipeline_done_marker "$expected_step")"
+    [ -s "$marker" ] || return 1
+    marker_step="$(awk -F= '$1 == "step" {print substr($0, index($0, "=") + 1); exit}' "$marker")"
+    model_path="$(awk -F= '$1 == "model_path" {print substr($0, index($0, "=") + 1); exit}' "$marker")"
+    [ "$marker_step" = "$expected_step" ] || return 1
+    [ -n "$model_path" ] || return 1
+    [ -d "$model_path" ] || return 1
+    printf "%s\n" "$model_path"
 }
 
 pipeline_done_marker() {
@@ -1384,6 +1771,11 @@ mark_pipeline_update_done() {
         keep_status="prunable"
         if pipeline_should_keep_update "$update" "$total_updates"; then
             keep_status="kept"
+            archive_pipeline_keep_model "$update" "$total_updates" "$batches_per_epoch" "$model_dir"
+        fi
+        model_dir="$(persist_pipeline_model_for_resume "$update" "$total_updates" "$model_dir")"
+        if [ "$model_dir" = "$(pipeline_resume_model_dir "$update")" ]; then
+            keep_status="gen_results_resume"
         fi
     fi
     marker="$(pipeline_done_marker "$update")"
@@ -1394,34 +1786,85 @@ mark_pipeline_update_done() {
         printf "status=%s\n" "$keep_status"
         printf "model_path=%s\n" "$model_dir"
     } > "$marker"
+    write_pipeline_latest_model_state "$update" "$total_updates" "$batches_per_epoch" "$model_dir" "$keep_status"
+}
+
+archive_or_delete_pipeline_path() {
+    local src="$1"
+    local label="$2"
+
+    [ -e "$src" ] || return 0
+    case "$src" in
+        "$MODEL_SAVE_BASE_DIR"/epoch*/ms*/batch*|"$MODEL_SAVE_BASE_DIR"/epoch*/ms*/batch*/*) ;;
+        *) echo "WARNING: refusing to prune unexpected model path: $src" >&2; return 0 ;;
+    esac
+
+    if [ "$PIPELINE_ARCHIVE_PRUNED_MODE" = "delete" ]; then
+        echo "Deleting $label: $src"
+        rm -rf "$src"
+        return
+    fi
+
+    if [ "$PIPELINE_ARCHIVE_PRUNED_MODE" != "move" ]; then
+        echo "WARNING: unknown PIPELINE_ARCHIVE_PRUNED_MODE=$PIPELINE_ARCHIVE_PRUNED_MODE; leaving $src" >&2
+        return
+    fi
+
+    local rel dst
+    rel="${src#$MODEL_SAVE_BASE_DIR/}"
+    dst="$PIPELINE_ARCHIVE_MODEL_DIR/$(basename "$MODEL_SAVE_BASE_DIR")/$rel"
+    mkdir -p "$(dirname "$dst")"
+    if [ -e "$dst" ]; then
+        local suffix
+        suffix="$(date +%Y%m%d-%H%M%S)"
+        dst="${dst}.moved_${suffix}"
+    fi
+    echo "Archiving $label: $src -> $dst"
+    mv "$src" "$dst"
 }
 
 prune_pipeline_models() {
     local current_update="$1"
     local total_updates="$2"
     local batches_per_epoch="$3"
-    local update dir
+    local update dir current_dir child
 
-    if [ "$current_update" -le 1 ]; then
-        return
-    fi
-    for update in $(seq 1 $((current_update - 1))); do
-        if pipeline_should_keep_update "$update" "$total_updates"; then
-            continue
+    case "$PIPELINE_LOCAL_KEEP_POLICY" in
+        last_hf_only|rolling_last_hf) ;;
+        all_kept)
+        if [ "$current_update" -le 1 ]; then
+            return
         fi
-        dir="$(model_dir_for_global_update "$update" "$batches_per_epoch")"
-        case "$dir" in
-            "$MODEL_SAVE_BASE_DIR"/epoch*/ms*/batch*)
-                if [ -d "$dir" ]; then
-                    echo "Pruning non-kept pipeline model step $update: $dir"
-                    rm -rf "$dir"
-                fi
-                ;;
-            *)
-                echo "WARNING: refusing to prune unexpected model dir: $dir" >&2
-                ;;
-        esac
-    done
+        for update in $(seq 1 $((current_update - 1))); do
+            if pipeline_should_keep_update "$update" "$total_updates"; then
+                continue
+            fi
+            dir="$(model_dir_for_global_update "$update" "$batches_per_epoch")"
+            archive_or_delete_pipeline_path "$dir" "non-kept pipeline model step $update"
+        done
+        return ;;
+        *) echo "WARNING: unknown PIPELINE_LOCAL_KEEP_POLICY=$PIPELINE_LOCAL_KEEP_POLICY; using last_hf_only" >&2 ;;
+    esac
+
+    # Local policy: after step N is complete, local storage keeps only
+    # step N's hf_merged. Older batch directories are deleted by default, and
+    # the current batch's FSDP checkpoint is removed after successful HF export.
+    current_dir="$(model_dir_for_global_update "$current_update" "$batches_per_epoch")"
+
+    if [ "$current_update" -gt 1 ]; then
+        for update in $(seq 1 $((current_update - 1))); do
+            dir="$(model_dir_for_global_update "$update" "$batches_per_epoch")"
+            archive_or_delete_pipeline_path "$dir" "older pipeline model step $update"
+        done
+    fi
+
+    if [ -d "$current_dir" ]; then
+        for child in "$current_dir"/*; do
+            [ -e "$child" ] || continue
+            [ "$(basename "$child")" = "hf_merged" ] && continue
+            archive_or_delete_pipeline_path "$child" "current pipeline auxiliary checkpoint step $current_update"
+        done
+    fi
 }
 
 link_pipeline_final_model_alias() {
@@ -1471,6 +1914,12 @@ cleanup_pipeline_batch_data() {
         return
     fi
     case "$data_dir" in
+        */epoch1/ms*/batch00001)
+            echo "Preserving step1 pipeline batch parquet cache for response reuse: $data_dir"
+            return
+            ;;
+    esac
+    case "$data_dir" in
         "$GEN_RESULTS_BASE_DIR"/epoch*/ms*/batch*)
             if [ -d "$data_dir" ]; then
                 echo "Cleaning pipeline batch parquet cache: $data_dir"
@@ -1502,16 +1951,24 @@ resolve_update_model_path() {
         prev_batch="$batches_per_epoch"
     fi
 
-    local prev_model_dir
-    prev_model_dir="$(update_model_save_dir "$prev_epoch" "$prev_batch")"
-    local prev_model_path="$prev_model_dir/hf_merged"
+    local prev_update
+    prev_update=$(((epoch - 1) * batches_per_epoch + batch_index - 1))
 
-    if [ ! -d "$prev_model_path" ]; then
-        echo "ERROR: Previous policy model not found: $prev_model_path"
-        exit 1
+    local done_model_path marker marker_model_path
+    marker="$(pipeline_done_marker "$prev_update")"
+    done_model_path="$(read_pipeline_done_model_path_for_step "$prev_update" || true)"
+    if [ -n "$done_model_path" ]; then
+        echo "$done_model_path"
+        return
     fi
 
-    echo "$prev_model_path"
+    marker_model_path="$(awk -F= '$1 == "model_path" {print substr($0, index($0, "=") + 1); exit}' "$marker" 2>/dev/null || true)"
+    echo "ERROR: cannot resolve previous policy model from gen_results step marker." >&2
+    echo "       Required previous step: $prev_update" >&2
+    echo "       Step marker: $marker" >&2
+    echo "       Recorded model_path: ${marker_model_path:-missing}" >&2
+    echo "       Resume state must be fixed in /data/verl/gen_results/gen_uid-...; no local batch-path fallback is used." >&2
+    exit 1
 }
 
 resolve_epoch_model_path() {
@@ -1574,7 +2031,7 @@ print_base_configuration() {
         echo "  Multi-step Tag:  $MULTISTEP_TAG"
         echo "  Auto Resume:     $PIPELINE_AUTO_RESUME"
         echo "  Resume Mode:     $PIPELINE_RESUME_MODE"
-        echo "  Keep Models:     ${PIPELINE_KEEP_STEPS:-every ${PIPELINE_KEEP_INTERVAL} plus final} (base step 0 is recorded, not copied)"
+        echo "  Keep Models:     local=${PIPELINE_LOCAL_KEEP_POLICY}, planned=${PIPELINE_KEEP_STEPS:-every ${PIPELINE_KEEP_INTERVAL} plus final} (base step 0 is recorded, not copied)"
     else
         echo "  Multi-step:      disabled; all samples (one-step)"
     fi
@@ -1743,14 +2200,19 @@ run_epoch() {
         else
             echo "Stage 2 $PROMPT_MODE_TAG data not found. Generating..."
 
-            local stage1_output="$current_gen_results_dir/deepscaleR_stage1_responses.parquet"
-            local stage1_prompts="$current_gen_results_dir/deepscaleR_stage1_prompts.parquet"
+            local stage1_output="$current_gen_results_dir/${TASK_INTERMEDIATE_PREFIX}1_responses.parquet"
+            local stage1_prompts="$current_gen_results_dir/${TASK_INTERMEDIATE_PREFIX}1_prompts.parquet"
 
-            if file_exists_and_nonempty "$stage1_output"; then
-                echo "  Stage 1 already done: $stage1_output"
+            if reuse_ms1_responses_if_available stage2 "$current_data_path"; then
+                echo "  [step1 reuse] Stage 2 $PROMPT_MODE_TAG data ready: $current_data_path"
             else
-                echo "  [Stage 1] Generating initial responses..."
-                prepare_stage1_prompts "$stage1_prompts" "$pipeline_batch_start" "$pipeline_current_batch_size"
+                if file_exists_and_nonempty "$stage1_output"; then
+                    echo "  Stage 1 already done: $stage1_output"
+                elif reuse_ms1_responses_if_available stage1 "$stage1_output"; then
+                    echo "  [step1 reuse] Stage 1 data ready: $stage1_output"
+                else
+                    echo "  [Stage 1] Generating initial responses..."
+                    prepare_stage1_prompts "$stage1_prompts" "$pipeline_batch_start" "$pipeline_current_batch_size"
 
                 if [ "$RESIDENT_STUDENT_ROLLOUT" = "true" ]; then
                     ensure_resident_y_o_server
@@ -1764,7 +2226,7 @@ run_epoch() {
                         --top_p 0.95 \
                         --max_tokens "$MAX_RESPONSE_LENGTH"
                 else
-                    python3 -m verl.trainer.main_generation_server \
+                    env -u PYTORCH_CUDA_ALLOC_CONF python3 -m verl.trainer.main_generation_server \
                         trainer.nnodes="${NNODES}" \
                         trainer.n_gpus_per_node="${NGPUS_PER_NODE}" \
                         actor_rollout_ref.model.path="${current_model_path}" \
@@ -1784,22 +2246,23 @@ run_epoch() {
                         data.train_files="['${stage1_prompts}']" \
                         data.prompt_key=prompt \
                         +data.output_path="${stage1_output}"
+                    fi
                 fi
-            fi
 
-            sleep_resident_y_o_server
+                sleep_resident_y_o_server
 
-            # Score stage1 responses and backfill extra_info.reward.
-            # Required by T4 (LOG_DIFFICULTY_BUCKETS=true) and downstream reward
-            # filtering (FORWARD_FILTER_STAGE2=true). Idempotent: no-op if
-            # reward field is already populated.
-            if [ "${SCORE_STAGE1:-true}" = "true" ]; then
+            # Score stage1 responses only when a downstream feature needs
+            # extra_info.reward. Code scoring executes tests, so it is intentionally
+            # skipped for the common rewrite_all path.
+            if should_score_stage1; then
                 echo "  [Stage 1 score] Ensuring extra_info.reward is populated..."
                 python3 -m recipe.opd.dataset.score_stage1_reward \
                     --parquet "$stage1_output"
+            else
+                echo "  [Stage 1 score] Skipping; no enabled downstream feature needs extra_info.reward."
             fi
 
-            local stage2_prompts="$current_gen_results_dir/deepscaleR_stage2_${PROMPT_MODE_TAG}_${DISTILL_MODE}_${TEACHER_MODEL_NAME}_prompts.parquet"
+            local stage2_prompts="$current_gen_results_dir/${TASK_INTERMEDIATE_PREFIX}2_${PROMPT_MODE_TAG}_${DISTILL_MODE}_${TEACHER_MODEL_NAME}_prompts.parquet"
             if file_exists_and_nonempty "$stage2_prompts"; then
                 echo "  Stage 2 prompts already prepared: $stage2_prompts"
             else
@@ -1810,6 +2273,7 @@ run_epoch() {
                 # independent and goes to run_training.py, not here.
                 python3 "$PIPELINE_DIR/y_r_prepare.py" \
                     --stage1_output "$stage1_output" \
+                    --task "$TASK" \
                     --distill_mode "$DISTILL_MODE" \
                     --output_file "$stage2_prompts"
             fi
@@ -1822,20 +2286,20 @@ run_epoch() {
                 echo "  [Stage 2] (OPD) Using TEACHER model for y_r generation: $stage2_gen_model_path"
             fi
             echo "  [Stage 2] Generating ${PROMPT_MODE_TAG} responses..."
-            if [ "$RESIDENT_STUDENT_ROLLOUT" = "true" ] && [ "$DISTILL_MODE" = "opsd" ]; then
-                ensure_resident_y_o_server
-                python3 -m recipe.opd.resident_y_o_generate \
-                    --manifest "$RESIDENT_YO_MANIFEST" \
-                    --input "$stage2_prompts" \
-                    --output "$current_data_path" \
-                    --prompt_key prompt \
-                    --model_path "$MODEL_PATH" \
-                    --temperature 0.6 \
-                    --top_p 0.95 \
-                    --max_tokens "$MAX_RESPONSE_LENGTH"
-                sleep_resident_y_o_server
-            else
-                python3 -m verl.trainer.main_generation_server \
+                if [ "$RESIDENT_STUDENT_ROLLOUT" = "true" ] && [ "$DISTILL_MODE" = "opsd" ]; then
+                    ensure_resident_y_o_server
+                    python3 -m recipe.opd.resident_y_o_generate \
+                        --manifest "$RESIDENT_YO_MANIFEST" \
+                        --input "$stage2_prompts" \
+                        --output "$current_data_path" \
+                        --prompt_key prompt \
+                        --model_path "$MODEL_PATH" \
+                        --temperature 0.6 \
+                        --top_p 0.95 \
+                        --max_tokens "$MAX_RESPONSE_LENGTH"
+                    sleep_resident_y_o_server
+                else
+                    env -u PYTORCH_CUDA_ALLOC_CONF python3 -m verl.trainer.main_generation_server \
                     trainer.nnodes="${NNODES}" \
                     trainer.n_gpus_per_node="${NGPUS_PER_NODE}" \
                     actor_rollout_ref.model.path="${stage2_gen_model_path}" \
@@ -1852,9 +2316,10 @@ run_epoch() {
                     actor_rollout_ref.rollout.max_num_batched_tokens="${STAGE2_ROLLOUT_MAX_NUM_BATCHED_TOKENS}" \
                     actor_rollout_ref.rollout.name=vllm \
                     actor_rollout_ref.rollout.n=1 \
-                    data.train_files="['${stage2_prompts}']" \
-                    data.prompt_key=prompt \
-                    +data.output_path="${current_data_path}"
+                        data.train_files="['${stage2_prompts}']" \
+                        data.prompt_key=prompt \
+                        +data.output_path="${current_data_path}"
+                fi
             fi
         fi
 
@@ -1886,7 +2351,7 @@ run_epoch() {
         # into "everything = hard". score_stage1_reward.py already populated
         # stage1; backfill propagates it into stage2.
         if [ "$LOG_DIFFICULTY_BUCKETS" = "true" ]; then
-            local stage1_for_backfill="$current_gen_results_dir/deepscaleR_stage1_responses.parquet"
+            local stage1_for_backfill="$current_gen_results_dir/${TASK_INTERMEDIATE_PREFIX}1_responses.parquet"
             if [ ! -f "$stage1_for_backfill" ]; then
                 echo "  [T4 backfill] WARNING: stage1 parquet not found at $stage1_for_backfill;"
                 echo "                training will fail at dataset init unless DATA_PATH points to a"
@@ -1908,10 +2373,12 @@ run_epoch() {
     else
         if file_exists_and_nonempty "$current_data_path"; then
             echo "Found existing Stage 1 data: $current_data_path"
+        elif reuse_ms1_responses_if_available stage1 "$current_data_path"; then
+            echo "  [step1 reuse] Stage 1 data ready: $current_data_path"
         else
             echo "Stage 1 data not found. Generating..."
 
-            local stage1_prompts="$current_gen_results_dir/deepscaleR_stage1_prompts.parquet"
+            local stage1_prompts="$current_gen_results_dir/${TASK_INTERMEDIATE_PREFIX}1_prompts.parquet"
 
             prepare_stage1_prompts "$stage1_prompts" "$pipeline_batch_start" "$pipeline_current_batch_size"
 
@@ -1927,7 +2394,7 @@ run_epoch() {
                     --top_p 0.95 \
                     --max_tokens "$MAX_RESPONSE_LENGTH"
             else
-                python3 -m verl.trainer.main_generation_server \
+                env -u PYTORCH_CUDA_ALLOC_CONF python3 -m verl.trainer.main_generation_server \
                     trainer.nnodes="${NNODES}" \
                     trainer.n_gpus_per_node="${NGPUS_PER_NODE}" \
                     actor_rollout_ref.model.path="${current_model_path}" \
@@ -1952,13 +2419,15 @@ run_epoch() {
 
         sleep_resident_y_o_server
 
-        # Score stage1 responses and backfill extra_info.reward.
-        # Required by T4 (LOG_DIFFICULTY_BUCKETS=true), and harmless otherwise.
-        # Idempotent: no-op if the reward field is already populated.
-        if [ "${SCORE_STAGE1:-true}" = "true" ]; then
+        # Score stage1 responses only when a downstream feature needs
+        # extra_info.reward. Code scoring executes tests, so it is intentionally
+        # skipped for the common direct training path.
+        if should_score_stage1; then
             echo "  [Stage 1 score] Ensuring extra_info.reward is populated..."
             python3 -m recipe.opd.dataset.score_stage1_reward \
                 --parquet "$current_data_path"
+        else
+            echo "  [Stage 1 score] Skipping; no enabled downstream feature needs extra_info.reward."
         fi
     fi
 
@@ -1966,6 +2435,7 @@ run_epoch() {
     echo "Training data ready: $current_data_path"
 
     cat > "$current_output_dir/training_config.yaml" << EOF
+task: $TASK
 pipeline_epoch: $epoch
 pipeline_total_epochs: $TOTAL_EPOCHS
 multi_step: $MULTI_STEP
@@ -1977,7 +2447,14 @@ pipeline_total_updates: $total_updates
 pipeline_multistep_tag: ${MULTISTEP_TAG:-null}
 pipeline_keep_steps: ${PIPELINE_KEEP_STEPS:-null}
 pipeline_keep_interval: ${PIPELINE_KEEP_INTERVAL:-null}
+pipeline_local_keep_policy: ${PIPELINE_LOCAL_KEEP_POLICY}
+pipeline_archive_pruned_mode: ${PIPELINE_ARCHIVE_PRUNED_MODE}
+pipeline_archive_model_root: ${PIPELINE_ARCHIVE_MODEL_ROOT}
+pipeline_archive_model_dir: ${PIPELINE_ARCHIVE_MODEL_DIR}
+pipeline_archive_keep_mode: ${PIPELINE_ARCHIVE_KEEP_MODE}
 pipeline_cleanup_batch_data: $PIPELINE_CLEANUP_BATCH_DATA
+pipeline_store_resume_model_in_gen_results: $PIPELINE_STORE_RESUME_MODEL_IN_GEN_RESULTS
+pipeline_cleanup_gen_results_on_complete: $PIPELINE_CLEANUP_GEN_RESULTS_ON_COMPLETE
 pipeline_auto_resume: $PIPELINE_AUTO_RESUME
 pipeline_resume_mode: $PIPELINE_RESUME_MODE
 full_stage1_prompts: ${FULL_STAGE1_PROMPTS:-null}
@@ -2062,6 +2539,7 @@ EOF
         $RECIPE_DIR/run_training.py \
         --nnodes $NNODES \
         --n_gpus_per_node $NGPUS_PER_NODE \
+        --task $TASK \
         --distill_mode $DISTILL_MODE \
         --kl_type $KL_TYPE \
         --kl_method $KL_METHOD \
@@ -2189,21 +2667,23 @@ EOF_TORCHRUN
             exit 1
         fi
 
-        # --- 2. Verify each requested eval dataset parquet is on disk ---
-        local _missing_ds=""
-        local IFS_BAK="$IFS"
-        IFS=','
-        for _ds in $EVAL_DATASETS; do
-            local _ds_file="$EVAL_DATASETS_DIR/${_ds}/${_ds}_test.parquet"
-            if ! file_exists_and_nonempty "$_ds_file"; then
-                _missing_ds="$_missing_ds $_ds"
+        # --- 2. Verify requested math eval parquet files. Code eval uses framework-managed datasets. ---
+        if [ "$TASK" = "math" ]; then
+            local _missing_ds=""
+            local IFS_BAK="$IFS"
+            IFS=','
+            for _ds in $EVAL_DATASETS; do
+                local _ds_file="$EVAL_DATASETS_DIR/${_ds}/${_ds}_test.parquet"
+                if ! file_exists_and_nonempty "$_ds_file"; then
+                    _missing_ds="$_missing_ds $_ds"
+                fi
+            done
+            IFS="$IFS_BAK"
+            if [ -n "$_missing_ds" ]; then
+                echo "ERROR: missing eval dataset parquet under $EVAL_DATASETS_DIR:$_missing_ds"
+                echo "       Expected layout: \$EVAL_DATASETS_DIR/<name>/<name>_test.parquet"
+                exit 1
             fi
-        done
-        IFS="$IFS_BAK"
-        if [ -n "$_missing_ds" ]; then
-            echo "ERROR: missing eval dataset parquet under $EVAL_DATASETS_DIR:$_missing_ds"
-            echo "       Expected layout: \$EVAL_DATASETS_DIR/<name>/<name>_test.parquet"
-            exit 1
         fi
 
         # --- 3. Wait for training GPU memory to be released ---
@@ -2242,11 +2722,17 @@ EOF_TORCHRUN
         local _datasets_space
         _datasets_space=$(echo "$EVAL_DATASETS" | tr ',' ' ')
 
-        local MATH_EVAL_DIR="$VERL_ROOT/recipe/math_evaluation"
+        local EVAL_RECIPE_DIR="$VERL_ROOT/recipe/math_evaluation"
+        local EVAL_BENCHMARK_SCRIPT="benchmark_kl_model.sh"
+        if [ "$TASK" = "code" ]; then
+            EVAL_RECIPE_DIR="$VERL_ROOT/recipe/code_evaluation"
+            EVAL_BENCHMARK_SCRIPT="benchmark_code_model.sh"
+        fi
 
         echo ""
         echo "=========================================="
-        echo "Running evaluation via benchmark_kl_model.sh"
+        echo "Running evaluation via $EVAL_BENCHMARK_SCRIPT"
+        echo "  Task:     $TASK"
         echo "  Model:    $eval_model_path"
         echo "  Datasets: $_datasets_space"
         echo "=========================================="
@@ -2254,7 +2740,7 @@ EOF_TORCHRUN
         if [ -n "$pipeline_batch_index" ]; then
             _eval_model_name="${_eval_model_name}_step$(format_pipeline_batch_id "$update_index")of$(format_pipeline_batch_id "$total_updates")"
         fi
-        local _eval_output_dir="$VERL_ROOT/gen_results/eval/${_eval_model_name}"
+        local _eval_output_dir="$VERL_ROOT/gen_results/eval/${TASK}/${_eval_model_name}"
 
         (
             cd "$VERL_ROOT"
@@ -2269,7 +2755,7 @@ EOF_TORCHRUN
             EVAL_MODEL_NAME="${EVAL_MODEL_NAME:-$_eval_model_name}" \
             EVAL_RESULTS_FILE="${EVAL_RESULTS_FILE:-$RESULTS_FILE}" \
             EVAL_OUTPUT_DIR="${EVAL_OUTPUT_DIR:-$_eval_output_dir}" \
-            bash "$MATH_EVAL_DIR/benchmark_kl_model.sh" "$eval_model_path"
+            bash "$EVAL_RECIPE_DIR/$EVAL_BENCHMARK_SCRIPT" "$eval_model_path"
         ) 2>&1 | tee "$current_output_dir/logs/eval_$(date +%Y%m%d_%H%M%S).log"
     fi
 
@@ -2288,11 +2774,112 @@ EOF_TORCHRUN
     fi
 }
 
+format_duration_seconds() {
+    local total_seconds="${1:-0}"
+    local hours=$((total_seconds / 3600))
+    local minutes=$(((total_seconds % 3600) / 60))
+    local seconds=$((total_seconds % 60))
+    printf '%02dh:%02dm:%02ds' "$hours" "$minutes" "$seconds"
+}
+
+ntfy_send() {
+    local title="$1"
+    local tags="$2"
+    local message="$3"
+
+    if [ "${NTFY_ENABLED:-true}" != "true" ]; then
+        return 0
+    fi
+    if ! command -v curl >/dev/null 2>&1; then
+        echo "WARNING: ntfy notification skipped because curl is not available" >&2
+        return 0
+    fi
+
+    curl -fsS \
+        --retry 2 \
+        --connect-timeout 5 \
+        --max-time "${NTFY_TIMEOUT_SECONDS:-10}" \
+        -H "Title: $title" \
+        -H "Tags: $tags" \
+        --data-binary "$message" \
+        "$NTFY_URL" >/dev/null 2>&1 || \
+        echo "WARNING: failed to send ntfy notification to $NTFY_URL" >&2
+}
+
+notify_training_start() {
+    NTFY_JOB_STARTED="true"
+    NTFY_JOB_START_TS=$(date +%s)
+    local host
+    host=$(hostname 2>/dev/null || echo unknown)
+    local message
+    message=$(cat << EOF
+Status: started
+Host: $host
+Run: $MODEL_RUN_NAME
+Model: $MODEL_NAME
+Teacher: $TEACHER_MODEL_NAME
+Mode: $DISTILL_FAMILY $KL_TYPE/$KL_METHOD $Y_MODE
+Multi-step: $MULTI_STEP
+Eval: $RUN_EVAL_AFTER_TRAINING
+EOF
+)
+    ntfy_send "OPD training started: $MODEL_NAME" "rocket" "$message"
+}
+
+notify_training_exit() {
+    local status="$1"
+    if [ "${NTFY_JOB_STARTED:-false}" != "true" ]; then
+        return 0
+    fi
+
+    local end_ts
+    end_ts=$(date +%s)
+    local duration
+    duration=$(format_duration_seconds $((end_ts - NTFY_JOB_START_TS)))
+    local host
+    host=$(hostname 2>/dev/null || echo unknown)
+    local state title tags
+    if [ "$status" -eq 0 ]; then
+        state="finished"
+        title="OPD training finished: $MODEL_NAME"
+        tags="white_check_mark"
+    else
+        state="failed"
+        title="OPD training failed: $MODEL_NAME"
+        tags="warning"
+    fi
+
+    local message
+    message=$(cat << EOF
+Status: $state
+Exit code: $status
+Duration: $duration
+Host: $host
+Run: $MODEL_RUN_NAME
+Model: $MODEL_NAME
+Teacher: $TEACHER_MODEL_NAME
+Mode: $DISTILL_FAMILY $KL_TYPE/$KL_METHOD $Y_MODE
+Multi-step: $MULTI_STEP
+Eval: $RUN_EVAL_AFTER_TRAINING
+EOF
+)
+    ntfy_send "$title" "$tags" "$message"
+}
+
+on_training_exit() {
+    local status="$?"
+    notify_training_exit "$status"
+    exit "$status"
+}
+
 # =============================================================================
 # Main
 # =============================================================================
 
+trap on_training_exit EXIT
+
 print_base_configuration
+notify_training_start
 
 if [ "$TOTAL_EPOCHS" -gt 1 ] && [ -n "$DATA_PATH" ]; then
     echo "WARNING: DATA_PATH is manually set and will be reused for every epoch: $DATA_PATH"
@@ -2346,6 +2933,11 @@ pipeline_auto_resume: $PIPELINE_AUTO_RESUME
 pipeline_resume_mode: $PIPELINE_RESUME_MODE
 pipeline_keep_steps: ${PIPELINE_KEEP_STEPS:-}
 pipeline_keep_interval: ${PIPELINE_KEEP_INTERVAL:-}
+pipeline_local_keep_policy: ${PIPELINE_LOCAL_KEEP_POLICY}
+pipeline_archive_pruned_mode: ${PIPELINE_ARCHIVE_PRUNED_MODE}
+pipeline_archive_model_root: ${PIPELINE_ARCHIVE_MODEL_ROOT}
+pipeline_archive_model_dir: ${PIPELINE_ARCHIVE_MODEL_DIR}
+pipeline_archive_keep_mode: ${PIPELINE_ARCHIVE_KEEP_MODE}
 pipeline_cleanup_batch_data: $PIPELINE_CLEANUP_BATCH_DATA
 pipeline_temp_model_dir: $PIPELINE_TEMP_MODEL_DIR
 pipeline_final_alias_dir: $(pipeline_final_alias_dir)
@@ -2422,7 +3014,7 @@ if [ "$MULTI_STEP" -gt 0 ]; then
     echo "Multi-step tag:       $MULTISTEP_TAG"
     echo "Auto resume:          $PIPELINE_AUTO_RESUME"
     echo "Resume mode:          $PIPELINE_RESUME_MODE"
-    echo "Model keep policy:    ${PIPELINE_KEEP_STEPS:-every ${PIPELINE_KEEP_INTERVAL} plus final}"
+    echo "Model keep policy:    local=${PIPELINE_LOCAL_KEEP_POLICY}, planned=${PIPELINE_KEEP_STEPS:-every ${PIPELINE_KEEP_INTERVAL} plus final}, archive=${PIPELINE_ARCHIVE_PRUNED_MODE}:${PIPELINE_ARCHIVE_MODEL_DIR}"
     echo "=========================================="
 
     ensure_full_stage1_prompts
@@ -2516,6 +3108,7 @@ if [ "$MULTI_STEP" -gt 0 ]; then
         FINAL_OUTPUT_DIR="$(update_output_dir "$TOTAL_EPOCHS" "$PIPELINE_BATCHES_PER_EPOCH")"
         FINAL_MODEL_SAVE_DIR="$(update_model_save_dir "$TOTAL_EPOCHS" "$PIPELINE_BATCHES_PER_EPOCH")"
         link_pipeline_final_model_alias "$FINAL_MODEL_SAVE_DIR"
+        cleanup_pipeline_gen_results_after_complete
     fi
 else
     for EPOCH in $(seq 1 "$TOTAL_EPOCHS"); do
@@ -2568,7 +3161,11 @@ if [ "$SAVE_MERGED_MODEL" = "true" ]; then
     if [ -e "$(pipeline_final_alias_dir)/hf_merged" ]; then
         echo "Final Alias: $(pipeline_final_alias_dir)/hf_merged"
     fi
-    echo "Benchmark: bash $VERL_ROOT/recipe/math_evaluation/benchmark_kl_model.sh $FINAL_MODEL_SAVE_DIR/hf_merged"
+    if [ "$TASK" = "code" ]; then
+        echo "Benchmark: TASK=code bash $VERL_ROOT/recipe/code_evaluation/benchmark_code_model.sh $FINAL_MODEL_SAVE_DIR/hf_merged"
+    else
+        echo "Benchmark: bash $VERL_ROOT/recipe/math_evaluation/benchmark_kl_model.sh $FINAL_MODEL_SAVE_DIR/hf_merged"
+    fi
 else
     echo "FSDP Checkpoints: $FINAL_MODEL_SAVE_DIR/global_step_*"
 fi

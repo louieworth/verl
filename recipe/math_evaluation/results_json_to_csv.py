@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Convert math evaluation results JSON into a comparison CSV.
+"""Convert math evaluation results JSON into comparison CSV files.
 
-The JSON remains the source of truth. This script derives a flat CSV with one
+The JSON remains the source of truth. This script derives a flat table with one
 row per evaluated model and stable metadata columns parsed from the OPD/OPSD
-model key. When a matching base results file exists, the base model is written
-as the first row.
+model key. The exported metric columns are intentionally compact: five avg@16
+columns, five pass@8 columns, then five pass@16 columns for the canonical math
+eval datasets.
 """
 
 from __future__ import annotations
@@ -22,20 +23,31 @@ from typing import Any
 
 META_COLUMNS = [
     "model",
+    "task",
+    "is_lora",
     "teacher",
     "y_mode",
+    "kl_type",
     "kl_method",
-    "clip",
-    "top_k",
+    "clip_ratio",
+    "top_K",
     "multi_turn",
 ]
 
-DATASET_ORDER = [
+SUMMARY_DATASETS = [
     "aime24",
     "aime25",
     "hmmt25",
     "beyondaime",
     "amobench",
+]
+
+AVG16_COLUMNS = [f"{dataset}_avg@16" for dataset in SUMMARY_DATASETS]
+PASS8_COLUMNS = [f"{dataset}_pass@8" for dataset in SUMMARY_DATASETS]
+PASS16_COLUMNS = [f"{dataset}_pass@16" for dataset in SUMMARY_DATASETS]
+SUMMARY_COLUMNS = AVG16_COLUMNS + PASS8_COLUMNS + PASS16_COLUMNS
+
+DATASET_ORDER = SUMMARY_DATASETS + [
     "math500",
     "gsm8k",
     "openai/gsm8k",
@@ -61,6 +73,7 @@ def load_results(path: str | os.PathLike[str] | None) -> OrderedDict[str, dict[s
 
 def default_csv_path(results_file: str | os.PathLike[str]) -> str:
     return str(Path(results_file).with_suffix(".csv"))
+
 
 
 def default_base_results_file(results_file: str | os.PathLike[str], base_model_name: str | None = None) -> str | None:
@@ -105,6 +118,7 @@ def metric_sort_key(metric_name: str) -> tuple[int, int, str]:
 
 
 def collect_metric_columns(*result_sets: OrderedDict[str, dict[str, Any]]) -> list[str]:
+    # Kept for compatibility with older callers; exports now use SUMMARY_COLUMNS.
     metric_names: set[str] = set()
     for results in result_sets:
         for entry in results.values():
@@ -119,19 +133,36 @@ def collect_metric_columns(*result_sets: OrderedDict[str, dict[str, Any]]) -> li
 def parse_model_key(model_key: str, fallback_model: str | None = None) -> dict[str, str]:
     row = {
         "model": fallback_model or "",
+        "task": "",
+        "is_lora": "",
         "teacher": "",
         "y_mode": "",
+        "kl_type": "",
         "kl_method": "",
-        "clip": "",
-        "top_k": "",
+        "clip_ratio": "",
+        "top_K": "",
         "multi_turn": "",
     }
 
+    normalized_key = model_key.upper()
+    if "_MATH_" in normalized_key:
+        row["task"] = "math"
+    elif "_CODE_" in normalized_key:
+        row["task"] = "code"
+
+    if "NO_LORA" in normalized_key or model_key.endswith("_base"):
+        row["is_lora"] = "false"
+    elif "LORA" in normalized_key:
+        row["is_lora"] = "true"
+
     if model_key.endswith("_base"):
-        row["model"] = model_key[: -len("_base")]
+        base_name = model_key[: -len("_base")]
+        base_name = re.sub(r"_(MATH|CODE)$", "", base_name, flags=re.IGNORECASE)
+        row["model"] = base_name
         row["teacher"] = "base"
+        row["task"] = row["task"] or "math"
         row["y_mode"] = "base"
-        row["kl_method"] = "base"
+        row["kl_type"] = "base"
         return row
 
     parts = model_key.split("_")
@@ -148,16 +179,17 @@ def parse_model_key(model_key: str, fallback_model: str | None = None) -> dict[s
     elif "_y_r_" in model_key:
         row["y_mode"] = "y_r"
 
-    kl_match = re.search(r"_kl_([^_]+(?:_[^_]+)*)_clip", model_key)
+    kl_match = re.search(r"_kl_([^_]+)(?:_([^_]+(?:_[^_]+)*))?_clip", model_key)
     if kl_match:
-        row["kl_method"] = kl_match.group(1)
+        row["kl_type"] = kl_match.group(1)
+        row["kl_method"] = kl_match.group(2) or ""
 
     clip_match = re.search(r"_clip([^_]+)", model_key)
     if clip_match:
-        row["clip"] = parse_clip_value(clip_match.group(1))
+        row["clip_ratio"] = parse_clip_value(clip_match.group(1))
 
     topk_match = re.search(r"_topk([0-9]+)", model_key)
-    row["top_k"] = topk_match.group(1) if topk_match else "0"
+    row["top_K"] = topk_match.group(1) if topk_match else "0"
 
     ms_match = re.search(r"_ms([0-9]+)(?:_|$)", model_key)
     if ms_match:
@@ -175,10 +207,15 @@ def rows_for_results(
     rows = []
     for model_key, entry in results.items():
         row = parse_model_key(model_key, fallback_model=fallback_model)
-        for metric in metric_columns:
-            row[metric] = format_scalar(entry.get(metric, ""))
+        for dataset in SUMMARY_DATASETS:
+            row[f"{dataset}_avg@16"] = format_scalar(entry.get(f"{dataset}_avg_pass1_generation_pass_16", ""))
+        for dataset in SUMMARY_DATASETS:
+            row[f"{dataset}_pass@8"] = format_scalar(entry.get(f"{dataset}_pass8_generation_pass_16", ""))
+        for dataset in SUMMARY_DATASETS:
+            row[f"{dataset}_pass@16"] = format_scalar(entry.get(f"{dataset}_pass16_generation_pass_16", ""))
         rows.append(row)
     return rows
+
 
 
 def write_results_csv(
@@ -194,7 +231,7 @@ def write_results_csv(
 
     results = load_results(results_file)
     base_results = load_results(base_results_file)
-    metric_columns = collect_metric_columns(base_results, results)
+    metric_columns = SUMMARY_COLUMNS
     fieldnames = META_COLUMNS + metric_columns
 
     rows: list[dict[str, Any]] = []
@@ -218,11 +255,12 @@ def write_results_csv(
     finally:
         if os.path.exists(tmp):
             os.unlink(tmp)
+
     return output_file
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Convert results JSON to a comparison CSV.")
+    parser = argparse.ArgumentParser(description="Convert results JSON to comparison CSV files.")
     parser.add_argument("--results_file", required=True)
     parser.add_argument("--output_file", default=None)
     parser.add_argument("--base_results_file", default=None)

@@ -18,6 +18,12 @@ GENERATION_SERVER_ENV_VARS = {
     "TOKENIZERS_PARALLELISM": "true",
     "NCCL_DEBUG": "WARN",
     "VLLM_USE_V1": "1",
+    # Disable OTLP exporters in Ray/vLLM actors. The grpc/opentelemetry-cpp
+    # metric exporter can segfault in worker background threads.
+    "OTEL_SDK_DISABLED": "true",
+    "OTEL_METRICS_EXPORTER": "none",
+    "OTEL_TRACES_EXPORTER": "none",
+    "OTEL_LOGS_EXPORTER": "none",
     # Avoid vLLM torch.compile cache corruption across repeated standalone
     # rollout launches in long-lived Slurm allocations.
     "VLLM_DISABLE_COMPILE_CACHE": "1",

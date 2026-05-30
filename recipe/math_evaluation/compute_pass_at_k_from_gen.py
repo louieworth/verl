@@ -54,6 +54,7 @@ def main() -> None:
     ap.add_argument("--gen_dir", required=True, help="dir with {bench}_pass16_generation.parquet")
     ap.add_argument("--results_file", required=True)
     ap.add_argument("--model_name", required=True)
+    ap.add_argument("--model_path", default="")
     ap.add_argument("--datasets", required=True, help="comma-separated")
     args = ap.parse_args()
 
@@ -76,6 +77,7 @@ def main() -> None:
     with open(args.results_file) as f:
         results = json.load(f)
     entry = results.setdefault(args.model_name, {})
+    entry["model_path"] = args.model_path or None
     entry.update(updates)
 
     d = os.path.dirname(args.results_file)

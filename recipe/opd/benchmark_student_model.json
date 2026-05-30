@@ -1,0 +1,26 @@
+{
+  "datasets": [
+    "aime24",
+    "aime25",
+    "hmmt25",
+    "beyondaime",
+    "amobench"
+  ],
+  "pass_k_values": [
+    16
+  ],
+  "datasets_dir": "/data/data/jiangli/huggingface/datasets",
+  "temperature": 0.6,
+  "top_p": 0.95,
+  "nnodes": 1,
+  "n_gpus_per_node": 8,
+  "gen_tp": 1,
+  "models": [
+    {
+      "model_path": "/data/data/jiangli/models/opd/Qwen3-1.7B/teacherQwen3-8B_y_o_kl_forward_full_vocab_clip0_vanilla_ms1_20260523-181523/epoch1/ms1/batch00001/hf_merged",
+      "model_name": "Qwen3-1.7B",
+      "results_file": "results/opd/STUDENT_MODEL.json",
+      "output_dir": "gen_results/eval/STUDENT_MODEL"
+    }
+  ]
+}

@@ -11,6 +11,59 @@ import datasets
 from verl.utils.reward_score.math_reward import remove_boxed
 
 instruction_following = "Please reason step by step, and put your final answer within \\boxed{}."
+code_instruction_following = (
+    "You will be given a programming problem. Write a correct Python program that solves it. "
+    "Return only the code inside a single ```python code block."
+)
+
+
+def _first_solution(solutions_raw):
+    if not solutions_raw:
+        return ""
+    if isinstance(solutions_raw, list):
+        return solutions_raw[0] if solutions_raw else ""
+    try:
+        import json
+        parsed = json.loads(solutions_raw)
+        if isinstance(parsed, list):
+            return parsed[0] if parsed else ""
+    except Exception:
+        pass
+    return str(solutions_raw)
+
+
+def _build_taco_prompt(example):
+    question = example.get("question", "")
+    starter_code = example.get("starter_code", "") or ""
+    prompt = question.strip()
+    if starter_code.strip():
+        prompt += "\n\nStarter code:\n```python\n" + starter_code.strip() + "\n```"
+    return prompt + "\n\n" + code_instruction_following
+
+
+def make_map_fn_stage1_code(data_source="BAAI/TACO", index_offset=0):
+    """Prepare TACO examples for Stage 1 code generation."""
+    def process_fn(example, idx):
+        question_raw = example.get("question", "")
+        prompt_content = _build_taco_prompt(example)
+        expert_solution = _first_solution(example.get("solutions", ""))
+        extra_info = {
+            "problem": question_raw,
+            "expert_cot": expert_solution,
+            "starter_code": example.get("starter_code", ""),
+            "difficulty": example.get("difficulty", ""),
+            "source": example.get("source", ""),
+            "url": example.get("url", ""),
+            "index": index_offset + idx,
+            "task": "code",
+        }
+        return {
+            "data_source": data_source,
+            "prompt": [{"role": "user", "content": prompt_content}],
+            "ability": "code",
+            "extra_info": extra_info,
+        }
+    return process_fn
 
 
 def make_map_fn_stage1(question_key="problem", data_source="deepscaleR", index_offset=0):
@@ -91,6 +144,12 @@ if __name__ == "__main__":
         default=None,
         help="Number of samples to process from start_index. Omit for all remaining rows.",
     )
+    parser.add_argument(
+        "--task",
+        choices=["math", "code"],
+        default="math",
+        help="Task-specific prompt/schema adapter.",
+    )
     args = parser.parse_args()
 
     print(f"Loading dataset from: {args.input_path}")
@@ -125,11 +184,14 @@ if __name__ == "__main__":
 
     print(f"Processing {len(ds_raw)} examples...")
     ds_processed = ds_raw.map(
-        make_map_fn_stage1(
+        (make_map_fn_stage1_code(
+            data_source=args.data_source,
+            index_offset=args.start_index,
+        ) if args.task == "code" else make_map_fn_stage1(
             question_key=args.question_key,
             data_source=args.data_source,
             index_offset=args.start_index,
-        ),
+        )),
         with_indices=True,
         remove_columns=[col for col in ds_raw.column_names if col not in ['data_source', 'prompt', 'ability', 'reward_model', 'extra_info']],
     )

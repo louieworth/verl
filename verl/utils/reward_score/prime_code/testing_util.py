@@ -33,7 +33,15 @@ from io import StringIO
 from unittest.mock import mock_open, patch
 
 import numpy as np
-from pyext import RuntimeModule
+from types import ModuleType
+
+
+class RuntimeModule:
+    @staticmethod
+    def from_string(name, docstring, source):
+        module = ModuleType(name, docstring)
+        exec(source, module.__dict__)
+        return module
 
 
 def truncatefn(s, length=300):

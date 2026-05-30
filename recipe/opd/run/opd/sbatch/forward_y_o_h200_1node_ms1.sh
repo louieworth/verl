@@ -26,7 +26,6 @@ export SLURM_GPU_TYPE="${SLURM_GPU_TYPE:-h200}"
 export RUN_SCRIPT="${RUN_SCRIPT:-/scratch/l/luli/src/verl/recipe/opd/run/opd/forward_y_o.sh}"
 export Y_MODE="${Y_MODE:-y_o}"
 export TEACHER_TRAINING_PROMPT="${TEACHER_TRAINING_PROMPT:-vanilla}"
-export LEARNING_RATE="${LEARNING_RATE:-5e-6}"
 export USE_LORA="${USE_LORA:-false}"
 
 # One rollout over the full dataset, then multiple offline optimizer updates.
