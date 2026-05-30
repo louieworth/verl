@@ -20,7 +20,6 @@ export PIPELINE_RESUME_MODE="${PIPELINE_RESUME_MODE:-resume_matching}"
 
 export MULTI_STEP="${MULTI_STEP:-20}"
 export TOP_K="${TOP_K:-32}"
-export TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-4}"
 export PIPELINE_CLEANUP_BATCH_DATA="${PIPELINE_CLEANUP_BATCH_DATA:-true}"
 
 exec bash "$SCRIPT_DIR/../../reverse_topk_y_o.sh" "$@"

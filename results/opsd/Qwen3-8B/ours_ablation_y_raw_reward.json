@@ -1,0 +1,30 @@
+{
+  "Qwen3-8B_kl_jsd_full_vocab_y_raw_clip0_beta0_reward0_20260502_epoch1": {
+    "aime24_pass1_generation_pass_1": 0.6666666666666666,
+    "aime25_pass1_generation_pass_1": 0.6666666666666666,
+    "hmmt25_pass1_generation_pass_1": 0.43333333333333335,
+    "beyondaime_pass1_generation_pass_1": 0.46,
+    "amobench_pass1_generation_pass_1": 0.1794871794871795
+  },
+  "Qwen3-8B_kl_jsd_full_vocab_y_raw_clip0_beta0_reward1_20260502_epoch1": {
+    "aime24_pass1_generation_pass_1": 0.7666666666666667,
+    "aime25_pass1_generation_pass_1": 0.6333333333333333,
+    "hmmt25_pass1_generation_pass_1": 0.4666666666666667,
+    "beyondaime_pass1_generation_pass_1": 0.47,
+    "amobench_pass1_generation_pass_1": 0.1282051282051282
+  },
+  "Qwen3-8B_kl_reverse_full_vocab_y_raw_clip0_reward0_20260502_epoch1": {
+    "aime24_pass1_generation_pass_1": 0.7,
+    "aime25_pass1_generation_pass_1": 0.7,
+    "hmmt25_pass1_generation_pass_1": 0.43333333333333335,
+    "beyondaime_pass1_generation_pass_1": 0.43,
+    "amobench_pass1_generation_pass_1": 0.1282051282051282
+  },
+  "Qwen3-8B_kl_reverse_full_vocab_y_raw_clip0_reward1_20260502_epoch1": {
+    "aime24_pass1_generation_pass_1": 0.7666666666666667,
+    "aime25_pass1_generation_pass_1": 0.6333333333333333,
+    "hmmt25_pass1_generation_pass_1": 0.4,
+    "beyondaime_pass1_generation_pass_1": 0.45,
+    "amobench_pass1_generation_pass_1": 0.1282051282051282
+  }
+}

@@ -20,7 +20,6 @@ export PIPELINE_RESUME_MODE="${PIPELINE_RESUME_MODE:-resume_matching}"
 
 export MULTI_STEP="${MULTI_STEP:-1}"
 export KL_TOKEN_CLIP="${KL_TOKEN_CLIP:-0.1}"
-export TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-4}"
 export PIPELINE_CLEANUP_BATCH_DATA="${PIPELINE_CLEANUP_BATCH_DATA:-false}"
 
 exec bash "$SCRIPT_DIR/../../forward_clip_y_o.sh" "$@"

@@ -1,0 +1,86 @@
+{
+  "Qwen3-8B_kl_forward_monte_carlo_y_cor_clip006_20260417_epoch1": {
+    "comment": "ours with clip 0.06",
+    "aime24_pass1_generation_pass_1": 0.7,
+    "aime25_pass1_generation_pass_1": 0.6333333333333333,
+    "hmmt25_pass1_generation_pass_1": 0.4666666666666667,
+    "beyondaime_pass1_generation_pass_1": 0.39,
+    "amobench_pass1_generation_pass_1": 0.20512820512820512,
+    "openai/gsm8k_pass1_generation_pass_1": 0.9021986353297953
+  },
+  "Qwen3-8B_kl_forward_full_vocab_y_cor_clip01_20260429_epoch1": {
+    "comment": "ours with clip 0.1",
+    "aime24_pass1_generation_pass_1": 0.6666666666666666,
+    "aime25_pass1_generation_pass_1": 0.6666666666666666,
+    "math500_pass1_generation_pass_1": 0.91,
+    "hmmt25_pass1_generation_pass_1": 0.36666666666666664,
+    "beyondaime_pass1_generation_pass_1": 0.39,
+    "amobench_pass1_generation_pass_1": 0.10256410256410256,
+    "openai/gsm8k_pass1_generation_pass_1": 0.954510993176649
+  },
+  "Qwen3-8B_kl_forward_full_vocab_y_cor_clip01_20480_20260419_epoch1": {
+    "comment": "ours with clip 0.1, 20480 steps",
+    "aime24_pass1_generation_pass_1": 0.7666666666666667,
+    "aime25_pass1_generation_pass_1": 0.6666666666666666,
+    "hmmt25_pass1_generation_pass_1": 0.36666666666666664,
+    "beyondaime_pass1_generation_pass_1": 0.48,
+    "amobench_pass1_generation_pass_1": 0.1282051282051282,
+    "openai/gsm8k_pass1_generation_pass_1": 0.909021986353298,
+    "aime24_pass16_generation_pass_16": 0.9,
+    "aime25_pass16_generation_pass_16": 0.8666666666666667,
+    "hmmt25_pass16_generation_pass_16": 0.6666666666666666,
+    "beyondaime_pass16_generation_pass_16": 0.64,
+    "amobench_pass16_generation_pass_16": 0.48717948717948717,
+    "aime24_avg_pass1_generation_pass_16": 0.7645833333333333,
+    "aime24_pass8_generation_pass_16": 0.8666666666666667,
+    "aime25_avg_pass1_generation_pass_16": 0.68125,
+    "aime25_pass8_generation_pass_16": 0.8,
+    "hmmt25_avg_pass1_generation_pass_16": 0.4083333333333333,
+    "hmmt25_pass8_generation_pass_16": 0.6,
+    "beyondaime_avg_pass1_generation_pass_16": 0.415625,
+    "beyondaime_pass8_generation_pass_16": 0.59,
+    "amobench_avg_pass1_generation_pass_16": 0.15544871794871795,
+    "amobench_pass8_generation_pass_16": 0.41025641025641024
+  },
+  "Qwen3-8B_kl_forward_monte_carlo_y_cor_clip01_20260416_epoch1": {
+    "comment": "another ours with clip 0.1",
+    "aime24_pass1_generation_pass_1": 0.76,
+    "aime25_pass1_generation_pass_1": 0.5666666666666667,
+    "hmmt25_pass1_generation_pass_1": 0.43333333333333335,
+    "beyondaime_pass1_generation_pass_1": 0.48,
+    "amobench_pass1_generation_pass_1": 0.23076923076923078,
+    "openai/gsm8k_pass1_generation_pass_1": 0.9067475360121304
+  },
+  "Qwen3-8B_kl_forward_full_vocab_y_cor_clip05_20260501_epoch1": {
+    "comment": "ours with clip 0.5",
+    "aime24_pass1_generation_pass_1": 0.7,
+    "aime25_pass1_generation_pass_1": 0.6666666666666666,
+    "hmmt25_pass1_generation_pass_1": 0.4,
+    "beyondaime_pass1_generation_pass_1": 0.46,
+    "amobench_pass1_generation_pass_1": 0.15384615384615385
+  },
+  "Qwen3-8B_kl_forward_full_vocab_y_cor_clip1_20260501_epoch1": {
+    "comment": "ours with clip 1.0",
+    "aime24_pass1_generation_pass_1": 0.7,
+    "aime25_pass1_generation_pass_1": 0.7,
+    "hmmt25_pass1_generation_pass_1": 0.43333333333333335,
+    "beyondaime_pass1_generation_pass_1": 0.4,
+    "amobench_pass1_generation_pass_1": 0.3076923076923077
+  },
+  "Qwen3-8B_kl_forward_full_vocab_y_cor_clip2_20260501_epoch1": {
+    "comment": "ours with clip 2.0",
+    "aime24_pass1_generation_pass_1": 0.7333333333333333,
+    "aime25_pass1_generation_pass_1": 0.6666666666666666,
+    "hmmt25_pass1_generation_pass_1": 0.4666666666666667,
+    "beyondaime_pass1_generation_pass_1": 0.48,
+    "amobench_pass1_generation_pass_1": 0.1282051282051282
+  },
+  "Qwen3-8B_kl_forward_full_vocab_y_cor_clip5_20260501_epoch1": {
+    "comment": "ours with clip 5.0",
+    "aime24_pass1_generation_pass_1": 0.7,
+    "aime25_pass1_generation_pass_1": 0.6666666666666666,
+    "hmmt25_pass1_generation_pass_1": 0.4666666666666667,
+    "beyondaime_pass1_generation_pass_1": 0.45,
+    "amobench_pass1_generation_pass_1": 0.23076923076923078
+  }
+}

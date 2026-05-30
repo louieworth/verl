@@ -1,0 +1,10 @@
+{
+  "Qwen3-1.7B_OPD_CODE_teacherQwen3-8B_y_o_kl_forward_full_vocab_clip0_vanilla_ms1_20260529-120046_LORA_step00001of00001": {
+    "humaneval_plus_avg4": 0.6097560975609756,
+    "humaneval_plus_pass4": 0.7134146341463414,
+    "mbpp_plus_avg4": 0.6097560975609756,
+    "mbpp_plus_pass4": 0.7134146341463414,
+    "livecodebench_v6_avg4": 0.3296208530805687,
+    "livecodebench_v6_pass4": 0.43981042654028435
+  }
+}

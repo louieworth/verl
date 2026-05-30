@@ -1,0 +1,77 @@
+{
+    "Qwen3-8B": {
+        "aime24_pass1_generation_pass_1": 0.7,
+        "aime25_pass1_generation_pass_1": 0.5333333333333333,
+        "hmmt25_pass1_generation_pass_1": 0.36666666666666664,
+        "beyondaime_pass1_generation_pass_1": 0.47,
+        "amobench_pass1_generation_pass_1": 0.20512820512820512,
+        "aime24_pass16_generation_pass_16": 0.9,
+        "aime25_pass16_generation_pass_16": 0.8333333333333334,
+        "hmmt25_pass16_generation_pass_16": 0.6666666666666666,
+        "beyondaime_pass16_generation_pass_16": 0.66,
+        "amobench_pass16_generation_pass_16": 0.41025641025641024,
+        "aime24_avg_pass1_generation_pass_16": 0.7645833333333333,
+        "aime24_pass8_generation_pass_16": 0.8666666666666667,
+        "aime25_avg_pass1_generation_pass_16": 0.6666666666666666,
+        "aime25_pass8_generation_pass_16": 0.8,
+        "hmmt25_avg_pass1_generation_pass_16": 0.41458333333333336,
+        "hmmt25_pass8_generation_pass_16": 0.6333333333333333,
+        "beyondaime_avg_pass1_generation_pass_16": 0.438125,
+        "beyondaime_pass8_generation_pass_16": 0.61,
+        "amobench_avg_pass1_generation_pass_16": 0.15865384615384615,
+        "amobench_pass8_generation_pass_16": 0.38461538461538464
+    },
+    "Qwen3-8B_kl_reverse_full_vocab_rewrite_clip006_20260429_epoch1": {
+        "aime24_pass1_generation_pass_1": 0.7,
+        "aime25_pass1_generation_pass_1": 0.6666666666666666,
+        "math500_pass1_generation_pass_1": 0.908,
+        "hmmt25_pass1_generation_pass_1": 0.4,
+        "beyondaime_pass1_generation_pass_1": 0.44,
+        "amobench_pass1_generation_pass_1": 0.15384615384615385,
+        "openai/gsm8k_pass1_generation_pass_1": 0.9529946929492039
+    },
+    "Qwen3-8B_kl_forward_full_vocab_correction_clip01_20260429_epoch1": {
+        "aime24_pass1_generation_pass_1": 0.6666666666666666,
+        "aime25_pass1_generation_pass_1": 0.6666666666666666,
+        "math500_pass1_generation_pass_1": 0.91,
+        "hmmt25_pass1_generation_pass_1": 0.36666666666666664,
+        "beyondaime_pass1_generation_pass_1": 0.39,
+        "amobench_pass1_generation_pass_1": 0.10256410256410256,
+        "openai/gsm8k_pass1_generation_pass_1": 0.954510993176649
+    },
+    "Qwen3-8B_kl_forward_full_vocab_correction_clip01_s1fail_only_20260429_epoch1": {
+        "aime24_pass1_generation_pass_1": 0.7,
+        "aime25_pass1_generation_pass_1": 0.6666666666666666,
+        "hmmt25_pass1_generation_pass_1": 0.43333333333333335,
+        "beyondaime_pass1_generation_pass_1": 0.41,
+        "amobench_pass1_generation_pass_1": 0.1794871794871795
+    },
+    "Qwen3-8B_kl_forward_full_vocab_correction_clip0_20260429_epoch1": {
+        "aime24_pass1_generation_pass_1": 0.7666666666666667,
+        "aime25_pass1_generation_pass_1": 0.7,
+        "hmmt25_pass1_generation_pass_1": 0.4666666666666667,
+        "beyondaime_pass1_generation_pass_1": 0.45,
+        "amobench_pass1_generation_pass_1": 0.1794871794871795
+    },
+    "Qwen3-8B_kl_jsd_full_vocab_rewrite_clip0_beta0_20260430_epoch1": {
+        "aime24_pass1_generation_pass_1": 0.7,
+        "aime25_pass1_generation_pass_1": 0.6666666666666666,
+        "hmmt25_pass1_generation_pass_1": 0.4,
+        "beyondaime_pass1_generation_pass_1": 0.45,
+        "amobench_pass1_generation_pass_1": 0.23076923076923078
+    },
+    "Qwen3-8B_kl_reverse_full_vocab_rewrite_clip0_topk32_20260430_epoch1": {
+        "aime24_pass1_generation_pass_1": 0.7,
+        "aime25_pass1_generation_pass_1": 0.7,
+        "hmmt25_pass1_generation_pass_1": 0.4666666666666667,
+        "beyondaime_pass1_generation_pass_1": 0.46,
+        "amobench_pass1_generation_pass_1": 0.10256410256410256
+    },
+    "Qwen3-8B_kl_reverse_full_vocab_rewrite_clip0_20260501_epoch1": {
+        "aime24_pass1_generation_pass_1": 0.7,
+        "aime25_pass1_generation_pass_1": 0.6666666666666666,
+        "hmmt25_pass1_generation_pass_1": 0.5666666666666667,
+        "beyondaime_pass1_generation_pass_1": 0.4,
+        "amobench_pass1_generation_pass_1": 0.15384615384615385
+    }
+}

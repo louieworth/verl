@@ -1,0 +1,19 @@
+{
+  "Qwen3-4B_MATH_base": {
+    "aime24_avg_pass1_generation_pass_16": 0.7354166666666667,
+    "aime24_pass8_generation_pass_16": 0.8666666666666667,
+    "aime24_pass16_generation_pass_16": 0.8666666666666667,
+    "aime25_avg_pass1_generation_pass_16": 0.6458333333333334,
+    "aime25_pass8_generation_pass_16": 0.8333333333333334,
+    "aime25_pass16_generation_pass_16": 0.8333333333333334,
+    "hmmt25_avg_pass1_generation_pass_16": 0.4166666666666667,
+    "hmmt25_pass8_generation_pass_16": 0.6,
+    "hmmt25_pass16_generation_pass_16": 0.6333333333333333,
+    "beyondaime_avg_pass1_generation_pass_16": 0.416875,
+    "beyondaime_pass8_generation_pass_16": 0.58,
+    "beyondaime_pass16_generation_pass_16": 0.63,
+    "amobench_avg_pass1_generation_pass_16": 0.1233974358974359,
+    "amobench_pass8_generation_pass_16": 0.3333333333333333,
+    "amobench_pass16_generation_pass_16": 0.4358974358974359
+  }
+}

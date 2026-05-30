@@ -131,9 +131,10 @@ LORA_ALPHA=${LORA_ALPHA:-128}
 
 # Training Settings
 LEARNING_RATE=${LEARNING_RATE:-5e-6}
-TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-4}
+TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-1}
 USER_GRADIENT_ACCUMULATION_STEPS="${GRADIENT_ACCUMULATION_STEPS:-}"
-GRADIENT_ACCUMULATION_STEPS=${GRADIENT_ACCUMULATION_STEPS:-8}
+GRADIENT_ACCUMULATION_STEPS=${GRADIENT_ACCUMULATION_STEPS:-16}
+KL_FULL_VOCAB_CHUNK_SIZE=${KL_FULL_VOCAB_CHUNK_SIZE:-512}
 GRADIENT_ACCUMULATION_SOURCE="default"
 [ -n "$USER_GRADIENT_ACCUMULATION_STEPS" ] && GRADIENT_ACCUMULATION_SOURCE="user"
 TOTAL_EPOCHS=${TOTAL_EPOCHS:-1}  # Outer pipeline epochs
@@ -544,15 +545,6 @@ PYDATASETLEN_EARLY
         echo "ERROR: computed pipeline chunk size is <1 (samples=$TOTAL_TRAIN_SAMPLES, MULTI_STEP=$MULTI_STEP)."
         exit 1
     fi
-    if [ -z "$USER_GRADIENT_ACCUMULATION_STEPS" ]; then
-        PIPELINE_GLOBAL_MICRO_BATCH=$((TRAIN_BATCH_SIZE * NGPUS_PER_NODE * NNODES))
-        if [ "$PIPELINE_GLOBAL_MICRO_BATCH" -lt 1 ]; then
-            echo "ERROR: invalid global micro batch size: TRAIN_BATCH_SIZE=$TRAIN_BATCH_SIZE NGPUS_PER_NODE=$NGPUS_PER_NODE NNODES=$NNODES."
-            exit 1
-        fi
-        GRADIENT_ACCUMULATION_STEPS=$(((PIPELINE_AUTO_CHUNK_SIZE + PIPELINE_GLOBAL_MICRO_BATCH - 1) / PIPELINE_GLOBAL_MICRO_BATCH))
-        GRADIENT_ACCUMULATION_SOURCE="auto_one_update_per_chunk"
-    fi
     if [ -z "$PIPELINE_KEEP_INTERVAL" ]; then
         PIPELINE_KEEP_INTERVAL=0
     fi
@@ -647,16 +639,36 @@ find_matching_gen_results_metadata() {
     local signature="$1"
     local best=""
     local best_mtime=0
-    local meta sig mtime
+    local best_completed=0
+    local meta sig mtime details_file details_sig model_base completed_marker candidate_completed
 
     [ -d "$GEN_RESULTS_ROOT" ] || return 0
     while IFS= read -r meta; do
         sig="$(gen_results_metadata_value "$meta" gen_results_signature)"
-        [ "$sig" = "$signature" ] || continue
+        if [ "$sig" != "$signature" ]; then
+            # Compatibility: MAX_LENGTH controls KL training truncation, not the
+            # generated data. Older runs persisted it in the semantic signature;
+            # compare normalized signature details with max_length removed.
+            details_file="$(gen_results_metadata_value "$meta" gen_results_signature_details_file)"
+            [ -s "$details_file" ] || details_file="$(dirname "$meta")/run_signature.txt"
+            if [ -s "$details_file" ]; then
+                details_sig="$(grep -v '^max_length=' "$details_file" | sha256sum | awk '{print $1}')"
+            else
+                details_sig=""
+            fi
+            [ "$details_sig" = "$signature" ] || continue
+        fi
         mtime="$(stat -c %Y "$meta" 2>/dev/null || printf '0')"
-        if [ -z "$best" ] || [ "$mtime" -gt "$best_mtime" ]; then
+        model_base="$(gen_results_metadata_value "$meta" model_save_base_dir)"
+        completed_marker="$model_base/epoch1/ms${MULTI_STEP}/batch00001/hf_merged/config.json"
+        candidate_completed=0
+        [ -n "$model_base" ] && [ -f "$completed_marker" ] && candidate_completed=1
+        if [ -z "$best" ] || \
+           [ "$candidate_completed" -gt "$best_completed" ] || \
+           { [ "$candidate_completed" -eq "$best_completed" ] && [ "$mtime" -gt "$best_mtime" ]; }; then
             best="$meta"
             best_mtime="$mtime"
+            best_completed="$candidate_completed"
         fi
     done < <(find "$GEN_RESULTS_ROOT" -mindepth 2 -maxdepth 3 -type f -name run_metadata.yaml 2>/dev/null)
 
@@ -701,7 +713,6 @@ max_prompt_length=$MAX_PROMPT_LENGTH
 expert_solution_prompt_length=$EXPERT_SOLUTION_PROMPT_LENGTH
 stage2_prompt_length=$STAGE2_PROMPT_LENGTH
 max_response_length=$MAX_RESPONSE_LENGTH
-max_length=$MAX_LENGTH
 stage1_rollout_max_model_len=$STAGE1_ROLLOUT_MAX_MODEL_LEN
 stage2_rollout_max_model_len=$STAGE2_ROLLOUT_MAX_MODEL_LEN
 rollout_chat_template_token_buffer=$ROLLOUT_CHAT_TEMPLATE_TOKEN_BUFFER
@@ -837,7 +848,17 @@ FULL_STAGE1_PROMPTS="$GEN_RESULTS_BASE_DIR/${TASK_INTERMEDIATE_PREFIX}1_prompts.
 
 if [ -s "$GEN_RESULTS_RUN_SIGNATURE_FILE" ]; then
     GEN_RESULTS_PERSISTED_SIGNATURE="$(tr -d '[:space:]' < "$GEN_RESULTS_RUN_SIGNATURE_FILE")"
-    if [ "$GEN_RESULTS_PERSISTED_SIGNATURE" != "$GEN_RESULTS_RUN_SIGNATURE" ] && [ "${GEN_RESULTS_ALLOW_CONFIG_MISMATCH:-false}" != "true" ]; then
+    GEN_RESULTS_PERSISTED_SIGNATURE_COMPAT=""
+    if [ "$GEN_RESULTS_PERSISTED_SIGNATURE" != "$GEN_RESULTS_RUN_SIGNATURE" ]; then
+        if [ -s "$GEN_RESULTS_RUN_SIGNATURE_DETAILS_FILE" ]; then
+            GEN_RESULTS_PERSISTED_SIGNATURE_COMPAT="$(grep -v '^max_length=' "$GEN_RESULTS_RUN_SIGNATURE_DETAILS_FILE" | sha256sum | awk '{print $1}')"
+        elif [ -s "$GEN_RESULTS_LOCAL_SIGNATURE_DETAILS_FILE" ]; then
+            GEN_RESULTS_PERSISTED_SIGNATURE_COMPAT="$(grep -v '^max_length=' "$GEN_RESULTS_LOCAL_SIGNATURE_DETAILS_FILE" | sha256sum | awk '{print $1}')"
+        fi
+    fi
+    if [ "$GEN_RESULTS_PERSISTED_SIGNATURE" != "$GEN_RESULTS_RUN_SIGNATURE" ] && \
+       [ "$GEN_RESULTS_PERSISTED_SIGNATURE_COMPAT" != "$GEN_RESULTS_RUN_SIGNATURE" ] && \
+       [ "${GEN_RESULTS_ALLOW_CONFIG_MISMATCH:-false}" != "true" ]; then
         echo "ERROR: gen_results semantic signature mismatch for resume." >&2
         echo "       Persisted file: $GEN_RESULTS_RUN_SIGNATURE_FILE" >&2
         echo "       Persisted details: $GEN_RESULTS_RUN_SIGNATURE_DETAILS_FILE" >&2
@@ -1654,11 +1675,21 @@ cleanup_pipeline_gen_results_after_complete() {
         rm -rf "$(pipeline_resume_models_dir)"
     fi
 
-    local ms_dir
+    local ms_dir batch_dir
     for ms_dir in "$GEN_RESULTS_BASE_DIR"/epoch*/ms*; do
         [ -d "$ms_dir" ] || continue
-        echo "Deleting completed multi-step gen_results data: $ms_dir"
-        rm -rf "$ms_dir"
+        for batch_dir in "$ms_dir"/batch*; do
+            [ -d "$batch_dir" ] || continue
+            case "$batch_dir" in
+                */batch00001)
+                    echo "Preserving completed step1 parquet cache for response reuse: $batch_dir"
+                    ;;
+                *)
+                    echo "Deleting completed multi-step gen_results batch data: $batch_dir"
+                    rm -rf "$batch_dir"
+                    ;;
+            esac
+        done
     done
 }
 

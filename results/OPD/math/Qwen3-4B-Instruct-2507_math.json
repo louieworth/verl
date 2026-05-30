@@ -1,0 +1,38 @@
+{
+  "Qwen3-4B-Instruct-2507_OPD_MATH_teacherQwen3-8B_y_o_kl_forward_full_vocab_clip0_vanilla_ms40_20260526-202007_LORA_step00040of00040": {
+    "aime24_pass16_generation_pass_16": 0.8666666666666667,
+    "aime25_pass16_generation_pass_16": 0.8,
+    "hmmt25_pass16_generation_pass_16": 0.4666666666666667,
+    "beyondaime_pass16_generation_pass_16": 0.67,
+    "amobench_pass16_generation_pass_16": 0.3076923076923077,
+    "aime24_avg_pass1_generation_pass_16": 0.63125,
+    "aime24_pass8_generation_pass_16": 0.8666666666666667,
+    "aime25_avg_pass1_generation_pass_16": 0.49375,
+    "aime25_pass8_generation_pass_16": 0.7666666666666667,
+    "hmmt25_avg_pass1_generation_pass_16": 0.29791666666666666,
+    "hmmt25_pass8_generation_pass_16": 0.4666666666666667,
+    "beyondaime_avg_pass1_generation_pass_16": 0.33625,
+    "beyondaime_pass8_generation_pass_16": 0.53,
+    "amobench_avg_pass1_generation_pass_16": 0.10737179487179487,
+    "amobench_pass8_generation_pass_16": 0.2564102564102564,
+    "model_path": "/data/data/jiangli/models/OPD_MATH/Qwen3-4B-Instruct-2507/teacherQwen3-8B_y_o_kl_forward_full_vocab_clip0_vanilla_ms40_20260526-202007/epoch1/ms40/batch00040/hf_merged"
+  },
+  "Qwen3-4B-Instruct-2507_OPD_MATH_teacherQwen3-8B_y_r_kl_forward_full_vocab_clip0_refine_ms40_20260527-045340_LORA_step00040of00040": {
+    "aime24_pass16_generation_pass_16": 0.8666666666666667,
+    "aime25_pass16_generation_pass_16": 0.7333333333333333,
+    "hmmt25_pass16_generation_pass_16": 0.5333333333333333,
+    "beyondaime_pass16_generation_pass_16": 0.58,
+    "amobench_pass16_generation_pass_16": 0.28205128205128205,
+    "aime24_avg_pass1_generation_pass_16": 0.63125,
+    "aime24_pass8_generation_pass_16": 0.8666666666666667,
+    "aime25_avg_pass1_generation_pass_16": 0.4791666666666667,
+    "aime25_pass8_generation_pass_16": 0.6666666666666666,
+    "hmmt25_avg_pass1_generation_pass_16": 0.28958333333333336,
+    "hmmt25_pass8_generation_pass_16": 0.4666666666666667,
+    "beyondaime_avg_pass1_generation_pass_16": 0.31125,
+    "beyondaime_pass8_generation_pass_16": 0.5,
+    "amobench_avg_pass1_generation_pass_16": 0.09775641025641026,
+    "amobench_pass8_generation_pass_16": 0.20512820512820512,
+    "model_path": "/data/data/jiangli/models/OPD_MATH/Qwen3-4B-Instruct-2507/teacherQwen3-8B_y_r_kl_forward_full_vocab_clip0_refine_ms40_20260527-045340/epoch1/ms40/batch00040/hf_merged"
+  }
+}
