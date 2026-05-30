@@ -46,22 +46,14 @@ export TOP_K=0
 export TEMPERATURE="${TEMPERATURE:-1.0}"
 export TOTAL_EPOCHS="${TOTAL_EPOCHS:-1}"
 export MULTI_STEP="${MULTI_STEP:-40}"
-# In multi-step mode, run_kl_training.sh auto-computes accumulation so each
-# chunk performs one optimizer update by default.
+# Gradient accumulation is inherited from run_kl_training.sh and defaults to 16.
 export TEACHER_TRAINING_PROMPT="${TEACHER_TRAINING_PROMPT:-refine}"
 
-# OOM mitigation (y_r refine prompts are long).
-# y_r refine default MAX_LENGTH = (1024 + 16384) + 16384 = 33792; single-sample
-# logits are still large plus fp32 softmax intermediates. With Qwen3-8B teacher
-# resident alongside Qwen3-1.7B student on A100-40G, this OOMs unless we
-# either split the sequence (SP) or offload teacher params.
-#
 # NOTE: do NOT export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True at top
 # level — it propagates into the stage1/stage2 vLLM subprocesses and crashes
 # them with "Expandable segments are not compatible with memory pool".
 # run_kl_training.sh already enables it inside the inner torchrun subshell.
-export SP_SIZE="${SP_SIZE:-1}"                  # halve per-GPU token count → logits peak ~6 GiB
-export PARAM_OFFLOAD="${PARAM_OFFLOAD:-true}"   # 8B teacher params → CPU when idle, ~2 GiB/GPU back
+export SP_SIZE="${SP_SIZE:-1}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 exec "$(dirname "$SCRIPT_DIR")/run_kl_training.sh" "$@"

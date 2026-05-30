@@ -12,7 +12,7 @@
 #   TEMPERATURE             : default 1.0
 #   TOTAL_EPOCHS            : default 1
 #   MULTI_STEP              : default 40 offline on-policy updates
-#   TRAIN_BATCH_SIZE        : inherited from run_kl_training.sh default; grad accumulation auto-preserves one update/chunk
+#   TRAIN_BATCH_SIZE        : inherited from run_kl_training.sh default; grad accumulation defaults to 16
 #   KL_TOKEN_CLIP           : default 0.06 (forward-only knob)
 #   KL_FULL_VOCAB_CHUNK_SIZE: optional full-vocab KL chunk override; trainer defaults to 512
 #   TEACHER_TRAINING_PROMPT : "vanilla" (auto for y_o) | "refine"

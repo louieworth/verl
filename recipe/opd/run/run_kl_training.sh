@@ -46,6 +46,7 @@ export OTEL_SDK_DISABLED="${OTEL_SDK_DISABLED:-true}"
 export OTEL_METRICS_EXPORTER="${OTEL_METRICS_EXPORTER:-none}"
 export OTEL_TRACES_EXPORTER="${OTEL_TRACES_EXPORTER:-none}"
 export OTEL_LOGS_EXPORTER="${OTEL_LOGS_EXPORTER:-none}"
+PYTHON_BIN=${PYTHON_BIN:-python3}
 
 # =============================================================================
 # Configuration
@@ -195,6 +196,7 @@ MASTER_PORT=${MASTER_PORT:-"29500"}
 USE_SLURM_TORCHRUN=${USE_SLURM_TORCHRUN:-"auto"}
 SLURM_GPU_TYPE=${SLURM_GPU_TYPE:-"h100"}
 GEN_TP=${GEN_TP:-1}  # Tensor parallel for generation
+EVAL_GEN_TP=${EVAL_GEN_TP:-$NGPUS_PER_NODE}  # Tensor parallel for post-training evaluation
 
 # verl FSDP Settings
 FSDP_STRATEGY=${FSDP_STRATEGY:-"fsdp2"}
@@ -2690,104 +2692,7 @@ EOF_TORCHRUN
     cleanup_pipeline_batch_data "$current_gen_results_dir"
 
     if [ "$run_eval_this_update" = "true" ]; then
-        local eval_model_path="$current_model_save_dir/hf_merged"
-
-        # --- 1. Verify merged model exists & is loadable ---
-        if [ ! -d "$eval_model_path" ] || [ ! -f "$eval_model_path/config.json" ]; then
-            echo "ERROR: eval requested but merged model is missing or incomplete at $eval_model_path"
-            exit 1
-        fi
-
-        # --- 2. Verify requested math eval parquet files. Code eval uses framework-managed datasets. ---
-        if [ "$TASK" = "math" ]; then
-            local _missing_ds=""
-            local IFS_BAK="$IFS"
-            IFS=','
-            for _ds in $EVAL_DATASETS; do
-                local _ds_file="$EVAL_DATASETS_DIR/${_ds}/${_ds}_test.parquet"
-                if ! file_exists_and_nonempty "$_ds_file"; then
-                    _missing_ds="$_missing_ds $_ds"
-                fi
-            done
-            IFS="$IFS_BAK"
-            if [ -n "$_missing_ds" ]; then
-                echo "ERROR: missing eval dataset parquet under $EVAL_DATASETS_DIR:$_missing_ds"
-                echo "       Expected layout: \$EVAL_DATASETS_DIR/<name>/<name>_test.parquet"
-                exit 1
-            fi
-        fi
-
-        # --- 3. Wait for training GPU memory to be released ---
-        # The training subprocess has already exited by this point, so memory
-        # should be freed almost immediately. We still poll defensively for up
-        # to 60s in case any zombie process is holding memory — vLLM will OOM
-        # if the previous FSDP allocator hasn't released its blocks.
-        echo ""
-        echo "=========================================="
-        echo "Waiting for GPU memory release before eval"
-        echo "=========================================="
-        local _wait_max=60
-        local _waited=0
-        while [ "$_waited" -lt "$_wait_max" ]; do
-            local _used_mb
-            _used_mb=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null \
-                       | awk '{s+=$1} END{print s+0}')
-            # Threshold: < 1 GB per GPU on average (8 GPUs ≈ 8 GB total)
-            local _threshold_mb=$((NGPUS_PER_NODE * 1024))
-            if [ "$_used_mb" -lt "$_threshold_mb" ]; then
-                echo "  GPUs released (total ${_used_mb} MB used, threshold ${_threshold_mb} MB)"
-                break
-            fi
-            echo "  GPUs still busy (total ${_used_mb} MB used), waiting..."
-            sleep 5
-            _waited=$((_waited + 5))
-        done
-        if [ "$_waited" -ge "$_wait_max" ]; then
-            echo "WARNING: GPU memory still high after ${_wait_max}s — eval may OOM."
-        fi
-
-        # --- 4. Hand off to benchmark_kl_model.sh ---
-        # benchmark_kl_model.sh derives MODEL_NAME / output_dir / results_file
-        # from the model path. It expects DATASETS as space-separated and
-        # writes to relative paths under the repo root, so we cd there first.
-        local _datasets_space
-        _datasets_space=$(echo "$EVAL_DATASETS" | tr ',' ' ')
-
-        local EVAL_RECIPE_DIR="$VERL_ROOT/recipe/math_evaluation"
-        local EVAL_BENCHMARK_SCRIPT="benchmark_kl_model.sh"
-        if [ "$TASK" = "code" ]; then
-            EVAL_RECIPE_DIR="$VERL_ROOT/recipe/code_evaluation"
-            EVAL_BENCHMARK_SCRIPT="benchmark_code_model.sh"
-        fi
-
-        echo ""
-        echo "=========================================="
-        echo "Running evaluation via $EVAL_BENCHMARK_SCRIPT"
-        echo "  Task:     $TASK"
-        echo "  Model:    $eval_model_path"
-        echo "  Datasets: $_datasets_space"
-        echo "=========================================="
-        local _eval_model_name="$RESULTS_MODEL_KEY"
-        if [ -n "$pipeline_batch_index" ]; then
-            _eval_model_name="${_eval_model_name}_step$(format_pipeline_batch_id "$update_index")of$(format_pipeline_batch_id "$total_updates")"
-        fi
-        local _eval_output_dir="$VERL_ROOT/gen_results/eval/${TASK}/${_eval_model_name}"
-
-        (
-            cd "$VERL_ROOT"
-            unset PYTORCH_CUDA_ALLOC_CONF
-            NGPUS_PER_NODE="$NGPUS_PER_NODE" \
-            NNODES="$NNODES" \
-            GEN_TP="$GEN_TP" \
-            EVAL_DATASETS_DIR="$EVAL_DATASETS_DIR" \
-            DATASETS="$_datasets_space" \
-            PASS_K="$PASS_K" \
-            EVAL_BASE_MODEL_NAME="$RESULTS_BASE_MODEL_NAME" \
-            EVAL_MODEL_NAME="${EVAL_MODEL_NAME:-$_eval_model_name}" \
-            EVAL_RESULTS_FILE="${EVAL_RESULTS_FILE:-$RESULTS_FILE}" \
-            EVAL_OUTPUT_DIR="${EVAL_OUTPUT_DIR:-$_eval_output_dir}" \
-            bash "$EVAL_RECIPE_DIR/$EVAL_BENCHMARK_SCRIPT" "$eval_model_path"
-        ) 2>&1 | tee "$current_output_dir/logs/eval_$(date +%Y%m%d_%H%M%S).log"
+        run_post_training_eval_if_needed "$current_model_save_dir" "$current_output_dir" "$update_index" "$total_updates"
     fi
 
     echo ""
@@ -2803,6 +2708,265 @@ EOF_TORCHRUN
     else
         echo "  FSDP Checkpoints: $current_model_save_dir/global_step_*"
     fi
+}
+
+
+eval_results_complete() {
+    local eval_model_name="$1"
+    local eval_output_dir="$2"
+    "$PYTHON_BIN" - "$TASK" "$RESULTS_FILE" "$eval_model_name" "$EVAL_DATASETS" "$PASS_K" "$eval_output_dir" <<'PYEVALCHECK'
+import json
+import os
+import sys
+from pathlib import Path
+
+task, results_file, model_name, datasets_raw, pass_k_raw, output_dir = sys.argv[1:]
+pass_k = int(pass_k_raw or 0)
+datasets = [d.strip() for chunk in datasets_raw.replace(',', ' ').split() for d in [chunk.strip()] if d]
+root = Path(output_dir)
+missing = []
+
+def has_number(entry, key):
+    value = entry.get(key)
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+def has_file(pattern):
+    return any(path.is_file() and path.stat().st_size > 0 for path in root.glob(pattern))
+
+try:
+    with open(results_file) as f:
+        results = json.load(f)
+except FileNotFoundError:
+    results = {}
+entry = results.get(model_name)
+if not isinstance(entry, dict):
+    missing.append(f"results entry missing: {model_name}")
+    entry = {}
+
+if task == "code":
+    for ds in datasets:
+        normalized = ds.replace('+', '_plus')
+        if normalized in {"humaneval_plus", "humaneval"}:
+            canonical = "humaneval_plus"
+            evalplus_name = "humaneval"
+            if not (has_number(entry, f"{canonical}_avg4") and has_number(entry, f"{canonical}_pass4")):
+                missing.append(f"missing JSON metrics: {canonical}_avg4/pass4")
+            if not has_file(f"evalplus/{evalplus_name}/*eval_results*.json"):
+                missing.append(f"missing EvalPlus result file: evalplus/{evalplus_name}/*eval_results*.json")
+        elif normalized in {"mbpp_plus", "mbpp"}:
+            canonical = "mbpp_plus"
+            evalplus_name = "mbpp"
+            if not (has_number(entry, f"{canonical}_avg4") and has_number(entry, f"{canonical}_pass4")):
+                missing.append(f"missing JSON metrics: {canonical}_avg4/pass4")
+            if not has_file(f"evalplus/{evalplus_name}/*eval_results*.json"):
+                missing.append(f"missing EvalPlus result file: evalplus/{evalplus_name}/*eval_results*.json")
+        elif normalized in {"livecodebench_v6", "lcb_v6", "livecodebench"}:
+            canonical = "livecodebench_v6"
+            if not (has_number(entry, f"{canonical}_avg4") and has_number(entry, f"{canonical}_pass4")):
+                missing.append(f"missing JSON metrics: {canonical}_avg4/pass4")
+            if not any(path.is_file() and path.stat().st_size > 0 for path in (root / "livecodebench").rglob("*_eval_all.json")):
+                missing.append("missing LiveCodeBench eval file: livecodebench/**/*_eval_all.json")
+        else:
+            missing.append(f"unknown code eval dataset: {ds}")
+else:
+    for ds in datasets:
+        prefix = f"openai/{ds}" if ds == "gsm8k" else ds
+        if pass_k == 16:
+            required = [
+                f"{prefix}_avg_pass1_generation_pass_16",
+                f"{prefix}_pass8_generation_pass_16",
+                f"{prefix}_pass16_generation_pass_16",
+            ]
+            for key in required:
+                if not has_number(entry, key):
+                    missing.append(f"missing JSON metric: {key}")
+            parquet = root / f"{ds}_pass16_generation.parquet"
+            if not (parquet.is_file() and parquet.stat().st_size > 0):
+                missing.append(f"missing math generation parquet: {parquet}")
+        else:
+            if not any(k.startswith(f"{prefix}_") for k in entry):
+                missing.append(f"missing JSON metrics for dataset: {ds}")
+
+if missing:
+    print("Eval incomplete:", file=sys.stderr)
+    for item in missing:
+        print(f"  - {item}", file=sys.stderr)
+    sys.exit(1)
+print(f"Eval complete for {model_name}")
+PYEVALCHECK
+}
+
+eval_missing_datasets() {
+    local eval_model_name="$1"
+    local eval_output_dir="$2"
+    "$PYTHON_BIN" - "$TASK" "$RESULTS_FILE" "$eval_model_name" "$EVAL_DATASETS" "$PASS_K" "$eval_output_dir" <<'PYMISSCHECK'
+import json
+import sys
+from pathlib import Path
+
+task, results_file, model_name, datasets_raw, pass_k_raw, output_dir = sys.argv[1:]
+pass_k = int(pass_k_raw or 0)
+datasets = [d.strip() for chunk in datasets_raw.replace(',', ' ').split() for d in [chunk.strip()] if d]
+root = Path(output_dir)
+
+def has_number(entry, key):
+    value = entry.get(key)
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+def has_file(pattern):
+    return any(path.is_file() and path.stat().st_size > 0 for path in root.glob(pattern))
+
+try:
+    with open(results_file) as f:
+        results = json.load(f)
+except FileNotFoundError:
+    results = {}
+entry = results.get(model_name)
+if not isinstance(entry, dict):
+    entry = {}
+
+missing = []
+if task == "code":
+    for ds in datasets:
+        normalized = ds.replace('+', '_plus')
+        if normalized in {"humaneval_plus", "humaneval"}:
+            if not (has_number(entry, "humaneval_plus_avg4") and has_number(entry, "humaneval_plus_pass4") and has_file("evalplus/humaneval/*eval_results*.json")):
+                missing.append("humaneval_plus")
+        elif normalized in {"mbpp_plus", "mbpp"}:
+            if not (has_number(entry, "mbpp_plus_avg4") and has_number(entry, "mbpp_plus_pass4") and has_file("evalplus/mbpp/*eval_results*.json")):
+                missing.append("mbpp_plus")
+        elif normalized in {"livecodebench_v6", "lcb_v6", "livecodebench"}:
+            if not (has_number(entry, "livecodebench_v6_avg4") and has_number(entry, "livecodebench_v6_pass4") and any(path.is_file() and path.stat().st_size > 0 for path in (root / "livecodebench").rglob("*_eval_all.json"))):
+                missing.append("livecodebench_v6")
+        else:
+            missing.append(ds)
+else:
+    for ds in datasets:
+        prefix = f"openai/{ds}" if ds == "gsm8k" else ds
+        if pass_k == 16:
+            required = [
+                f"{prefix}_avg_pass1_generation_pass_16",
+                f"{prefix}_pass8_generation_pass_16",
+                f"{prefix}_pass16_generation_pass_16",
+            ]
+            parquet = root / f"{ds}_pass16_generation.parquet"
+            if not (all(has_number(entry, key) for key in required) and parquet.is_file() and parquet.stat().st_size > 0):
+                missing.append(ds)
+        elif not any(k.startswith(f"{prefix}_") for k in entry):
+            missing.append(ds)
+print(" ".join(missing))
+PYMISSCHECK
+}
+
+run_post_training_eval_if_needed() {
+    local final_model_save_dir="$1"
+    local final_output_dir="$2"
+    local update_index="${3:-}"
+    local total_updates="${4:-}"
+
+    [ "$RUN_EVAL_AFTER_TRAINING" = "true" ] || return 0
+
+    local eval_model_path="$final_model_save_dir/hf_merged"
+    if [ ! -d "$eval_model_path" ] || [ ! -f "$eval_model_path/config.json" ]; then
+        echo "ERROR: eval requested but merged model is missing or incomplete at $eval_model_path"
+        exit 1
+    fi
+
+    local _eval_model_name="$RESULTS_MODEL_KEY"
+    if [ "$MULTI_STEP" -gt 0 ] && [ -n "$update_index" ] && [ -n "$total_updates" ]; then
+        _eval_model_name="${_eval_model_name}_step$(format_pipeline_batch_id "$update_index")of$(format_pipeline_batch_id "$total_updates")"
+    fi
+    local _eval_output_dir="$VERL_ROOT/gen_results/eval/${TASK}/${_eval_model_name}"
+
+    if eval_results_complete "$_eval_model_name" "$_eval_output_dir"; then
+        echo "Evaluation already complete, skipping eval"
+        echo "  Model:  $_eval_model_name"
+        echo "  Output: $_eval_output_dir"
+        return 0
+    fi
+
+    if [ "$TASK" = "math" ]; then
+        local _missing_ds=""
+        local IFS_BAK="$IFS"
+        IFS=','
+        for _ds in $EVAL_DATASETS; do
+            local _ds_file="$EVAL_DATASETS_DIR/${_ds}/${_ds}_test.parquet"
+            if ! file_exists_and_nonempty "$_ds_file"; then
+                _missing_ds="$_missing_ds $_ds"
+            fi
+        done
+        IFS="$IFS_BAK"
+        if [ -n "$_missing_ds" ]; then
+            echo "ERROR: missing eval dataset parquet under $EVAL_DATASETS_DIR:$_missing_ds"
+            echo "       Expected layout: \$EVAL_DATASETS_DIR/<name>/<name>_test.parquet"
+            exit 1
+        fi
+    fi
+
+    echo ""
+    echo "=========================================="
+    echo "Waiting for GPU memory release before eval"
+    echo "=========================================="
+    local _wait_max=60
+    local _waited=0
+    while [ "$_waited" -lt "$_wait_max" ]; do
+        local _used_mb
+        _used_mb=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null \
+                   | awk '{s+=$1} END{print s+0}')
+        local _threshold_mb=$((NGPUS_PER_NODE * 1024))
+        if [ "$_used_mb" -lt "$_threshold_mb" ]; then
+            echo "  GPUs released (total ${_used_mb} MB used, threshold ${_threshold_mb} MB)"
+            break
+        fi
+        echo "  GPUs still busy (total ${_used_mb} MB used), waiting..."
+        sleep 5
+        _waited=$((_waited + 5))
+    done
+    if [ "$_waited" -ge "$_wait_max" ]; then
+        echo "WARNING: GPU memory still high after ${_wait_max}s — eval may OOM."
+    fi
+
+    local _datasets_space
+    _datasets_space=$(eval_missing_datasets "$_eval_model_name" "$_eval_output_dir")
+    if [ -z "$_datasets_space" ]; then
+        echo "Evaluation became complete before benchmark launch, skipping eval"
+        echo "  Model:  $_eval_model_name"
+        echo "  Output: $_eval_output_dir"
+        return 0
+    fi
+
+    local EVAL_RECIPE_DIR="$VERL_ROOT/recipe/math_evaluation"
+    local EVAL_BENCHMARK_SCRIPT="benchmark_kl_model.sh"
+    if [ "$TASK" = "code" ]; then
+        EVAL_RECIPE_DIR="$VERL_ROOT/recipe/code_evaluation"
+        EVAL_BENCHMARK_SCRIPT="benchmark_code_model.sh"
+    fi
+
+    echo ""
+    echo "=========================================="
+    echo "Running evaluation via $EVAL_BENCHMARK_SCRIPT"
+    echo "  Task:     $TASK"
+    echo "  Model:    $eval_model_path"
+    echo "  Eval TP:  $EVAL_GEN_TP"
+    echo "  Datasets: $_datasets_space"
+    echo "  Output:   $_eval_output_dir"
+    echo "=========================================="
+    mkdir -p "$final_output_dir/logs"
+    (
+        cd "$VERL_ROOT"
+        unset PYTORCH_CUDA_ALLOC_CONF
+        NGPUS_PER_NODE="$NGPUS_PER_NODE" \
+        NNODES="$NNODES" \
+        GEN_TP="$EVAL_GEN_TP" \
+        EVAL_DATASETS_DIR="$EVAL_DATASETS_DIR" \
+        DATASETS="$_datasets_space" \
+        PASS_K="$PASS_K" \
+        EVAL_BASE_MODEL_NAME="$RESULTS_BASE_MODEL_NAME" \
+        EVAL_MODEL_NAME="${EVAL_MODEL_NAME:-$_eval_model_name}" \
+        EVAL_RESULTS_FILE="${EVAL_RESULTS_FILE:-$RESULTS_FILE}" \
+        EVAL_OUTPUT_DIR="${EVAL_OUTPUT_DIR:-$_eval_output_dir}" \
+        bash "$EVAL_RECIPE_DIR/$EVAL_BENCHMARK_SCRIPT" "$eval_model_path"
+    ) 2>&1 | tee "$final_output_dir/logs/eval_$(date +%Y%m%d_%H%M%S).log"
 }
 
 format_duration_seconds() {
@@ -3166,6 +3330,14 @@ else
 
     FINAL_OUTPUT_DIR="$(epoch_output_dir "$TOTAL_EPOCHS")"
     FINAL_MODEL_SAVE_DIR="$(epoch_model_save_dir "$TOTAL_EPOCHS")"
+fi
+
+if [ "$RUN_EVAL_AFTER_TRAINING" = "true" ]; then
+    if [ "$MULTI_STEP" -gt 0 ]; then
+        run_post_training_eval_if_needed "$FINAL_MODEL_SAVE_DIR" "$FINAL_OUTPUT_DIR" "$TOTAL_PIPELINE_UPDATES" "$TOTAL_PIPELINE_UPDATES"
+    else
+        run_post_training_eval_if_needed "$FINAL_MODEL_SAVE_DIR" "$FINAL_OUTPUT_DIR"
+    fi
 fi
 
 echo ""

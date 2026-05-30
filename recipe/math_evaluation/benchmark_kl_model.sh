@@ -92,7 +92,7 @@ fi
 # GPU settings
 NGPUS_PER_NODE=${NGPUS_PER_NODE:-8}
 NNODES=${NNODES:-1}
-GEN_TP=${GEN_TP:-1}
+GEN_TP=${GEN_TP:-${NGPUS_PER_NODE:-1}}
 
 # Eval datasets
 EVAL_DATASETS_DIR=${EVAL_DATASETS_DIR:-/data/data/jiangli/huggingface/datasets}

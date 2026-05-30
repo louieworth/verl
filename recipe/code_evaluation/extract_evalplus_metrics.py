@@ -9,11 +9,19 @@ PASS = "pass"
 
 
 def find_json(root: Path, dataset: str) -> Path:
-    candidates = sorted(root.rglob(f"*{dataset}*eval_results*.json")) + sorted(root.rglob("*eval_results*.json"))
+    dataset_root = root / dataset
+    candidates = []
+    if dataset_root.exists():
+        candidates.extend(sorted(dataset_root.rglob("*eval_results*.json")))
+    candidates.extend(
+        path
+        for path in sorted(root.rglob("*eval_results*.json"))
+        if dataset in path.parts
+    )
     for path in candidates:
         if path.is_file():
             return path
-    raise SystemExit(f"No EvalPlus eval_results json found under {root}")
+    raise SystemExit(f"No EvalPlus {dataset} eval_results json found under {root}")
 
 
 def is_correct(sample: dict) -> bool:
