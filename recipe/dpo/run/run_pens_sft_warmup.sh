@@ -10,12 +10,13 @@
 
 set -euxo pipefail
 
-DATA_ROOT="${SFT_DATA_ROOT:-/home/lijiang3/projects/def-y7ding/lijiang3/hf_cache/data}"
+DATA_ROOT="${SFT_DATA_ROOT:-/data/dpo_pens/data/pens_click_hist_runE_23pct_seed42}"
 SFT_TRAIN_FILE="${SFT_TRAIN_FILE:-${DATA_ROOT}/pens_sft_train.parquet}"
-SFT_VAL_FILE="${SFT_VAL_FILE:-${SFT_TRAIN_FILE}}"
+SFT_VAL_FILE="${SFT_VAL_FILE-}"
 
-MODEL_DIR="${SFT_MODEL_DIR:-/home/lijiang3/projects/def-y7ding/lijiang3/hf_cache/hub/models--Qwen--Qwen3-4B/snapshots/1cfa9a7208912126459214e8b04321603b3df60c}"
-TOKENIZER_PATH="${SFT_TOKENIZER_PATH:-${MODEL_DIR}}"
+MODEL_DIR_DEFAULT="/data/.huggingface/hub/models--Qwen--Qwen3-4B-Instruct-2507/snapshots/cdbee75f17c01a7cc42f958dc650907174af0554"
+MODEL_DIR=${SFT_MODEL_DIR:-${MODEL_DIR_DEFAULT}}
+TOKENIZER_PATH=${SFT_TOKENIZER_PATH:-${MODEL_DIR}}
 
 LORA_RANK="${SFT_LORA_RANK:-64}"
 LORA_ALPHA="${SFT_LORA_ALPHA:-128}"
@@ -26,32 +27,30 @@ MICRO_BATCH_SIZE_PER_GPU="${SFT_MICRO_BATCH_SIZE_PER_GPU:-8}"
 MAX_LENGTH="${SFT_MAX_LENGTH:-8256}"
 MAX_TOKEN_LEN_PER_GPU="${SFT_MAX_TOKEN_LEN_PER_GPU:-32768}"
 TOTAL_EPOCHS="${SFT_TOTAL_EPOCHS:-1}"
+TOTAL_TRAINING_STEPS="${SFT_TOTAL_TRAINING_STEPS:-100}"
 LR="${SFT_LR:-1e-5}"
 LR_WARMUP_STEPS_RATIO="${SFT_LR_WARMUP_STEPS_RATIO:-0.03}"
 
 NNODES="${SFT_NNODES:-${SLURM_JOB_NUM_NODES:-1}}"
-N_GPUS_PER_NODE="${SFT_N_GPUS_PER_NODE:-${SLURM_GPUS_ON_NODE:-4}}"
+N_GPUS_PER_NODE="${SFT_N_GPUS_PER_NODE:-${SLURM_GPUS_ON_NODE:-8}}"
 
-CKPT_ROOT="${SFT_CKPT_ROOT:-/scratch/lijiang3/ckpt/PENS}"
+CKPT_ROOT="${SFT_CKPT_ROOT:-/data/data/jiangli/models/pens}"
 PROJECT_NAME="${SFT_PROJECT_NAME:-pens-sft-warmup}"
-# Timestamp in the experiment + save paths so re-runs never clobber or silently
-# resume from a stale ckpt. Override SFT_RUN_TIMESTAMP to pin a specific run.
-SFT_RUN_TIMESTAMP="${SFT_RUN_TIMESTAMP:-$(date +%Y%m%d_%H%M%S)}"
-EXPERIMENT_NAME="${SFT_EXPERIMENT_NAME:-qwen3-4b-pos-lora-r${LORA_RANK}-${SFT_RUN_TIMESTAMP}}"
-DEFAULT_LOCAL_DIR="${SFT_DEFAULT_LOCAL_DIR:-${CKPT_ROOT}/sft_warmup_pos_qwen3-4b-${SFT_RUN_TIMESTAMP}}"
+EXPERIMENT_NAME="${SFT_EXPERIMENT_NAME:-sft_warmup_pos_qwen3-4b-instruct-2507}"
+DEFAULT_LOCAL_DIR="${SFT_DEFAULT_LOCAL_DIR:-${CKPT_ROOT}/${EXPERIMENT_NAME}}"
 # Hot-patched 2026-04-18 20:59: loss dropped to 1.6 by step 89 (flash_attn 2
 # plus short-headline data makes Qwen3-4B converge 5x faster than planned).
 # Save every 50 steps so we capture the early "format-just-learned" ckpt around
 # step 100-150 before the model over-fits.
-SAVE_FREQ=50
+SAVE_FREQ="${SFT_SAVE_FREQ:-50}"
 # Hot-patched 2026-04-18 20:40: keep all rolling ckpts so we can fall back to
 # earlier checkpoints (e.g., step 267) if a later one fails eval. Overrides
 # sbatch default SFT_MAX_CKPT_TO_KEEP=1 regardless of env.
-MAX_CKPT_TO_KEEP=100
-RESUME_MODE="${SFT_RESUME_MODE:-auto}"
-LOGGER="${SFT_LOGGER:-[console,wandb]}"
+MAX_CKPT_TO_KEEP="${SFT_MAX_CKPT_TO_KEEP:-2}"
+RESUME_MODE="${SFT_RESUME_MODE:-disable}"
+LOGGER="${SFT_LOGGER:-[console]}"
 
-PYTHON_BIN="${SFT_PYTHON_BIN:-python3}"
+PYTHON_BIN="${SFT_PYTHON_BIN:-/data/conda/envs/verl/bin/python}"
 ENTRYPOINT="${SFT_ENTRYPOINT:--m verl.trainer.sft_trainer}"
 
 cmd=(
@@ -87,6 +86,7 @@ cmd=(
   "optim.lr_scheduler_type=cosine"
   "optim.clip_grad=1.0"
   "trainer.total_epochs=${TOTAL_EPOCHS}"
+  "trainer.total_training_steps=${TOTAL_TRAINING_STEPS}"
   "trainer.nnodes=${NNODES}"
   "trainer.n_gpus_per_node=${N_GPUS_PER_NODE}"
   "trainer.default_local_dir=${DEFAULT_LOCAL_DIR}"
@@ -96,7 +96,7 @@ cmd=(
   "trainer.experiment_name=${EXPERIMENT_NAME}"
   "trainer.logger=${LOGGER}"
   "trainer.resume_mode=${RESUME_MODE}"
-  "checkpoint.save_contents=[model,optimizer,extra,hf_model]"
+  "checkpoint.save_contents=[hf_model]"
 )
 
 cmd+=("$@")

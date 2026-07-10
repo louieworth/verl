@@ -3,6 +3,10 @@ set -euo pipefail
 
 # Narval / Compute Canada environment fixes
 unset ROCR_VISIBLE_DEVICES
+# vLLM V1 uses its own CUDA memory pool and is incompatible with PyTorch's
+# expandable segments allocator, which the DPO training wrapper enables.
+unset PYTORCH_CUDA_ALLOC_CONF
+unset PYTORCH_ALLOC_CONF
 # export VLLM_ENABLE_THINKING="${VLLM_ENABLE_THINKING:-skip}"
 _VERL_ENV_BIN=/project/def-y7ding/lijiang3/envs/verl/bin
 if [[ -x "${_VERL_ENV_BIN}/python" ]]; then
@@ -17,6 +21,23 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${REPO_ROOT:-$(cd "${SCRIPT_DIR}/../../.." && pwd)}"
 WORKDIR="${WORKDIR:-$(pwd)}"
 PYTHON_BIN="${PYTHON_BIN:-${_VERL_ENV_BIN}/python}"
+EVAL_MASTER_ADDR="${EVAL_MASTER_ADDR:-127.0.0.1}"
+EVAL_MASTER_PORT="${EVAL_MASTER_PORT:-}"
+
+find_free_port() {
+    local port
+    while true; do
+        port="$(shuf -i 12000-65000 -n 1)"
+        if ! (echo > "/dev/tcp/${EVAL_MASTER_ADDR}/${port}") 2>/dev/null; then
+            echo "${port}"
+            return 0
+        fi
+    done
+}
+
+if [[ -z "${EVAL_MASTER_PORT}" ]]; then
+    EVAL_MASTER_PORT="$(find_free_port)"
+fi
 
 derive_model_slug() {
     local normalized="$1"
@@ -79,10 +100,10 @@ derive_base_model_slug() {
 
 # MODEL_PATH="${MODEL_PATH:-/data/data/jiangli/ckpt/PENS/single_wise_dpo_click_hist_negative_only_lora_qwen3_5-4b/global_step_5340/actor/hf_merged}"
 # MODEL_PATH="${MODEL_PATH:-Qwen/Qwen3.5-4B}"
-MODEL_PATH="${MODEL_PATH:-/home/lijiang3/projects/def-y7ding/lijiang3/hf_cache/hub/models--Qwen--Qwen3-8B/snapshots/b968826d9c46dd6066d109eabc6255188de91218}"
+MODEL_PATH="${MODEL_PATH:-/data/.huggingface/hub/models--Qwen--Qwen3-4B-Instruct-2507/snapshots/cdbee75f17c01a7cc42f958dc650907174af0554}"
 # MODEL_PATH="${MODEL_PATH:-/scratch/lijiang3/ckpt/PENS/prospect_dpo_click_hist_all_lora_qwen3-8b/global_step_5341/actor/hf_merged}"
-TEST_FILE="${TEST_FILE:-/home/lijiang3/projects/def-y7ding/lijiang3/hf_cache/data/Microsoft-PeNS/PENS/personalized_test.tsv}"
-PROMPT_FILE="${PROMPT_FILE:-/home/lijiang3/projects/def-y7ding/lijiang3/hf_cache/data/eval/prompts.parquet}"
+TEST_FILE="${TEST_FILE:-/data/data/jiangli/Microsoft-PeNS/PENS/personalized_test.tsv}"
+PROMPT_FILE="${PROMPT_FILE:-/data/data/jiangli/Microsoft-PeNS/eval/prompts.parquet}"
 DEFAULT_MODEL_SLUG="$(derive_model_slug "${MODEL_PATH}")"
 MODEL_KEY="${MODEL_KEY:-${DEFAULT_MODEL_SLUG}}"
 # Base-model slug groups every ckpt derived from the same base into a single
@@ -90,6 +111,9 @@ MODEL_KEY="${MODEL_KEY:-${DEFAULT_MODEL_SLUG}}"
 # via BASE_MODEL_SLUG if the auto-derived value is wrong (e.g. cross-init runs).
 DEFAULT_BASE_MODEL_SLUG="$(derive_base_model_slug "${MODEL_PATH}")"
 BASE_MODEL_SLUG="${BASE_MODEL_SLUG:-${DEFAULT_BASE_MODEL_SLUG}}"
+VLLM_ENABLE_THINKING="${VLLM_ENABLE_THINKING:-false}"
+VLLM_ENABLE_THINKING="${VLLM_ENABLE_THINKING,,}"
+
 
 # Date + thinking label for filenames and JSON keys. Keep in sync with the
 # tagged key written by run_pens_personalized_eval.py.
@@ -112,7 +136,7 @@ ALIGN_BY_ORDER="${ALIGN_BY_ORDER:-false}"
 
 TRUST_REMOTE_CODE="${TRUST_REMOTE_CODE:-true}"
 NNODES="${NNODES:-1}"
-NGPUS_PER_NODE="${NGPUS_PER_NODE:-1}"
+NGPUS_PER_NODE="${NGPUS_PER_NODE:-8}"
 GEN_TP="${GEN_TP:-1}"
 PASS_K="${PASS_K:-1}"
 GEN_TEMPERATURE="${GEN_TEMPERATURE:-0.7}"
@@ -131,14 +155,18 @@ GEN_ENABLE_PREFIX_CACHING="${GEN_ENABLE_PREFIX_CACHING:-}"
 GEN_ENFORCE_EAGER="${GEN_ENFORCE_EAGER:-}"
 VLLM_LANGUAGE_MODEL_ONLY="${VLLM_LANGUAGE_MODEL_ONLY:-}"
 VLLM_ENABLE_THINKING="${VLLM_ENABLE_THINKING:-false}"
+VLLM_ENABLE_THINKING="${VLLM_ENABLE_THINKING,,}"
 VLLM_DEFAULT_CHAT_TEMPLATE_KWARGS="${VLLM_DEFAULT_CHAT_TEMPLATE_KWARGS:-}"
 GEN_GPU_MEMORY_UTILIZATION="${GEN_GPU_MEMORY_UTILIZATION:-0.90}"
 VLLM_MAX_CUDAGRAPH_CAPTURE_SIZE="${VLLM_MAX_CUDAGRAPH_CAPTURE_SIZE:-}"
 VLLM_BLOCK_SIZE="${VLLM_BLOCK_SIZE:-}"
 VLLM_MAMBA_CACHE_MODE="${VLLM_MAMBA_CACHE_MODE:-}"
+VLLM_USE_V1="${VLLM_USE_V1:-false}"
 RAY_NUM_CPUS="${RAY_NUM_CPUS:-}"
 RAY_INCLUDE_DASHBOARD="${RAY_INCLUDE_DASHBOARD:-false}"
 VLLM_DISABLE_HYBRID_KV_CACHE_MANAGER="${VLLM_DISABLE_HYBRID_KV_CACHE_MANAGER:-}"
+GEN_STREAM="${GEN_STREAM:-false}"
+GEN_REQUEST_CONCURRENCY="${GEN_REQUEST_CONCURRENCY:-}"
 
 if [[ -z "${RAY_NUM_CPUS}" ]]; then
     # Keep Ray startup bounded on high-core hosts. Leaving this unset on a 256-core
@@ -230,6 +258,11 @@ fi
 
 append_hydra_override "+data.repetition_penalty" "${GEN_REPETITION_PENALTY}"
 
+if [[ "${GEN_STREAM,,}" == "true" ]]; then
+    append_hydra_override "+data.stream" "true"
+fi
+append_hydra_override "+data.request_concurrency" "${GEN_REQUEST_CONCURRENCY}"
+
 append_hydra_override "ray_kwargs.ray_init.num_cpus" "${RAY_NUM_CPUS}"
 append_hydra_override "+ray_kwargs.ray_init.include_dashboard" "${RAY_INCLUDE_DASHBOARD}"
 append_hydra_override \
@@ -240,9 +273,14 @@ append_hydra_override \
     "${VLLM_MAX_CUDAGRAPH_CAPTURE_SIZE}"
 append_hydra_override "+actor_rollout_ref.rollout.engine_kwargs.vllm.block_size" "${VLLM_BLOCK_SIZE}"
 append_hydra_override "+actor_rollout_ref.rollout.engine_kwargs.vllm.mamba_cache_mode" "${VLLM_MAMBA_CACHE_MODE}"
+append_hydra_override "+ray_kwargs.ray_init.runtime_env.env_vars.VLLM_USE_V1" "\"${VLLM_USE_V1}\""
 
 echo "Ray config: num_cpus=${RAY_NUM_CPUS}, include_dashboard=${RAY_INCLUDE_DASHBOARD}"
 echo "Running generation -> ${RAW_FILE}"
+export MASTER_ADDR="${EVAL_MASTER_ADDR}"
+export MASTER_PORT="${EVAL_MASTER_PORT}"
+export DIST_INIT_METHOD="${DIST_INIT_METHOD:-env://}"
+echo "Torch distributed master: ${EVAL_MASTER_ADDR}:${EVAL_MASTER_PORT}"
 (
     cd "${REPO_ROOT}"
     "${GENERATION_CMD[@]}"

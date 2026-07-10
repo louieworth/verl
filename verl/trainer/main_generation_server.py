@@ -38,6 +38,7 @@ os.environ["TOKENIZERS_PARALLELISM"] = "true"
 # os.environ['TORCH_COMPILE_DISABLE'] = '1'
 
 import asyncio
+import json
 from pprint import pprint
 
 import pandas as pd
@@ -77,14 +78,47 @@ async def start_server(config):
     return server_handles, server_addresses
 
 
+async def _read_streaming_chat_completion(resp):
+    chunks = []
+    async for raw_line in resp.content:
+        line = raw_line.decode("utf-8", errors="replace").strip()
+        if not line or line.startswith(":"):
+            continue
+        if not line.startswith("data:"):
+            continue
+        payload = line[len("data:") :].strip()
+        if payload == "[DONE]":
+            break
+        try:
+            data = json.loads(payload)
+        except json.JSONDecodeError:
+            continue
+        if "error" in data:
+            err = data["error"]
+            err_msg = err.get("message", "") if isinstance(err, dict) else str(err)
+            print(f"[submit_request] skipping failed streaming request: {err_msg[:200]}")
+            return None
+        for choice in data.get("choices", []):
+            delta = choice.get("delta") or {}
+            content = delta.get("content")
+            if content:
+                chunks.append(content)
+    return "".join(chunks)
+
+
 async def submit_request(session: aiohttp.ClientSession, server_address, **chat_complete_request):
     extra_headers = chat_complete_request.pop("extra_headers", {})
+    use_stream = bool(chat_complete_request.get("stream"))
     async with session.post(
         url=f"http://{server_address}/v1/chat/completions",
         headers={"Authorization": "Bearer token-abc123", **extra_headers},
         json=chat_complete_request,
     ) as resp:
-        data = await resp.json()
+        content_type = resp.headers.get("Content-Type", "")
+        if use_stream and "text/event-stream" in content_type:
+            return await _read_streaming_chat_completion(resp)
+
+        data = await resp.json(content_type=None)
         # Handle request-level errors (e.g. context length exceeded) without
         # crashing the whole batch. Returning None lets the caller record an
         # empty response for this row and continue.
@@ -272,6 +306,13 @@ def main(config):
             sampling_params["chat_template_kwargs"] = _ctk
             print(f"Per-request chat_template_kwargs: {_ctk}")
 
+    _stream = OmegaConf.select(config, "data.stream", default=False)
+    if isinstance(_stream, str):
+        _stream = _stream.strip().lower() in {"1", "true", "yes", "on"}
+    if _stream:
+        sampling_params["stream"] = True
+        print("Per-request streaming: enabled")
+
     from omegaconf import ListConfig
 
     train_files = config.data.train_files
@@ -320,7 +361,14 @@ def main(config):
     num_failed = sum(1 for r in results if r is None)
     if num_failed:
         print(f"[main] {num_failed}/{len(results)} requests failed and were recorded as empty responses")
-    results = np.array([("" if result is None else result.choices[0].message.content) for result in results])
+    def _extract_content(result):
+        if result is None:
+            return ""
+        if isinstance(result, str):
+            return result
+        return result.choices[0].message.content or ""
+
+    results = np.array([_extract_content(result) for result in results])
     results = np.reshape(results, (-1, n_samples))
 
     assert results.shape == (len(chat_lst), n_samples)
