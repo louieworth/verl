@@ -8,7 +8,6 @@ cd "$VERL_ROOT"
 export PYTHONPATH="$VERL_ROOT:${PYTHONPATH:-}"
 export TASK="code"
 
-export RUN_EVAL_AFTER_TRAINING="${RUN_EVAL_AFTER_TRAINING:-true}"
 export PIPELINE_RESUME_MODE="${PIPELINE_RESUME_MODE:-resume_matching}"
 
 RUNNER_LOG_DIR="${RUNNER_LOG_DIR:-$VERL_ROOT/outputs/OPD/code/direct_variants_ms20_serial_logs}"
@@ -29,7 +28,6 @@ log() {
 
 log "Starting serial ms20 code direct variant run"
 log "TASK=$TASK"
-log "RUN_EVAL_AFTER_TRAINING=$RUN_EVAL_AFTER_TRAINING"
 log "PIPELINE_RESUME_MODE=$PIPELINE_RESUME_MODE"
 log "Log: $RUNNER_LOG"
 

@@ -105,6 +105,7 @@ def _build_generation_config(
     pass_k: int,
     prompt_length: int,
     response_length: int,
+    max_model_len: int,
     nnodes: int,
     n_gpus_per_node: int,
     tensor_model_parallel_size: int,
@@ -136,6 +137,7 @@ def _build_generation_config(
                     "do_sample": True,
                     "prompt_length": prompt_length,
                     "response_length": response_length,
+                    "max_model_len": max_model_len,
                     "tensor_model_parallel_size": tensor_model_parallel_size,
                     "pipeline_model_parallel_size": 1,
                     "data_parallel_size": 1,
@@ -159,6 +161,7 @@ def _generate_responses_with_server(
     pass_k: int,
     temperature: float,
     top_p: float,
+    max_tokens: int,
 ):
     dataset = pd.read_parquet(dataset_path)
     chat_lst = dataset[prompt_key].tolist()
@@ -173,7 +176,7 @@ def _generate_responses_with_server(
             {
                 "temperature": temperature,
                 "top_p": top_p,
-                "max_tokens": 38912,
+                "max_tokens": max_tokens,
             },
             chat_numpy,
         )
@@ -198,6 +201,7 @@ def generate_responses_with_server(
     pass_k: int,
     temperature: float,
     top_p: float,
+    max_tokens: int,
 ):
     _generate_responses_with_server(
         server_addresses,
@@ -208,6 +212,7 @@ def generate_responses_with_server(
         pass_k=pass_k,
         temperature=temperature,
         top_p=top_p,
+        max_tokens=max_tokens,
     )
 
 
@@ -294,14 +299,19 @@ def launch_generation_server(
     n_gpus_per_node: int,
     tensor_model_parallel_size: int,
 ):
+    prompt_length = int(os.environ.get("EVAL_PROMPT_LENGTH", "4096"))
+    response_length = int(os.environ.get("EVAL_RESPONSE_LENGTH", "16384"))
+    max_model_len = int(os.environ.get("EVAL_MAX_MODEL_LEN", str(prompt_length + response_length)))
+
     config = _build_generation_config(
         model_path,
         tokenizer_path,
         temperature=temperature,
         top_p=top_p,
         pass_k=pass_k,
-        prompt_length=4096,
-        response_length=38912,
+        prompt_length=prompt_length,
+        response_length=response_length,
+        max_model_len=max_model_len,
         nnodes=nnodes,
         n_gpus_per_node=n_gpus_per_node,
         tensor_model_parallel_size=tensor_model_parallel_size,
@@ -312,7 +322,8 @@ def launch_generation_server(
 
     with temporarily_clear_torch_launch_env():
         ray.init(runtime_env=build_generation_server_runtime_env())
-        return asyncio.run(start_server(config))
+        server_handles, server_addresses = asyncio.run(start_server(config))
+        return server_handles, server_addresses, response_length
 
 
 def shutdown_generation_server(server_handles: list):
@@ -347,7 +358,7 @@ def run_evaluation_suite(
     eval_results: dict[str, float] = {}
 
     try:
-        server_handles, server_addresses = launch_generation_server(
+        server_handles, server_addresses, response_length = launch_generation_server(
             model_path,
             tokenizer_path,
             temperature=temperature,
@@ -365,17 +376,21 @@ def run_evaluation_suite(
 
             gen_output = os.path.join(output_dir, f"{dataset_name}_pass{pass_k}_generation.parquet")
 
-            logger.info("  Generating responses for %s with pass@%s...", dataset_name, pass_k)
-            generate_responses_with_server(
-                server_addresses,
-                model_path,
-                dataset_path,
-                gen_output,
-                prompt_key=prompt_key,
-                pass_k=pass_k,
-                temperature=temperature,
-                top_p=top_p,
-            )
+            if os.path.exists(gen_output) and os.path.getsize(gen_output) > 0:
+                logger.info("  Reusing existing generated responses for %s: %s", dataset_name, gen_output)
+            else:
+                logger.info("  Generating responses for %s with pass@%s...", dataset_name, pass_k)
+                generate_responses_with_server(
+                    server_addresses,
+                    model_path,
+                    dataset_path,
+                    gen_output,
+                    prompt_key=prompt_key,
+                    pass_k=pass_k,
+                    temperature=temperature,
+                    top_p=top_p,
+                    max_tokens=response_length,
+                )
 
             logger.info("  Computing scores for %s...", dataset_name)
             accuracy = evaluate_generated_output(

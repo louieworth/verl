@@ -1,0 +1,10 @@
+{
+  "Qwen3-1.7B_OPD_CODE_teacherQwen3-8B_y_o_kl_reverse_full_vocab_clip0_topk32_vanilla_ms1_20260603-042450_LORA": {
+    "livecodebench_v6_avg16": 0.017061611374407582,
+    "livecodebench_v6_pass16": 0.037914691943127965
+  },
+  "Qwen3-1.7B_OPD_CODE_teacherQwen3-8B_y_o_kl_reverse_full_vocab_clip0_vanilla_ms1_20260603-042150_LORA": {
+    "livecodebench_v6_avg16": 0.01688388625592417,
+    "livecodebench_v6_pass16": 0.03696682464454976
+  }
+}

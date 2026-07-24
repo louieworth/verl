@@ -2,7 +2,7 @@
 
 Evaluates OPD/OPSD code-task checkpoints on HumanEval+, MBPP+, and LiveCodeBench v6.
 
-Defaults follow the code-generation setup used for this extension: `PASS_K=4`, `temperature=1.0`, `top_p=1.0`, `max_prompt_length=2048`, and `max_response_length=16384`. The prompt limit covers the full current code evaluation set by tokenizer scan: HumanEval+ max 446, MBPP+ max 229, and LiveCodeBench v6 max 1938 tokens. Results are written to JSON plus CSV summaries with `Avg@4` and `Pass@4`.
+Defaults follow the code-generation setup used for this extension: `PASS_K=4`, `temperature=1.0`, `top_p=1.0`, `max_prompt_length=2048`, and `max_response_length=8192`. The prompt limit covers the full current code evaluation set by tokenizer scan: HumanEval+ max 446, MBPP+ max 229, and LiveCodeBench v6 max 1938 tokens. Results are written to JSON plus CSV summaries with `Avg@4` and `Pass@4`.
 
 Dependencies, in the `verl` conda environment:
 

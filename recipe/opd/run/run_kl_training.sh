@@ -388,22 +388,49 @@ STAGE2_ROLLOUT_MAX_MODEL_LEN=$((STAGE2_PROMPT_LENGTH + MAX_RESPONSE_LENGTH + ROL
 ROLLOUT_MAX_NUM_SEQS=${ROLLOUT_MAX_NUM_SEQS:-64}
 ROLLOUT_GPU_MEMORY_UTILIZATION=${ROLLOUT_GPU_MEMORY_UTILIZATION:-0.85}
 ROLLOUT_MAX_NUM_BATCHED_TOKENS=${ROLLOUT_MAX_NUM_BATCHED_TOKENS:-65536}
+# y_o rollout source. `student` is the historical student-only rollout.
+# `skd`/`skd_vllm` runs student draft + teacher accept/replacement during y_o rollout.
+# `skd_vllm_internal` installs a repo-local vLLM sampler patch and uses vLLM
+# speculative decoding when the installed vLLM supports a plain student draft model.
+Y_O_ROLLOUT_MODE=${Y_O_ROLLOUT_MODE:-"student"}
+case "$Y_O_ROLLOUT_MODE" in
+    student) ;;
+    skd|skd_vllm|skd_vllm_internal) ;;
+    *) echo "ERROR: Y_O_ROLLOUT_MODE must be one of: student, skd, skd_vllm, skd_vllm_internal (got: $Y_O_ROLLOUT_MODE)" >&2; exit 1 ;;
+esac
+SKD_ACCEPT_TOP_K=${SKD_ACCEPT_TOP_K:-25}
+SKD_ACCEPT_TOP_P=${SKD_ACCEPT_TOP_P:-1.0}
+SKD_GAMMA=${SKD_GAMMA:-5}
+SKD_ROLLOUT_BATCH_SIZE=${SKD_ROLLOUT_BATCH_SIZE:-128}
+SKD_STUDENT_TEMPERATURE=${SKD_STUDENT_TEMPERATURE:-0.6}
+SKD_STUDENT_TOP_P=${SKD_STUDENT_TOP_P:-0.95}
+SKD_TEACHER_TEMPERATURE=${SKD_TEACHER_TEMPERATURE:-0.6}
+SKD_TEACHER_TOP_P=${SKD_TEACHER_TOP_P:-0.95}
+SKD_STUDENT_GPUS=${SKD_STUDENT_GPUS:-0,1,2,3}
+SKD_TEACHER_GPUS=${SKD_TEACHER_GPUS:-4,5,6,7}
+SKD_SHARED_GPUS=${SKD_SHARED_GPUS:-0,1,2,3,4,5,6,7}
+SKD_STUDENT_TP=${SKD_STUDENT_TP:-0}
+SKD_TEACHER_TP=${SKD_TEACHER_TP:-0}
+SKD_VLLM_GPU_MEMORY_UTILIZATION=${SKD_VLLM_GPU_MEMORY_UTILIZATION:-$ROLLOUT_GPU_MEMORY_UTILIZATION}
+SKD_VLLM_MAX_NUM_SEQS=${SKD_VLLM_MAX_NUM_SEQS:-$SKD_ROLLOUT_BATCH_SIZE}
+SKD_VLLM_MAX_NUM_BATCHED_TOKENS=${SKD_VLLM_MAX_NUM_BATCHED_TOKENS:-$ROLLOUT_MAX_NUM_BATCHED_TOKENS}
+SKD_PARALLEL_STUDENT_TEACHER=${SKD_PARALLEL_STUDENT_TEACHER:-true}
+SKD_PIPELINE_LANES=${SKD_PIPELINE_LANES:-2}
 STAGE1_ROLLOUT_MAX_NUM_BATCHED_TOKENS=$ROLLOUT_MAX_NUM_BATCHED_TOKENS
 if [ "$STAGE1_ROLLOUT_MAX_NUM_BATCHED_TOKENS" -lt "$STAGE1_ROLLOUT_MAX_MODEL_LEN" ]; then
     STAGE1_ROLLOUT_MAX_NUM_BATCHED_TOKENS=$STAGE1_ROLLOUT_MAX_MODEL_LEN
+fi
+if [ "$SKD_VLLM_MAX_NUM_BATCHED_TOKENS" -lt "$STAGE1_ROLLOUT_MAX_NUM_BATCHED_TOKENS" ]; then
+    SKD_VLLM_MAX_NUM_BATCHED_TOKENS=$STAGE1_ROLLOUT_MAX_NUM_BATCHED_TOKENS
 fi
 STAGE2_ROLLOUT_MAX_NUM_BATCHED_TOKENS=$ROLLOUT_MAX_NUM_BATCHED_TOKENS
 if [ "$STAGE2_ROLLOUT_MAX_NUM_BATCHED_TOKENS" -lt "$STAGE2_ROLLOUT_MAX_MODEL_LEN" ]; then
     STAGE2_ROLLOUT_MAX_NUM_BATCHED_TOKENS=$STAGE2_ROLLOUT_MAX_MODEL_LEN
 fi
-if [ -z "$MAX_TOKEN_LEN_PER_GPU" ]; then
-    MAX_TOKEN_LEN_PER_GPU=24576
-    if [ "$MAX_LENGTH" -gt "$MAX_TOKEN_LEN_PER_GPU" ]; then
-        MAX_TOKEN_LEN_PER_GPU=$MAX_LENGTH
-    fi
-elif [ "$MAX_TOKEN_LEN_PER_GPU" -lt "$MAX_LENGTH" ]; then
-    echo "WARNING: MAX_TOKEN_LEN_PER_GPU=$MAX_TOKEN_LEN_PER_GPU is below MAX_LENGTH=$MAX_LENGTH; dynamic batching may split or fail on long samples." >&2
-fi
+# Keep the dynamic batching token cap aligned with the training truncation
+# budget. A smaller external value can fail before KLTrainingDataset truncation
+# takes effect when long code samples exceed the per-GPU cap.
+MAX_TOKEN_LEN_PER_GPU=$MAX_LENGTH
 PROMPT_MODE_TAG="$Y_MODE"   # y_o or y_r — kept named PROMPT_MODE_TAG for backward compat with downstream string handling
 CLIP_TAG="clip$(echo $KL_TOKEN_CLIP | sed 's/\.//')"  # e.g. 0.1 -> clip01, 0.06 -> clip006
 if [ "$KL_TYPE" = "jsd" ]; then
@@ -568,7 +595,12 @@ TASK_FILE_SUFFIX="_${TASK}"
 TASK_RESULT_SUFFIX="_${TASK_UPPER}"
 RUN_DATE=${RUN_DATE:-$(date +%Y%m%d-%H%M%S)}
 OPTIMIZATION_STEP_TAG="${MULTISTEP_TAG:-ms1}"
-RUN_DESCRIPTOR="${PROMPT_MODE_TAG}_kl_${KL_TYPE}_${KL_METHOD}_${CLIP_TAG}${BETA_TAG}${TOPK_TAG}${Y_O_FILTER_TAG}_${TEACHER_TRAINING_PROMPT}_${OPTIMIZATION_STEP_TAG}_${RUN_DATE}"
+case "$Y_O_ROLLOUT_MODE" in
+    student) Y_O_ROLLOUT_TAG="" ;;
+    skd|skd_vllm) Y_O_ROLLOUT_TAG="_skd" ;;
+    skd_vllm_internal) Y_O_ROLLOUT_TAG="_skd_internal" ;;
+esac
+RUN_DESCRIPTOR="${PROMPT_MODE_TAG}${Y_O_ROLLOUT_TAG}_kl_${KL_TYPE}_${KL_METHOD}_${CLIP_TAG}${BETA_TAG}${TOPK_TAG}${Y_O_FILTER_TAG}_${TEACHER_TRAINING_PROMPT}_${OPTIMIZATION_STEP_TAG}_${RUN_DATE}"
 if [ "$DISTILL_MODE" = "opd" ]; then
     MODEL_RUN_NAME="teacher${TEACHER_MODEL_NAME}_${RUN_DESCRIPTOR}"
 else
@@ -934,15 +966,16 @@ resolve_data_path_in_dir() {
     #      TEACHER_MODEL_NAME because:
     #        - OPSD vs OPD use different teacher prompts (with/without y*)
     #        - Different teachers (e.g. Qwen3-8B vs Qwen3-32B) produce different y_r
-    # y_o: train on stage1 student rollouts (no qualifier — student rollouts
-    #      depend only on the student model already in the path).
+    # y_o: train on stage1 rollouts. SKD y_o is path-qualified to avoid
+    #      accidentally reusing ordinary student rollout parquet.
     if [ "$Y_MODE" = "y_r" ]; then
         echo "$data_dir/${TASK_INTERMEDIATE_PREFIX}2_${PROMPT_MODE_TAG}_${DISTILL_MODE}_${TEACHER_MODEL_NAME}_responses.parquet"
     else
+        local stage1_response_stem="${TASK_INTERMEDIATE_PREFIX}1${Y_O_ROLLOUT_TAG}_responses"
         case "${FORWARD_STAGE2_MODE:-}" in
-            "stage1_reward_0_only") echo "$data_dir/${TASK_INTERMEDIATE_PREFIX}1_responses_reward0.parquet" ;;
-            "stage1_reward_1_only") echo "$data_dir/${TASK_INTERMEDIATE_PREFIX}1_responses_reward1.parquet" ;;
-            *) echo "$data_dir/${TASK_INTERMEDIATE_PREFIX}1_responses.parquet" ;;
+            "stage1_reward_0_only") echo "$data_dir/${stage1_response_stem}_reward0.parquet" ;;
+            "stage1_reward_1_only") echo "$data_dir/${stage1_response_stem}_reward1.parquet" ;;
+            *) echo "$data_dir/${stage1_response_stem}.parquet" ;;
         esac
     fi
 }
@@ -1239,7 +1272,7 @@ invalidate_resident_generated_data_after_pre_sync() {
     esac
 
     echo "Invalidating existing resident-generated responses after pre-generation sync: $data_dir"
-    rm -f "$data_dir/${TASK_INTERMEDIATE_PREFIX}1_responses.parquet"
+    rm -f "$data_dir/${TASK_INTERMEDIATE_PREFIX}1${Y_O_ROLLOUT_TAG}_responses.parquet"
     rm -f "$data_dir"/${TASK_INTERMEDIATE_PREFIX}2_*_responses*.parquet
     rm -f "$data_dir/deepscaleR_stage1_responses.parquet"
     rm -f "$data_dir"/deepscaleR_stage2_*_responses*.parquet
@@ -1383,6 +1416,113 @@ PYCHUNKPROMPTS
     python3 "$PIPELINE_DIR/y_o_prepare.py" "${args[@]}"
 }
 
+
+generate_stage1_y_o_responses() {
+    local stage1_prompts="$1"
+    local stage1_output="$2"
+    local current_model_path="$3"
+    local current_teacher_model_path="${4:-}"
+
+    case "$Y_O_ROLLOUT_MODE" in
+        skd|skd_vllm)
+            echo "  [Stage 1] Generating SKD y_o responses with vLLM..."
+            echo "    student_gpus=$SKD_STUDENT_GPUS teacher_gpus=$SKD_TEACHER_GPUS shared_gpus=$SKD_SHARED_GPUS"
+            echo "    skd_top_k=$SKD_ACCEPT_TOP_K skd_top_p=$SKD_ACCEPT_TOP_P gamma=$SKD_GAMMA parallel_student_teacher=$SKD_PARALLEL_STUDENT_TEACHER"
+            PYTHONPATH="$VERL_ROOT/local_vllm_patch:${PYTHONPATH:-}" env -u PYTORCH_CUDA_ALLOC_CONF python3 -m recipe.opd.generation.skd_vllm_y_o_generate \
+                --input "$stage1_prompts" \
+                --output "$stage1_output" \
+                --prompt_key prompt \
+                --student_model_path "$current_model_path" \
+                --teacher_model_path "${current_teacher_model_path:-}" \
+                --tokenizer_path "$current_model_path" \
+                --distill_mode "$DISTILL_MODE" \
+                --max_tokens "$MAX_RESPONSE_LENGTH" \
+                --prompt_length "$BASE_PROMPT_LENGTH" \
+                --max_model_len "$STAGE1_ROLLOUT_MAX_MODEL_LEN" \
+                --batch_size "$SKD_ROLLOUT_BATCH_SIZE" \
+                --gamma "$SKD_GAMMA" \
+                --top_k "$SKD_ACCEPT_TOP_K" \
+                --top_p "$SKD_ACCEPT_TOP_P" \
+                --student_temperature "$SKD_STUDENT_TEMPERATURE" \
+                --student_top_p "$SKD_STUDENT_TOP_P" \
+                --teacher_temperature "$SKD_TEACHER_TEMPERATURE" \
+                --teacher_top_p "$SKD_TEACHER_TOP_P" \
+                --student_gpus "$SKD_STUDENT_GPUS" \
+                --teacher_gpus "$SKD_TEACHER_GPUS" \
+                --shared_gpus "$SKD_SHARED_GPUS" \
+                --gpu_memory_utilization "$SKD_VLLM_GPU_MEMORY_UTILIZATION" \
+                --max_num_seqs "$SKD_VLLM_MAX_NUM_SEQS" \
+                --max_num_batched_tokens "$SKD_VLLM_MAX_NUM_BATCHED_TOKENS" \
+                --parallel_student_teacher "$SKD_PARALLEL_STUDENT_TEACHER" \
+                --pipeline_lanes "$SKD_PIPELINE_LANES"
+            ;;
+        skd_vllm_internal)
+            echo "  [Stage 1] Generating SKD y_o responses with vLLM internal sampler..."
+            echo "    shared_gpus=$SKD_SHARED_GPUS teacher_tp=${SKD_TEACHER_TP:-auto} student_tp=${SKD_STUDENT_TP:-auto}"
+            echo "    skd_top_k=$SKD_ACCEPT_TOP_K skd_top_p=$SKD_ACCEPT_TOP_P gamma=$SKD_GAMMA"
+            PYTHONPATH="$VERL_ROOT/local_vllm_patch:${PYTHONPATH:-}" env -u PYTORCH_CUDA_ALLOC_CONF python3 -m recipe.opd.generation.skd_vllm_internal_y_o_generate \
+                --input "$stage1_prompts" \
+                --output "$stage1_output" \
+                --prompt_key prompt \
+                --student_model_path "$current_model_path" \
+                --teacher_model_path "${current_teacher_model_path:-}" \
+                --tokenizer_path "$current_model_path" \
+                --distill_mode "$DISTILL_MODE" \
+                --max_tokens "$MAX_RESPONSE_LENGTH" \
+                --prompt_length "$BASE_PROMPT_LENGTH" \
+                --max_model_len "$STAGE1_ROLLOUT_MAX_MODEL_LEN" \
+                --batch_size "$SKD_ROLLOUT_BATCH_SIZE" \
+                --gamma "$SKD_GAMMA" \
+                --top_k "$SKD_ACCEPT_TOP_K" \
+                --top_p "$SKD_ACCEPT_TOP_P" \
+                --student_temperature "$SKD_STUDENT_TEMPERATURE" \
+                --student_top_p "$SKD_STUDENT_TOP_P" \
+                --teacher_temperature "$SKD_TEACHER_TEMPERATURE" \
+                --teacher_top_p "$SKD_TEACHER_TOP_P" \
+                --shared_gpus "$SKD_SHARED_GPUS" \
+                --student_tp "$SKD_STUDENT_TP" \
+                --teacher_tp "$SKD_TEACHER_TP" \
+                --gpu_memory_utilization "$SKD_VLLM_GPU_MEMORY_UTILIZATION" \
+                --max_num_seqs "$SKD_VLLM_MAX_NUM_SEQS" \
+                --max_num_batched_tokens "$SKD_VLLM_MAX_NUM_BATCHED_TOKENS"
+            ;;
+        student)
+            if [ "$RESIDENT_STUDENT_ROLLOUT" = "true" ]; then
+                ensure_resident_y_o_server
+                python3 -m recipe.opd.resident_y_o_generate \
+                    --manifest "$RESIDENT_YO_MANIFEST" \
+                    --input "$stage1_prompts" \
+                    --output "$stage1_output" \
+                    --prompt_key prompt \
+                    --model_path "$MODEL_PATH" \
+                    --temperature 0.6 \
+                    --top_p 0.95 \
+                    --max_tokens "$MAX_RESPONSE_LENGTH"
+            else
+                env -u PYTORCH_CUDA_ALLOC_CONF python3 -m verl.trainer.main_generation_server \
+                    trainer.nnodes="${NNODES}" \
+                    trainer.n_gpus_per_node="${NGPUS_PER_NODE}" \
+                    actor_rollout_ref.model.path="${current_model_path}" \
+                    actor_rollout_ref.model.trust_remote_code=true \
+                    actor_rollout_ref.rollout.temperature=0.6 \
+                    actor_rollout_ref.rollout.top_p=0.95 \
+                    actor_rollout_ref.rollout.top_k=20 \
+                    actor_rollout_ref.rollout.prompt_length="${BASE_PROMPT_LENGTH}" \
+                    actor_rollout_ref.rollout.response_length="${MAX_RESPONSE_LENGTH}" \
+                    actor_rollout_ref.rollout.max_model_len="${STAGE1_ROLLOUT_MAX_MODEL_LEN}" \
+                    actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
+                    actor_rollout_ref.rollout.gpu_memory_utilization="${ROLLOUT_GPU_MEMORY_UTILIZATION}" \
+                    actor_rollout_ref.rollout.max_num_seqs="${ROLLOUT_MAX_NUM_SEQS}" \
+                    actor_rollout_ref.rollout.max_num_batched_tokens="${STAGE1_ROLLOUT_MAX_NUM_BATCHED_TOKENS}" \
+                    actor_rollout_ref.rollout.name=vllm \
+                    actor_rollout_ref.rollout.n=1 \
+                    data.train_files="['${stage1_prompts}']" \
+                    data.prompt_key=prompt \
+                    +data.output_path="${stage1_output}"
+            fi
+            ;;
+    esac
+}
 step1_reuse_ms_tag_for_path() {
     local target_path="$1"
 
@@ -1451,7 +1591,7 @@ find_canonical_step1_responses() {
     case "$stage" in
         stage1)
             expected_y_mode="y_o"
-            pattern="*/epoch1/${target_ms_tag}/batch00001/${TASK_INTERMEDIATE_PREFIX}1_responses.parquet"
+            pattern="*/epoch1/${target_ms_tag}/batch00001/${TASK_INTERMEDIATE_PREFIX}1${Y_O_ROLLOUT_TAG}_responses.parquet"
             ;;
         stage2)
             expected_y_mode="y_r"
@@ -1480,7 +1620,7 @@ reuse_step1_responses_if_available() {
     local target_path="$2"
 
     step1_reuse_enabled_for_path "$target_path" || return 1
-    if [ "$stage" = "stage1" ] && [ "${target_path##*/}" != "${TASK_INTERMEDIATE_PREFIX}1_responses.parquet" ]; then
+    if [ "$stage" = "stage1" ] && [ "${target_path##*/}" != "${TASK_INTERMEDIATE_PREFIX}1${Y_O_ROLLOUT_TAG}_responses.parquet" ]; then
         return 1
     fi
 
@@ -2079,6 +2219,10 @@ print_base_configuration() {
     echo "  Max Len:        $MAX_LENGTH (KL train total)"
     echo "  Rollout Lens:   stage1=$STAGE1_ROLLOUT_MAX_MODEL_LEN stage2=$STAGE2_ROLLOUT_MAX_MODEL_LEN (chat_template_buffer=$ROLLOUT_CHAT_TEMPLATE_TOKEN_BUFFER)"
     echo "  Rollout Batch:  max_num_seqs=$ROLLOUT_MAX_NUM_SEQS max_tokens(stage1/stage2)=$STAGE1_ROLLOUT_MAX_NUM_BATCHED_TOKENS/$STAGE2_ROLLOUT_MAX_NUM_BATCHED_TOKENS"
+    echo "  y_o Rollout:    $Y_O_ROLLOUT_MODE"
+if [[ "$Y_O_ROLLOUT_MODE" == skd* ]]; then
+    echo "  SKD Rollout:    batch=$SKD_ROLLOUT_BATCH_SIZE max_num_seqs=$SKD_VLLM_MAX_NUM_SEQS pipeline_lanes=$SKD_PIPELINE_LANES gamma=$SKD_GAMMA top_k=$SKD_ACCEPT_TOP_K top_p=$SKD_ACCEPT_TOP_P"
+fi
     echo "  Grad Accum:     $GRADIENT_ACCUMULATION_STEPS ($GRADIENT_ACCUMULATION_SOURCE)"
     echo "  FSDP:           $FSDP_STRATEGY (size=$FSDP_SIZE, sp=$SP_SIZE)"
     echo "  Token/GPU:      $MAX_TOKEN_LEN_PER_GPU"
@@ -2233,7 +2377,7 @@ run_epoch() {
         else
             echo "Stage 2 $PROMPT_MODE_TAG data not found. Generating..."
 
-            local stage1_output="$current_gen_results_dir/${TASK_INTERMEDIATE_PREFIX}1_responses.parquet"
+            local stage1_output="$current_gen_results_dir/${TASK_INTERMEDIATE_PREFIX}1${Y_O_ROLLOUT_TAG}_responses.parquet"
             local stage1_prompts="$current_gen_results_dir/${TASK_INTERMEDIATE_PREFIX}1_prompts.parquet"
 
             if reuse_ms1_responses_if_available stage2 "$current_data_path"; then
@@ -2247,42 +2391,11 @@ run_epoch() {
                     echo "  [Stage 1] Generating initial responses..."
                     prepare_stage1_prompts "$stage1_prompts" "$pipeline_batch_start" "$pipeline_current_batch_size"
 
-                if [ "$RESIDENT_STUDENT_ROLLOUT" = "true" ]; then
-                    ensure_resident_y_o_server
-                    python3 -m recipe.opd.resident_y_o_generate \
-                        --manifest "$RESIDENT_YO_MANIFEST" \
-                        --input "$stage1_prompts" \
-                        --output "$stage1_output" \
-                        --prompt_key prompt \
-                        --model_path "$MODEL_PATH" \
-                        --temperature 0.6 \
-                        --top_p 0.95 \
-                        --max_tokens "$MAX_RESPONSE_LENGTH"
-                else
-                    env -u PYTORCH_CUDA_ALLOC_CONF python3 -m verl.trainer.main_generation_server \
-                        trainer.nnodes="${NNODES}" \
-                        trainer.n_gpus_per_node="${NGPUS_PER_NODE}" \
-                        actor_rollout_ref.model.path="${current_model_path}" \
-                        actor_rollout_ref.model.trust_remote_code=true \
-                        actor_rollout_ref.rollout.temperature=0.6 \
-                        actor_rollout_ref.rollout.top_p=0.95 \
-                        actor_rollout_ref.rollout.top_k=20 \
-                        actor_rollout_ref.rollout.prompt_length="${BASE_PROMPT_LENGTH}" \
-                        actor_rollout_ref.rollout.response_length="${MAX_RESPONSE_LENGTH}" \
-                        actor_rollout_ref.rollout.max_model_len="${STAGE1_ROLLOUT_MAX_MODEL_LEN}" \
-                        actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
-                        actor_rollout_ref.rollout.gpu_memory_utilization="${ROLLOUT_GPU_MEMORY_UTILIZATION}" \
-                        actor_rollout_ref.rollout.max_num_seqs="${ROLLOUT_MAX_NUM_SEQS}" \
-                        actor_rollout_ref.rollout.max_num_batched_tokens="${STAGE1_ROLLOUT_MAX_NUM_BATCHED_TOKENS}" \
-                        actor_rollout_ref.rollout.name=vllm \
-                        actor_rollout_ref.rollout.n=1 \
-                        data.train_files="['${stage1_prompts}']" \
-                        data.prompt_key=prompt \
-                        +data.output_path="${stage1_output}"
-                    fi
+                    generate_stage1_y_o_responses "$stage1_prompts" "$stage1_output" "$current_model_path" "${current_teacher_model_path:-}"
                 fi
 
                 sleep_resident_y_o_server
+
 
             # Score stage1 responses only when a downstream feature needs
             # extra_info.reward. Code scoring executes tests, so it is intentionally
@@ -2356,6 +2469,7 @@ run_epoch() {
             fi
         fi
 
+
         # ---- P1.1: score y_1 and keep reward>=threshold (optionally also stage1_reward==0) ----
         # Runs for forward KL regardless of whether data was just generated, found on disk,
         # or reused via DATA_PATH override, so existing rewrite_all parquets can be recycled.
@@ -2384,7 +2498,7 @@ run_epoch() {
         # into "everything = hard". score_stage1_reward.py already populated
         # stage1; backfill propagates it into stage2.
         if [ "$LOG_DIFFICULTY_BUCKETS" = "true" ]; then
-            local stage1_for_backfill="$current_gen_results_dir/${TASK_INTERMEDIATE_PREFIX}1_responses.parquet"
+            local stage1_for_backfill="$current_gen_results_dir/${TASK_INTERMEDIATE_PREFIX}1${Y_O_ROLLOUT_TAG}_responses.parquet"
             if [ ! -f "$stage1_for_backfill" ]; then
                 echo "  [T4 backfill] WARNING: stage1 parquet not found at $stage1_for_backfill;"
                 echo "                training will fail at dataset init unless DATA_PATH points to a"
@@ -2415,42 +2529,11 @@ run_epoch() {
 
             prepare_stage1_prompts "$stage1_prompts" "$pipeline_batch_start" "$pipeline_current_batch_size"
 
-            if [ "$RESIDENT_STUDENT_ROLLOUT" = "true" ]; then
-                ensure_resident_y_o_server
-                python3 -m recipe.opd.resident_y_o_generate \
-                    --manifest "$RESIDENT_YO_MANIFEST" \
-                    --input "$stage1_prompts" \
-                    --output "$current_data_path" \
-                    --prompt_key prompt \
-                    --model_path "$MODEL_PATH" \
-                    --temperature 0.6 \
-                    --top_p 0.95 \
-                    --max_tokens "$MAX_RESPONSE_LENGTH"
-            else
-                env -u PYTORCH_CUDA_ALLOC_CONF python3 -m verl.trainer.main_generation_server \
-                    trainer.nnodes="${NNODES}" \
-                    trainer.n_gpus_per_node="${NGPUS_PER_NODE}" \
-                    actor_rollout_ref.model.path="${current_model_path}" \
-                    actor_rollout_ref.model.trust_remote_code=true \
-                    actor_rollout_ref.rollout.temperature=0.6 \
-                    actor_rollout_ref.rollout.top_p=0.95 \
-                    actor_rollout_ref.rollout.top_k=20 \
-                    actor_rollout_ref.rollout.prompt_length="${BASE_PROMPT_LENGTH}" \
-                    actor_rollout_ref.rollout.response_length="${MAX_RESPONSE_LENGTH}" \
-                    actor_rollout_ref.rollout.max_model_len="${STAGE1_ROLLOUT_MAX_MODEL_LEN}" \
-                    actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
-                    actor_rollout_ref.rollout.gpu_memory_utilization="${ROLLOUT_GPU_MEMORY_UTILIZATION}" \
-                    actor_rollout_ref.rollout.max_num_seqs="${ROLLOUT_MAX_NUM_SEQS}" \
-                    actor_rollout_ref.rollout.max_num_batched_tokens="${STAGE1_ROLLOUT_MAX_NUM_BATCHED_TOKENS}" \
-                    actor_rollout_ref.rollout.name=vllm \
-                    actor_rollout_ref.rollout.n=1 \
-                    data.train_files="['${stage1_prompts}']" \
-                    data.prompt_key=prompt \
-                    +data.output_path="${current_data_path}"
-            fi
+            generate_stage1_y_o_responses "$stage1_prompts" "$current_data_path" "$current_model_path" "${current_teacher_model_path:-}"
         fi
 
         sleep_resident_y_o_server
+
 
         # Score stage1 responses only when a downstream feature needs
         # extra_info.reward. Code scoring executes tests, so it is intentionally
@@ -2501,6 +2584,8 @@ top_k: $TOP_K
 temperature: $TEMPERATURE
 prompt_mode: $PROMPT_MODE_TAG
 y_mode: $Y_MODE
+y_o_rollout_mode: $Y_O_ROLLOUT_MODE
+y_o_rollout_tag: ${Y_O_ROLLOUT_TAG:-}
 use_initial_response: $USE_INITIAL_RESPONSE
 forward_stage2_mode: $FORWARD_STAGE2_MODE
 base_model_name: $MODEL_NAME

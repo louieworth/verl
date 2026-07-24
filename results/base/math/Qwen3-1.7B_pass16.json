@@ -1,0 +1,20 @@
+{
+  "Qwen3-1.7B_base_pass16": {
+    "model_path": "/home/ubuntu/.cache/huggingface/hub/models--Qwen--Qwen3-1.7B/snapshots/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e",
+    "aime24_pass16_generation_pass_16": 0.7666666666666667,
+    "aime25_pass16_generation_pass_16": 0.6666666666666666,
+    "hmmt25_pass16_generation_pass_16": 0.5666666666666667,
+    "beyondaime_pass16_generation_pass_16": 0.45,
+    "amobench_pass16_generation_pass_16": 0.1282051282051282,
+    "aime24_avg_pass1_generation_pass_16": 0.4479166666666667,
+    "aime24_pass8_generation_pass_16": 0.7666666666666667,
+    "aime25_avg_pass1_generation_pass_16": 0.35833333333333334,
+    "aime25_pass8_generation_pass_16": 0.5666666666666667,
+    "hmmt25_avg_pass1_generation_pass_16": 0.24166666666666667,
+    "hmmt25_pass8_generation_pass_16": 0.5,
+    "beyondaime_avg_pass1_generation_pass_16": 0.200625,
+    "beyondaime_pass8_generation_pass_16": 0.41,
+    "amobench_avg_pass1_generation_pass_16": 0.020833333333333332,
+    "amobench_pass8_generation_pass_16": 0.07692307692307693
+  }
+}

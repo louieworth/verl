@@ -1053,7 +1053,7 @@ class KLTrainer:
                             lr,
                         )
 
-                    if self.global_step % self.config.save_steps == 0:
+                    if self.config.save_steps > 0 and self.global_step % self.config.save_steps == 0:
                         self._save_checkpoint()
 
                 progress_bar.set_postfix(

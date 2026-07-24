@@ -1,0 +1,18 @@
+{
+  "Qwen3-1.7B_OPD_CODE_teacherQwen3-8B_y_o_kl_forward_full_vocab_clip0_vanilla_ms1_20260530-221413_LORA": {
+    "humaneval_plus_avg4": 0.5929878048780488,
+    "humaneval_plus_pass4": 0.7439024390243902,
+    "mbpp_plus_avg4": 0.48544973544973546,
+    "mbpp_plus_pass4": 0.5846560846560847,
+    "livecodebench_v6_avg4": 0.2990521327014218,
+    "livecodebench_v6_pass4": 0.3886255924170616
+  },
+  "Qwen3-1.7B_OPD_CODE_teacherQwen3-8B_y_r_kl_forward_full_vocab_clip0_refine_ms1_20260531-041923_LORA": {
+    "humaneval_plus_avg4": 0.5929878048780488,
+    "humaneval_plus_pass4": 0.7439024390243902,
+    "mbpp_plus_avg4": 0.49272486772486773,
+    "mbpp_plus_pass4": 0.5846560846560847,
+    "livecodebench_v6_avg4": 0.29834123222748815,
+    "livecodebench_v6_pass4": 0.3914691943127962
+  }
+}

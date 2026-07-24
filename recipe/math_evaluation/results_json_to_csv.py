@@ -4,8 +4,7 @@
 The JSON remains the source of truth. This script derives a flat table with one
 row per evaluated model and stable metadata columns parsed from the OPD/OPSD
 model key. The exported metric columns are intentionally compact: five avg@16
-columns, five pass@8 columns, then five pass@16 columns for the canonical math
-eval datasets.
+columns, then five pass@16 columns for the canonical math eval datasets.
 """
 
 from __future__ import annotations
@@ -43,9 +42,8 @@ SUMMARY_DATASETS = [
 ]
 
 AVG16_COLUMNS = [f"{dataset}_avg@16" for dataset in SUMMARY_DATASETS]
-PASS8_COLUMNS = [f"{dataset}_pass@8" for dataset in SUMMARY_DATASETS]
 PASS16_COLUMNS = [f"{dataset}_pass@16" for dataset in SUMMARY_DATASETS]
-SUMMARY_COLUMNS = AVG16_COLUMNS + PASS8_COLUMNS + PASS16_COLUMNS
+SUMMARY_COLUMNS = AVG16_COLUMNS + PASS16_COLUMNS
 
 DATASET_ORDER = SUMMARY_DATASETS + [
     "math500",
@@ -55,7 +53,6 @@ DATASET_ORDER = SUMMARY_DATASETS + [
 
 METRIC_ORDER = [
     "avg_pass1_generation_pass_16",
-    "pass8_generation_pass_16",
     "pass16_generation_pass_16",
     "pass1_generation_pass_1",
 ]
@@ -209,8 +206,6 @@ def rows_for_results(
         row = parse_model_key(model_key, fallback_model=fallback_model)
         for dataset in SUMMARY_DATASETS:
             row[f"{dataset}_avg@16"] = format_scalar(entry.get(f"{dataset}_avg_pass1_generation_pass_16", ""))
-        for dataset in SUMMARY_DATASETS:
-            row[f"{dataset}_pass@8"] = format_scalar(entry.get(f"{dataset}_pass8_generation_pass_16", ""))
         for dataset in SUMMARY_DATASETS:
             row[f"{dataset}_pass@16"] = format_scalar(entry.get(f"{dataset}_pass16_generation_pass_16", ""))
         rows.append(row)

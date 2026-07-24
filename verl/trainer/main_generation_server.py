@@ -143,6 +143,7 @@ async def generate_per_replica(
     sampling_params: dict,
     chat_lst: list,
     progress_bar: tqdm | None = None,
+    max_concurrency: int | None = None,
 ):
     # here we should sample n_samples for each chat_lst.
     # we use aiohttp to avoid hang in AsyncOpenAI when the number of requests is large.
@@ -165,8 +166,18 @@ async def generate_per_replica(
     if not chat_complete_request:
         return []
 
+    if max_concurrency is None:
+        max_concurrency = int(os.environ.get("EVAL_MAX_CONCURRENCY", os.environ.get("GENERATION_MAX_CONCURRENCY", "128")))
+    semaphore = asyncio.Semaphore(max_concurrency) if max_concurrency > 0 else None
+
+    async def submit_with_limit(request_index: int, req: dict):
+        if semaphore is None:
+            return await submit_indexed_request(request_index, server_address, **req)
+        async with semaphore:
+            return await submit_indexed_request(request_index, server_address, **req)
+
     tasks = [
-        asyncio.create_task(submit_indexed_request(request_index, server_address, **req))
+        asyncio.create_task(submit_with_limit(request_index, req))
         for request_index, req in enumerate(chat_complete_request)
     ]
     results = [None] * len(tasks)

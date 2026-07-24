@@ -1,0 +1,10 @@
+{
+  "Qwen3-1.7B": {
+    "humaneval_plus_avg16": 0.6230945121951219,
+    "humaneval_plus_pass16": 0.7560975609756098,
+    "mbpp_plus_avg16": 0.5014880952380952,
+    "mbpp_plus_pass16": 0.6084656084656085,
+    "livecodebench_v6_avg16": 0.3234004739336493,
+    "livecodebench_v6_pass16": 0.48530805687203793
+  }
+}

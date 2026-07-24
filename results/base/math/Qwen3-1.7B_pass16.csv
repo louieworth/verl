@@ -1,0 +1,2 @@
+model,task,is_lora,teacher,y_mode,kl_type,kl_method,clip_ratio,top_K,multi_turn,aime24_avg@16,aime25_avg@16,hmmt25_avg@16,beyondaime_avg@16,amobench_avg@16,aime24_pass@16,aime25_pass@16,hmmt25_pass@16,beyondaime_pass@16,amobench_pass@16
+Qwen3-1.7B,,,,,,,,0,,0.4479166667,0.3583333333,0.2416666667,0.200625,0.02083333333,0.7666666667,0.6666666667,0.5666666667,0.45,0.1282051282

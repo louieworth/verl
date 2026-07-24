@@ -1,3 +1,0 @@
-model,task,is_lora,teacher,y_mode,kl_type,kl_method,clip_ratio,top_K,multi_turn,humaneval_plus_Avg@4,mbpp_plus_Avg@4,livecodebench_v6_Avg@4,humaneval_plus_Pass@4,mbpp_plus_Pass@4,livecodebench_v6_Pass@4
-Qwen3-1.7B,code,true,Qwen3-8B,y_o,forward,full_vocab,0,0,1,0.6097560976,0.4914021164,0.3296208531,0.7134146341,0.5952380952,0.4398104265
-Qwen3-1.7B,code,true,Qwen3-8B,y_r,forward,full_vocab,0,0,1,0.6204268293,0.4993386243,,0.737804878,0.6005291005,

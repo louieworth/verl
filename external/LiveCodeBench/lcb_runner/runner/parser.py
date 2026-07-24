@@ -69,6 +69,12 @@ def get_args():
         help="Max model context length for vllm",
     )
     parser.add_argument(
+        "--max_num_seqs",
+        type=int,
+        default=128,
+        help="Max concurrent sequences for vllm",
+    )
+    parser.add_argument(
         "--multiprocess",
         default=0,
         type=int,
@@ -110,6 +116,11 @@ def get_args():
         "--enable_prefix_caching",
         action="store_true",
         help="Enable prefix caching for vllm",
+    )
+    parser.add_argument(
+        "--enforce_eager",
+        action="store_true",
+        help="Force vLLM eager execution. By default CUDA graph/compile optimizations are allowed.",
     )
     parser.add_argument(
         "--custom_output_file",

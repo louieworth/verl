@@ -11,7 +11,7 @@
 #   TEACHER_MODEL_PATH      : teacher model (default Qwen/Qwen3-8B, must differ from student)
 #   Y_MODE                  : "y_o" (default) | "y_r"
 #   MAX_PROMPT_LENGTH       : auto-derived teacher prompt budget
-#   MAX_RESPONSE_LENGTH     : default 16384
+#   MAX_RESPONSE_LENGTH     : default 8192
 #   TEMPERATURE             : default 1.0
 #   TOTAL_EPOCHS            : default 1
 #   MULTI_STEP              : default 40 offline on-policy updates

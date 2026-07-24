@@ -1,0 +1,10 @@
+{
+  "Qwen3-4B-Instruct-2507": {
+    "humaneval_plus_avg16": 0.8201219512195121,
+    "humaneval_plus_pass16": 0.8780487804878049,
+    "mbpp_plus_avg16": 0.6461640211640212,
+    "mbpp_plus_pass16": 0.7354497354497355,
+    "livecodebench_v6_avg16": 0.32085308056872036,
+    "livecodebench_v6_pass16": 0.5516587677725119
+  }
+}

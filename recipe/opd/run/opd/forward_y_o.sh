@@ -8,7 +8,7 @@
 #   TEACHER_MODEL_PATH      : teacher model (default Qwen/Qwen3-8B, must differ from student)
 #   Y_MODE                  : "y_o" (default) | "y_r"
 #   MAX_PROMPT_LENGTH       : auto-derived teacher prompt budget
-#   MAX_RESPONSE_LENGTH     : default 16384
+#   MAX_RESPONSE_LENGTH     : default 8192
 #   TEMPERATURE             : default 1.0
 #   TOTAL_EPOCHS            : default 1
 #   MULTI_STEP              : default 40 offline on-policy updates
@@ -44,8 +44,8 @@ export MULTI_STEP="${MULTI_STEP:-40}"
 # OPSD (teacher = student = 1.7B). On A100-40G, default 49152 OOMs in the
 # teacher forward (logits cat ≈ 15 GiB on top of ~25 GiB teacher+student
 # resident). Keep this at least BASE_PROMPT_LENGTH + MAX_RESPONSE_LENGTH so
-# the default 1024 + 16384 y_o sequence is not split below one full sample.
-export MAX_TOKEN_LEN_PER_GPU="${MAX_TOKEN_LEN_PER_GPU:-17408}"
+# the default 2048 + 8192 y_o sequence is not split below one full sample.
+export MAX_TOKEN_LEN_PER_GPU="${MAX_TOKEN_LEN_PER_GPU:-14336}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 exec "$(dirname "$SCRIPT_DIR")/run_kl_training.sh" "$@"

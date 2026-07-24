@@ -7,6 +7,7 @@
 
 import os
 import argparse
+import json
 import datasets
 from verl.utils.reward_score.math_reward import remove_boxed
 
@@ -41,6 +42,25 @@ def _build_taco_prompt(example):
     return prompt + "\n\n" + code_instruction_following
 
 
+def _parse_taco_test_cases(example):
+    raw = (
+        example.get("input_output")
+        or example.get("test_cases")
+        or example.get("tests")
+        or example.get("ground_truth")
+    )
+    if isinstance(raw, str):
+        raw = raw.strip()
+        if raw:
+            try:
+                raw = json.loads(raw)
+            except Exception:
+                pass
+    if isinstance(raw, dict) and "inputs" in raw and "outputs" in raw:
+        return raw
+    return raw or {}
+
+
 def make_map_fn_stage1_code(data_source="BAAI/TACO", index_offset=0):
     """Prepare TACO examples for Stage 1 code generation."""
     def process_fn(example, idx):
@@ -61,6 +81,7 @@ def make_map_fn_stage1_code(data_source="BAAI/TACO", index_offset=0):
             "data_source": data_source,
             "prompt": [{"role": "user", "content": prompt_content}],
             "ability": "code",
+            "reward_model": {"style": "rule", "ground_truth": _parse_taco_test_cases(example)},
             "extra_info": extra_info,
         }
     return process_fn

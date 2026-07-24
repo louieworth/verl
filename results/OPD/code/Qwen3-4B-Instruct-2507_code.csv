@@ -1,0 +1,4 @@
+model,task,is_lora,teacher,y_mode,kl_type,kl_method,clip_ratio,top_K,multi_turn,humaneval_plus_Avg@4,mbpp_plus_Avg@4,livecodebench_v6_Avg@4,humaneval_plus_Pass@4,mbpp_plus_Pass@4,livecodebench_v6_Pass@4
+Qwen3-4B-Instruct-2507,code,true,Qwen3-8B,y_o,forward,full_vocab,0.1,0,1,,,,,,
+Qwen3-4B-Instruct-2507,code,true,Qwen3-8B,y_o,reverse,full_vocab,0,0,1,,,,,,
+Qwen3-4B-Instruct-2507,code,true,Qwen3-8B,y_o,reverse,full_vocab,0,32,1,,,,,,

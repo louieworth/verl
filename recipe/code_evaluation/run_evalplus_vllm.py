@@ -28,6 +28,7 @@ class EvalPlusVllmDecoder(DecoderBase):
         dataset: str,
         tensor_parallel_size: int,
         max_model_len: int,
+        max_num_seqs: int,
         top_p: float,
         force_base_prompt: bool,
         **kwargs,
@@ -47,6 +48,7 @@ class EvalPlusVllmDecoder(DecoderBase):
             trust_remote_code=self.trust_remote_code,
             enable_prefix_caching=True,
             max_model_len=max_model_len,
+            max_num_seqs=max_num_seqs,
         )
 
     def is_direct_completion(self) -> bool:
@@ -84,6 +86,7 @@ def main() -> None:
     parser.add_argument("--top_p", type=float, default=1.0)
     parser.add_argument("--max_tokens", type=int, default=16384)
     parser.add_argument("--max_model_len", type=int, default=32768)
+    parser.add_argument("--max_num_seqs", type=int, default=128)
     parser.add_argument("--tp", type=int, default=1)
     parser.add_argument("--bs", type=int, default=None)
     parser.add_argument("--dtype", default="bfloat16")
@@ -110,6 +113,7 @@ def main() -> None:
         response_prefix=response_prefix,
         tensor_parallel_size=args.tp,
         max_model_len=args.max_model_len,
+        max_num_seqs=args.max_num_seqs,
         top_p=args.top_p,
         force_base_prompt=args.force_base_prompt,
     )

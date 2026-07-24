@@ -1,0 +1,58 @@
+{
+  "Qwen3-4B-Instruct-2507_OPSD_CODE_y_o_kl_forward_full_vocab_clip0_vanilla_ms1_20260621-035635_LORA": {
+    "humaneval_plus_avg16": 0.8113567073170732,
+    "humaneval_plus_pass16": 0.8719512195121951,
+    "mbpp_plus_avg16": 0.6496362433862434,
+    "mbpp_plus_pass16": 0.7354497354497355,
+    "livecodebench_v6_avg16": 0.31937203791469193,
+    "livecodebench_v6_pass16": 0.5526066350710901
+  },
+  "Qwen3-4B-Instruct-2507_OPSD_CODE_y_r_kl_forward_full_vocab_clip0_refine_ms1_20260621-095333_LORA": {
+    "humaneval_plus_avg16": 0.8178353658536586,
+    "humaneval_plus_pass16": 0.8841463414634146,
+    "mbpp_plus_avg16": 0.6484788359788359,
+    "mbpp_plus_pass16": 0.7328042328042328,
+    "livecodebench_v6_avg16": 0.3184241706161137,
+    "livecodebench_v6_pass16": 0.5516587677725119
+  },
+  "Qwen3-4B-Instruct-2507_OPSD_CODE_y_o_kl_forward_full_vocab_clip006_vanilla_ms1_20260621-150639_LORA": {
+    "humaneval_plus_avg16": 0.8208841463414634,
+    "humaneval_plus_pass16": 0.8719512195121951,
+    "mbpp_plus_avg16": 0.6479828042328042,
+    "mbpp_plus_pass16": 0.7275132275132276,
+    "livecodebench_v6_avg16": 0.31937203791469193,
+    "livecodebench_v6_pass16": 0.5488151658767773
+  },
+  "Qwen3-4B-Instruct-2507_OPSD_CODE_y_o_kl_reverse_full_vocab_clip0_vanilla_ms1_20260621-210608_LORA": {
+    "humaneval_plus_avg16": 0.8178353658536586,
+    "humaneval_plus_pass16": 0.8780487804878049,
+    "mbpp_plus_avg16": 0.6486441798941799,
+    "mbpp_plus_pass16": 0.7407407407407407,
+    "livecodebench_v6_avg16": 0.31563981042654027,
+    "livecodebench_v6_pass16": 0.5497630331753555
+  },
+  "Qwen3-4B-Instruct-2507_OPSD_CODE_y_o_kl_reverse_full_vocab_clip0_topk32_vanilla_ms1_20260622-025607_LORA": {
+    "humaneval_plus_avg16": 0.817454268292683,
+    "humaneval_plus_pass16": 0.8780487804878049,
+    "mbpp_plus_avg16": 0.6468253968253969,
+    "mbpp_plus_pass16": 0.7275132275132276,
+    "livecodebench_v6_avg16": 0.32079383886255924,
+    "livecodebench_v6_pass16": 0.5563981042654028
+  },
+  "Qwen3-4B-Instruct-2507_OPSD_CODE_y_o_kl_forward_full_vocab_clip0_vanilla_ms1_20260628-180410_LORA_step00001of00001": {
+    "humaneval_plus_avg4": 0.8125,
+    "humaneval_plus_pass4": 0.8536585365853658,
+    "mbpp_plus_avg4": 0.6481481481481481,
+    "mbpp_plus_pass4": 0.6904761904761905,
+    "livecodebench_v6_avg4": 0.31990521327014215,
+    "livecodebench_v6_pass4": 0.4606635071090047
+  },
+  "Qwen3-4B-Instruct-2507_OPSD_CODE_y_r_kl_forward_full_vocab_clip0_refine_ms1_20260628-220238_LORA_step00001of00001": {
+    "humaneval_plus_avg4": 0.8094512195121951,
+    "humaneval_plus_pass4": 0.8597560975609756,
+    "mbpp_plus_avg4": 0.6481481481481481,
+    "mbpp_plus_pass4": 0.6904761904761905,
+    "livecodebench_v6_avg4": 0.323696682464455,
+    "livecodebench_v6_pass4": 0.45592417061611373
+  }
+}

@@ -15,9 +15,6 @@ export STUDENT_MODEL="${STUDENT_MODEL:-Qwen3-1.7B}"
 export TEACHER_MODEL_PATH="${TEACHER_MODEL_PATH:-Qwen/Qwen3-8B}"
 export TEACHER_MODEL="${TEACHER_MODEL:-Qwen3-8B}"
 
-export MAX_LENGTH="${MAX_LENGTH:-32768}"
-export MAX_TOKEN_LEN_PER_GPU="${MAX_TOKEN_LEN_PER_GPU:-32768}"
-export RUN_EVAL_AFTER_TRAINING="${RUN_EVAL_AFTER_TRAINING:-true}"
 export PIPELINE_RESUME_MODE="${PIPELINE_RESUME_MODE:-resume_matching}"
 
 RUNNER_LOG_DIR="${RUNNER_LOG_DIR:-$VERL_ROOT/outputs/OPD/code/direct_variants_ms20_serial_logs_qwen3_1_7b}"
@@ -25,7 +22,6 @@ mkdir -p "$RUNNER_LOG_DIR"
 RUNNER_LOG="$RUNNER_LOG_DIR/run_all_ms20_serial_with_eval_qwen3_1_7b_$(date +%Y%m%d_%H%M%S).log"
 
 VARIANTS=(
-    "direct_forward_y_o_ms1_qwen3_4b_8b.sh"
     "direct_forward_y_r_ms1_qwen3_4b_8b.sh"
     "direct_forward_y_o_ms20_qwen3_4b_8b.sh"
     "direct_forward_y_r_ms20_qwen3_4b_8b.sh"
@@ -43,8 +39,8 @@ log "TASK=$TASK"
 log "MODEL_PATH=$MODEL_PATH"
 log "MODEL_NAME=$MODEL_NAME"
 log "TEACHER_MODEL_PATH=$TEACHER_MODEL_PATH"
-log "MAX_TOKEN_LEN_PER_GPU=$MAX_TOKEN_LEN_PER_GPU"
-log "RUN_EVAL_AFTER_TRAINING=$RUN_EVAL_AFTER_TRAINING"
+log "MAX_LENGTH=${MAX_LENGTH:-auto}"
+log "MAX_TOKEN_LEN_PER_GPU=${MAX_TOKEN_LEN_PER_GPU:-auto}"
 log "PIPELINE_RESUME_MODE=$PIPELINE_RESUME_MODE"
 log "Log: $RUNNER_LOG"
 

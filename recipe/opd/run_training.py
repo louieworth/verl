@@ -109,7 +109,7 @@ def parse_args():
     parser.add_argument("--wandb_run_name", type=str, default="")
     parser.add_argument("--save_merged_model", type=lambda x: x.lower() == "true", default=True)
     parser.add_argument("--save_steps", type=int, default=100,
-                        help="Save FSDP checkpoint every N optimizer steps. Lower = better crash safety, more disk.")
+                        help="Save FSDP checkpoint every N optimizer steps; <=0 disables periodic saves. Final checkpoint is always saved.")
     parser.add_argument("--max_ckpt_to_keep", type=int, default=1,
                         help="Rolling window for intra-epoch FSDP ckpts. Per-epoch hf_merged is preserved separately.")
     parser.add_argument("--resume_checkpoint_path", type=str, default="",
