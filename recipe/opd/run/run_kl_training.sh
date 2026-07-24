@@ -522,8 +522,8 @@ if [ "$MULTI_STEP" -gt 0 ]; then
         echo "ERROR: MULTI_STEP>0 requires SAVE_MERGED_MODEL=true so the next chunk can load the updated policy."
         exit 1
     fi
-    if [ -n "$DATA_PATH" ]; then
-        echo "ERROR: MULTI_STEP>0 is incompatible with DATA_PATH override; it must generate fresh on-policy data per chunk."
+    if [ -n "$DATA_PATH" ] && [ "$MULTI_STEP" -ne 1 ]; then
+        echo "ERROR: DATA_PATH with MULTI_STEP>0 is supported only for MULTI_STEP=1 pre-generated one-step data."
         exit 1
     fi
     if [ -n "$CORRECTED_RESPONSES_PATH" ]; then
@@ -541,18 +541,24 @@ PIPELINE_BATCHES_PER_EPOCH=0
 PIPELINE_DROPPED_SAMPLES=0
 MULTISTEP_TAG=""
 if [ "$MULTI_STEP" -gt 0 ]; then
-    TOTAL_TRAIN_SAMPLES="$(python3 - "$TRAIN_DATA_PATH" "${MAX_SAMPLES:-}" <<'PYDATASETLEN_EARLY'
+    PIPELINE_LENGTH_DATA_PATH="${DATA_PATH:-$TRAIN_DATA_PATH}"
+    TOTAL_TRAIN_SAMPLES="$(python3 - "$PIPELINE_LENGTH_DATA_PATH" "${MAX_SAMPLES:-}" <<'PYDATASETLEN_EARLY'
+import os
 import sys
 import datasets
 
 path, max_samples = sys.argv[1], sys.argv[2]
-try:
-    ds_loaded = datasets.load_from_disk(path)
-    ds_raw = ds_loaded["train"] if isinstance(ds_loaded, datasets.DatasetDict) else ds_loaded
-except (ValueError, FileNotFoundError):
-    ds_raw = datasets.load_dataset(path, split="train")
+if os.path.isfile(path) and path.lower().endswith(".parquet"):
+    import pyarrow.parquet as pq
 
-n = len(ds_raw)
+    n = pq.ParquetFile(path).metadata.num_rows
+else:
+    try:
+        ds_loaded = datasets.load_from_disk(path)
+        ds_raw = ds_loaded["train"] if isinstance(ds_loaded, datasets.DatasetDict) else ds_loaded
+    except (ValueError, FileNotFoundError):
+        ds_raw = datasets.load_dataset(path, split="train")
+    n = len(ds_raw)
 if max_samples:
     n = min(n, int(max_samples))
 print(n)
@@ -2834,21 +2840,21 @@ if task == "code":
         if normalized in {"humaneval_plus", "humaneval"}:
             canonical = "humaneval_plus"
             evalplus_name = "humaneval"
-            if not (has_number(entry, f"{canonical}_avg4") and has_number(entry, f"{canonical}_pass4")):
-                missing.append(f"missing JSON metrics: {canonical}_avg4/pass4")
+            if not (has_number(entry, f"{canonical}_avg{pass_k}") and has_number(entry, f"{canonical}_pass{pass_k}")):
+                missing.append(f"missing JSON metrics: {canonical}_avg{pass_k}/pass{pass_k}")
             if not has_file(f"evalplus/{evalplus_name}/*eval_results*.json"):
                 missing.append(f"missing EvalPlus result file: evalplus/{evalplus_name}/*eval_results*.json")
         elif normalized in {"mbpp_plus", "mbpp"}:
             canonical = "mbpp_plus"
             evalplus_name = "mbpp"
-            if not (has_number(entry, f"{canonical}_avg4") and has_number(entry, f"{canonical}_pass4")):
-                missing.append(f"missing JSON metrics: {canonical}_avg4/pass4")
+            if not (has_number(entry, f"{canonical}_avg{pass_k}") and has_number(entry, f"{canonical}_pass{pass_k}")):
+                missing.append(f"missing JSON metrics: {canonical}_avg{pass_k}/pass{pass_k}")
             if not has_file(f"evalplus/{evalplus_name}/*eval_results*.json"):
                 missing.append(f"missing EvalPlus result file: evalplus/{evalplus_name}/*eval_results*.json")
         elif normalized in {"livecodebench_v6", "lcb_v6", "livecodebench"}:
             canonical = "livecodebench_v6"
-            if not (has_number(entry, f"{canonical}_avg4") and has_number(entry, f"{canonical}_pass4")):
-                missing.append(f"missing JSON metrics: {canonical}_avg4/pass4")
+            if not (has_number(entry, f"{canonical}_avg{pass_k}") and has_number(entry, f"{canonical}_pass{pass_k}")):
+                missing.append(f"missing JSON metrics: {canonical}_avg{pass_k}/pass{pass_k}")
             if not any(path.is_file() and path.stat().st_size > 0 for path in (root / "livecodebench").rglob("*_eval_all.json")):
                 missing.append("missing LiveCodeBench eval file: livecodebench/**/*_eval_all.json")
         else:
@@ -2915,13 +2921,13 @@ if task == "code":
     for ds in datasets:
         normalized = ds.replace('+', '_plus')
         if normalized in {"humaneval_plus", "humaneval"}:
-            if not (has_number(entry, "humaneval_plus_avg4") and has_number(entry, "humaneval_plus_pass4") and has_file("evalplus/humaneval/*eval_results*.json")):
+            if not (has_number(entry, f"humaneval_plus_avg{pass_k}") and has_number(entry, f"humaneval_plus_pass{pass_k}") and has_file("evalplus/humaneval/*eval_results*.json")):
                 missing.append("humaneval_plus")
         elif normalized in {"mbpp_plus", "mbpp"}:
-            if not (has_number(entry, "mbpp_plus_avg4") and has_number(entry, "mbpp_plus_pass4") and has_file("evalplus/mbpp/*eval_results*.json")):
+            if not (has_number(entry, f"mbpp_plus_avg{pass_k}") and has_number(entry, f"mbpp_plus_pass{pass_k}") and has_file("evalplus/mbpp/*eval_results*.json")):
                 missing.append("mbpp_plus")
         elif normalized in {"livecodebench_v6", "lcb_v6", "livecodebench"}:
-            if not (has_number(entry, "livecodebench_v6_avg4") and has_number(entry, "livecodebench_v6_pass4") and any(path.is_file() and path.stat().st_size > 0 for path in (root / "livecodebench").rglob("*_eval_all.json"))):
+            if not (has_number(entry, f"livecodebench_v6_avg{pass_k}") and has_number(entry, f"livecodebench_v6_pass{pass_k}") and any(path.is_file() and path.stat().st_size > 0 for path in (root / "livecodebench").rglob("*_eval_all.json"))):
                 missing.append("livecodebench_v6")
         else:
             missing.append(ds)
@@ -3297,7 +3303,11 @@ if [ "$MULTI_STEP" -gt 0 ]; then
     echo "Model keep policy:    local=${PIPELINE_LOCAL_KEEP_POLICY}, planned=${PIPELINE_KEEP_STEPS:-every ${PIPELINE_KEEP_INTERVAL} plus final}, archive=${PIPELINE_ARCHIVE_PRUNED_MODE}:${PIPELINE_ARCHIVE_MODEL_DIR}"
     echo "=========================================="
 
-    ensure_full_stage1_prompts
+    if [ -z "$DATA_PATH" ]; then
+        ensure_full_stage1_prompts
+    else
+        echo "Using pre-generated one-step DATA_PATH; stage1 prompt preparation is skipped."
+    fi
     write_pipeline_checkpoint_plan "$TOTAL_PIPELINE_UPDATES" "$PIPELINE_BATCHES_PER_EPOCH"
 
     FINAL_PIPELINE_MODEL_DIR="$(update_model_save_dir "$TOTAL_EPOCHS" "$PIPELINE_BATCHES_PER_EPOCH")"

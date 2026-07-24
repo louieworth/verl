@@ -43,7 +43,7 @@ update_result() {
 import json
 import os
 import sys
-results_file, model_name, dataset, avg, passed = sys.argv[1:]
+results_file, model_name, model_path, dataset, avg, passed = sys.argv[1:]
 avg = None if avg == '' else float(avg)
 passed = None if passed == '' else float(passed)
 data = {}
@@ -52,6 +52,7 @@ if os.path.exists(results_file):
         data = json.load(f)
 pass_k = os.environ.get("PASS_K", "4")
 entry = data.setdefault(model_name, {})
+entry["model_path"] = model_path
 if avg is not None:
     entry[f"{dataset}_avg{pass_k}"] = avg
 if passed is not None:
@@ -90,7 +91,7 @@ evalplus_dataset() {
     fi
     avg=$(echo "$metrics" | awk -F= '/^avg=/{print $2}')
     pass=$(echo "$metrics" | awk -F= '/^pass=/{print $2}')
-    update_result "$results_file" "$model_name" "$dataset_name" "$avg" "$pass"
+    update_result "$results_file" "$model_name" "$model_path" "$dataset_name" "$avg" "$pass"
 }
 
 lcb_dataset() {
@@ -130,7 +131,7 @@ lcb_dataset() {
     metrics=$("$PYTHON_BIN" "$SCRIPT_DIR/extract_lcb_metrics.py" --root "$out_dir/livecodebench" --pass_k "$PASS_K")
     avg=$(echo "$metrics" | awk -F= '/^avg=/{print $2}')
     pass=$(echo "$metrics" | awk -F= '/^pass=/{print $2}')
-    update_result "$results_file" "$model_name" "livecodebench_v6" "$avg" "$pass"
+    update_result "$results_file" "$model_name" "$model_path" "livecodebench_v6" "$avg" "$pass"
 }
 
 for MODEL_PATH in "${MODEL_PATHS[@]}"; do
@@ -163,7 +164,8 @@ for MODEL_PATH in "${MODEL_PATHS[@]}"; do
     if [ "$WRITE_RESULTS_CSV" = "true" ]; then
         "$PYTHON_BIN" "$SCRIPT_DIR/results_json_to_csv.py" \
             --results_file "$RESULTS_FILE" \
-            --output_file "${EVAL_RESULTS_CSV_FILE:-${RESULTS_FILE%.json}.csv}"
+            --output_file "${EVAL_RESULTS_CSV_FILE:-${RESULTS_FILE%.json}.csv}" \
+            --pass_k "$PASS_K"
     fi
     echo "Results saved to: $RESULTS_FILE"
 done

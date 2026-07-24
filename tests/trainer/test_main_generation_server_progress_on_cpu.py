@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import asyncio
+import time
 
 import numpy as np
 
@@ -117,3 +118,29 @@ def test_generate_uses_shared_progress_bar(monkeypatch):
     assert progress_bars[0].desc == "Generating responses"
     assert progress_bars[0].dynamic_ncols is True
     assert progress_bars[0].updates == 6
+
+
+def test_generate_per_replica_deadline_keeps_completed_requests(monkeypatch):
+    async def fake_submit_request(server_address, **chat_complete_request):
+        content = chat_complete_request["messages"][0]["content"]
+        await asyncio.sleep(0.01 if content == "fast" else 0.5)
+        return f"{server_address}:{content}"
+
+    monkeypatch.setattr(main_generation_server, "submit_request", fake_submit_request)
+    results = asyncio.run(
+        main_generation_server.generate_per_replica(
+            server_address="server-0",
+            model_path="dummy-model",
+            n_samples=2,
+            sampling_params={"temperature": 0.6},
+            chat_lst=[
+                [{"role": "user", "content": "fast"}],
+                [{"role": "user", "content": "slow"}],
+            ],
+            max_concurrency=4,
+            deadline_epoch_seconds=time.time() + 0.1,
+        )
+    )
+
+    assert results[:2] == ["server-0:fast", "server-0:fast"]
+    assert results[2:] == [None, None]

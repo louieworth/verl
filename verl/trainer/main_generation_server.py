@@ -28,6 +28,7 @@ os.environ["TOKENIZERS_PARALLELISM"] = "true"
 # os.environ['TORCH_COMPILE_DISABLE'] = '1'
 
 import asyncio
+import time
 from pprint import pprint
 
 import pandas as pd
@@ -144,6 +145,7 @@ async def generate_per_replica(
     chat_lst: list,
     progress_bar: tqdm | None = None,
     max_concurrency: int | None = None,
+    deadline_epoch_seconds: float | None = None,
 ):
     # here we should sample n_samples for each chat_lst.
     # we use aiohttp to avoid hang in AsyncOpenAI when the number of requests is large.
@@ -181,31 +183,59 @@ async def generate_per_replica(
         for request_index, req in enumerate(chat_complete_request)
     ]
     results = [None] * len(tasks)
+    pending = set(tasks)
 
     try:
-        for task in asyncio.as_completed(tasks):
-            request_index, result = await task
-            results[request_index] = result
-            if progress_bar is not None:
-                progress_bar.update(1)
+        while pending:
+            timeout = None
+            if deadline_epoch_seconds is not None:
+                timeout = max(0.0, deadline_epoch_seconds - time.time())
+                if timeout <= 0:
+                    break
+
+            done, pending = await asyncio.wait(
+                pending,
+                timeout=timeout,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if not done:
+                break
+            for task in done:
+                request_index, result = await task
+                results[request_index] = result
+                if progress_bar is not None:
+                    progress_bar.update(1)
     except Exception:
         for task in tasks:
             if not task.done():
                 task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         raise
+    finally:
+        if pending:
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
 
     return results
 
 
 async def generate(
-    server_addresses: list, model_path: str, n_samples: int, sampling_params: dict, chat_numpy: np.ndarray
+    server_addresses: list,
+    model_path: str,
+    n_samples: int,
+    sampling_params: dict,
+    chat_numpy: np.ndarray,
+    deadline_epoch_seconds: float | None = None,
 ):
     num_replicas = len(server_addresses)
     chat_sub_array = np.array_split(chat_numpy, num_replicas)
     chat_sub_array = [chat.tolist() for chat in chat_sub_array]
     assert len(server_addresses) == len(chat_sub_array)
     total_requests = len(chat_numpy) * n_samples
+    deadline_kwargs = {}
+    if deadline_epoch_seconds is not None:
+        deadline_kwargs["deadline_epoch_seconds"] = deadline_epoch_seconds
     with tqdm(total=total_requests, desc="Generating responses", dynamic_ncols=True) as progress_bar:
         results = await asyncio.gather(
             *[
@@ -216,6 +246,7 @@ async def generate(
                     sampling_params,
                     chat_sub_array[i],
                     progress_bar=progress_bar,
+                    **deadline_kwargs,
                 )
                 for i in range(num_replicas)
             ]
@@ -237,6 +268,17 @@ def main(config):
         if config.actor_rollout_ref.rollout.temperature == 0.0:
             assert n_samples == 1, "When temperature=0, n_samples must be 1."
         assert n_samples >= 1, "n_samples should always >= 1"
+        generation_deadline = OmegaConf.select(
+            config,
+            "data.generation_deadline_epoch_seconds",
+            default=None,
+        )
+        if generation_deadline is not None:
+            generation_deadline = float(generation_deadline)
+            print(
+                "Generation deadline: "
+                f"{generation_deadline:.3f} (remaining {max(0.0, generation_deadline - time.time()):.1f}s)"
+            )
 
         sampling_params = {
             "temperature": config.actor_rollout_ref.rollout.temperature,
@@ -261,7 +303,7 @@ def main(config):
         # concat dataset
         dataset = pd.concat(datasets, axis=0, ignore_index=True)
         chat_lst = dataset[config.data.prompt_key].tolist()
-        chat_lst = [chat.tolist() for chat in chat_lst]
+        chat_lst = [chat.tolist() if hasattr(chat, "tolist") else chat for chat in chat_lst]
         chat_numpy = np.array(chat_lst)
 
         # start native server
@@ -269,19 +311,50 @@ def main(config):
 
         # run generate
         gen_results = asyncio.run(
-            generate(server_addresses, config.actor_rollout_ref.model.path, n_samples, sampling_params, chat_numpy)
+            generate(
+                server_addresses,
+                config.actor_rollout_ref.model.path,
+                n_samples,
+                sampling_params,
+                chat_numpy,
+                deadline_epoch_seconds=generation_deadline,
+            )
         )
 
         # reshape results into a numpy array
         import itertools
 
         results = list(itertools.chain.from_iterable(gen_results))
+        results = np.array(results, dtype=object)
+        results = np.reshape(results, (-1, n_samples))
+        complete_rows = np.array(
+            [all(result is not None for result in row) for row in results],
+            dtype=bool,
+        )
+        if generation_deadline is None:
+            assert complete_rows.all(), "Generation completed without a deadline but some responses are missing."
+        else:
+            complete_count = int(complete_rows.sum())
+            print(
+                f"Generation deadline result: keeping {complete_count}/{len(dataset)} prompts "
+                f"with all {n_samples} responses complete."
+            )
+            if complete_count == 0:
+                raise RuntimeError(
+                    "Generation deadline expired before any prompt completed all "
+                    f"{n_samples} responses."
+                )
+            dataset = dataset.loc[complete_rows].reset_index(drop=True)
+            results = results[complete_rows]
 
         # extract content from results
-        results = np.array([result.choices[0].message.content for result in results])
+        results = np.array(
+            [result.choices[0].message.content or "" for result in results.flat],
+            dtype=object,
+        )
         results = np.reshape(results, (-1, n_samples))
 
-        assert results.shape == (len(chat_lst), n_samples)
+        assert results.shape == (len(dataset), n_samples)
 
     results = results.tolist()
 

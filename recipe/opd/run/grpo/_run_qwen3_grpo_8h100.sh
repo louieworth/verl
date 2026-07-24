@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
-set -x
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VERL_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
-cd "$VERL_ROOT"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
+cd "$REPO_ROOT"
 
-export PYTHONPATH="$VERL_ROOT:${PYTHONPATH:-}"
+export PYTHONPATH=".:${PYTHONPATH:-}"
 export WANDB_MODE="${WANDB_MODE:-offline}"
 
 TASK="${TASK:?TASK must be math or code}"
@@ -24,7 +23,10 @@ detect_visible_gpu_count() {
         for gpu_id in ${CUDA_VISIBLE_DEVICES//,/ }; do
             [ -n "$gpu_id" ] && count=$((count + 1))
         done
-        [ "$count" -gt 0 ] && { printf '%s\n' "$count"; return 0; }
+        if [ "$count" -gt 0 ]; then
+            printf '%s\n' "$count"
+            return 0
+        fi
     fi
     if command -v nvidia-smi >/dev/null 2>&1; then
         local count
@@ -37,47 +39,22 @@ detect_visible_gpu_count() {
     printf '8\n'
 }
 
-first_parquet_under() {
-    local root="$1"
-    local pattern="$2"
-    [ -d "$root" ] || return 1
-    find "$root" -maxdepth 3 -type f -name "$pattern" | sort | head -n 1
-}
-
-prepare_train_file_if_needed() {
-    local task="$1"
-    local input_path="$2"
-    local output_file="$3"
-    local data_source="$4"
-
-    if [ -f "$output_file" ] && [ "${REBUILD_TRAIN_DATA:-false}" != "true" ]; then
-        return 0
-    fi
-    [ "${PREPARE_TRAIN_DATA:-auto}" != "false" ] || return 1
-    [ -n "$input_path" ] || return 1
-    [ -e "$input_path" ] || return 1
-    mkdir -p "$(dirname "$output_file")"
-    if [ "$task" = "math" ]; then
-        python3 recipe/opd/dataset/prepare_deepscaler_grpo.py \
-            --input_path "$input_path" \
-            --output_dir "$(dirname "$output_file")" \
-            --train_file_name "$(basename "$output_file")" \
-            --data_source "$data_source"
-    else
-        python3 recipe/opd/generation/y_o_prepare.py \
-            --task "$task" \
-            --input_path "$input_path" \
-            --output_file "$output_file" \
-            --data_source "$data_source"
-    fi
-    [ -f "$output_file" ]
-}
-
 require_file() {
     local path="$1"
-    local var_name="$2"
+    local description="$2"
     if [ ! -f "$path" ]; then
-        echo "ERROR: $var_name does not point to a file: $path" >&2
+        echo "ERROR: missing $description: $path" >&2
+        echo "Run: bash recipe/opd/run/grpo/prepare/ready_to_train.sh" >&2
+        exit 1
+    fi
+}
+
+require_dir() {
+    local path="$1"
+    local description="$2"
+    if [ ! -d "$path" ]; then
+        echo "ERROR: missing $description: $path" >&2
+        echo "Run: bash recipe/opd/run/grpo/prepare/ready_to_train.sh" >&2
         exit 1
     fi
 }
@@ -94,12 +71,17 @@ latest_hf_checkpoint() {
             return 0
         fi
     fi
-    step_dir="$(find "$ckpt_root" -maxdepth 1 -type d -name 'global_step_*' | sort -V | tail -n 1)"
+    step_dir="$(find "$ckpt_root" -maxdepth 1 -type d -name 'global_step_*' 2>/dev/null | sort -V | tail -n 1)"
     if [ -n "$step_dir" ] && [ -d "$step_dir/actor/huggingface" ]; then
         printf '%s\n' "$step_dir/actor/huggingface"
         return 0
     fi
     return 1
+}
+
+print_command() {
+    printf '%q ' "$@"
+    printf '\n'
 }
 
 NGPUS_PER_NODE="${NGPUS_PER_NODE:-$(detect_visible_gpu_count)}"
@@ -111,46 +93,37 @@ TIMESTAMP="${TIMESTAMP:-$(date +%Y%m%d.%H%M%S)}"
 PROJECT_NAME="${PROJECT_NAME:-verl_grpo_qwen3_8h100}"
 EXPERIMENT_NAME="${EXPERIMENT_NAME:-${MODEL_ALIAS}_${TASK}_grpo_${TIMESTAMP}}"
 TRAIN_DIR="${TRAIN_DIR:-outputs/$PROJECT_NAME/$EXPERIMENT_NAME}"
-CKPTS_DIR="${CKPTS_DIR:-$TRAIN_DIR/checkpoints}"
-mkdir -p "$TRAIN_DIR" "$CKPTS_DIR"
+CKPTS_DIR="${CKPTS_DIR:-model/trained/$PROJECT_NAME/$EXPERIMENT_NAME/checkpoints}"
 
 export TENSORBOARD_DIR="${TENSORBOARD_DIR:-$TRAIN_DIR/tensorboard_log}"
 export VERL_FILE_LOGGER_PATH="${VERL_FILE_LOGGER_PATH:-$TRAIN_DIR/metrics.jsonl}"
 
 if [ "$TASK" = "math" ]; then
-    TRAIN_DATA_PATH="${TRAIN_DATA_PATH:-/data/data/jiangli/data/DeepScaleR-Cleaned}"
-    if [ -z "${TRAIN_FILE:-}" ]; then
-        PREPARED_TRAIN_FILE="${PREPARED_TRAIN_FILE:-$VERL_ROOT/gen_results/grpo_data/deepscaleR_train.parquet}"
-        if prepare_train_file_if_needed math "$TRAIN_DATA_PATH" "$PREPARED_TRAIN_FILE" deepscaleR; then
-            TRAIN_FILE="$PREPARED_TRAIN_FILE"
-        fi
-    fi
-    TEST_FILE="${TEST_FILE:-${EVAL_DATASETS_DIR:-/data/data/jiangli/huggingface/datasets}/aime24/aime24_test.parquet}"
+    TRAIN_FILE="${TRAIN_FILE:-data/train_dataset/deepscaler/train_grpo.parquet}"
+    TEST_FILE="${TEST_FILE:-data/eval_dataset/math/aime24/aime24_test.parquet}"
     EVAL_DATASETS="${EVAL_DATASETS:-aime24 aime25 hmmt25 beyondaime amobench}"
     PASS_K="${PASS_K:-16}"
     REWARD_CONFIG=(
-        reward.custom_reward_function.path=recipe/r1_ascend/deepscaler.py
+        reward.custom_reward_function.path=recipe/opd/run/grpo/math_reward.py
         reward.custom_reward_function.name=compute_score
     )
 else
-    TRAIN_DATA_PATH="${TRAIN_DATA_PATH:-/data/data/jiangli/huggingface/datasets/TACO}"
-    if [ -z "${TRAIN_FILE:-}" ]; then
-        PREPARED_TRAIN_FILE="${PREPARED_TRAIN_FILE:-$VERL_ROOT/gen_results/grpo_data/taco_train.parquet}"
-        if prepare_train_file_if_needed code "$TRAIN_DATA_PATH" "$PREPARED_TRAIN_FILE" BAAI/TACO; then
-            TRAIN_FILE="$PREPARED_TRAIN_FILE"
-        fi
-    fi
+    TRAIN_FILE="${TRAIN_FILE:-data/train_dataset/taco/train_grpo.parquet}"
     TEST_FILE="${TEST_FILE:-$TRAIN_FILE}"
     EVAL_DATASETS="${EVAL_DATASETS:-humaneval_plus mbpp_plus livecodebench_v6}"
     PASS_K="${PASS_K:-16}"
     REWARD_CONFIG=(
-        reward.custom_reward_function.path=recipe/opd/grpo_code_reward.py
+        reward.custom_reward_function.path=recipe/opd/run/grpo/code_reward.py
         reward.custom_reward_function.name=compute_score
     )
 fi
+export HF_HOME="${GRPO_HF_HOME:-$REPO_ROOT/data/eval_dataset/$TASK/huggingface_cache}"
+export HF_DATASETS_CACHE="${GRPO_HF_DATASETS_CACHE:-$HF_HOME/datasets}"
 
-require_file "$TRAIN_FILE" TRAIN_FILE
-require_file "$TEST_FILE" TEST_FILE
+require_dir "$MODEL_PATH" "base model"
+require_file "$MODEL_PATH/config.json" "model config"
+require_file "$TRAIN_FILE" "GRPO training parquet"
+require_file "$TEST_FILE" "validation parquet"
 
 TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-64}"
 PPO_MINI_BATCH_SIZE="${PPO_MINI_BATCH_SIZE:-32}"
@@ -165,13 +138,29 @@ else
 fi
 MAX_TOKEN_LEN_PER_GPU="${MAX_TOKEN_LEN_PER_GPU:-32768}"
 LEARNING_RATE="${LEARNING_RATE:-1e-6}"
-TOTAL_EPOCHS="${TOTAL_EPOCHS:-1}"
-SAVE_FREQ="${SAVE_FREQ:-20}"
+MAX_TRAIN_DURATION_SECONDS="${MAX_TRAIN_DURATION_SECONDS:?MAX_TRAIN_DURATION_SECONDS is required}"
+TOTAL_EPOCHS="${TOTAL_EPOCHS:-1000000}"
+SAVE_FREQ="${SAVE_FREQ:--1}"
+SAVE_AT_END="${SAVE_AT_END:-true}"
+ROLLOUT_MAX_MODEL_LEN="${ROLLOUT_MAX_MODEL_LEN:-$((MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH))}"
+ROLLOUT_MAX_NUM_SEQS="${ROLLOUT_MAX_NUM_SEQS:-64}"
+ROLLOUT_MAX_NUM_BATCHED_TOKENS="${ROLLOUT_MAX_NUM_BATCHED_TOKENS:-8192}"
 ROLLOUT_GPU_MEMORY_UTILIZATION="${ROLLOUT_GPU_MEMORY_UTILIZATION:-0.6}"
 
-TRAIN_ARGS=(
+case "$MAX_TRAIN_DURATION_SECONDS" in
+    *[!0-9]*|"") echo "ERROR: MAX_TRAIN_DURATION_SECONDS must be a positive integer" >&2; exit 1 ;;
+esac
+if [ "$MAX_TRAIN_DURATION_SECONDS" -le 0 ]; then
+    echo "ERROR: MAX_TRAIN_DURATION_SECONDS must be positive" >&2
+    exit 1
+fi
+
+HYDRA_ARGS=(
     --config-path=config
     --config-name=ppo_trainer.yaml
+)
+
+TRAIN_OVERRIDES=(
     algorithm.adv_estimator=grpo
     algorithm.use_kl_in_reward=False
     data.train_files="$TRAIN_FILE"
@@ -207,6 +196,9 @@ TRAIN_ARGS=(
     actor_rollout_ref.rollout.top_k=-1
     actor_rollout_ref.rollout.tensor_model_parallel_size="$GEN_TP"
     actor_rollout_ref.rollout.gpu_memory_utilization="$ROLLOUT_GPU_MEMORY_UTILIZATION"
+    actor_rollout_ref.rollout.max_model_len="$ROLLOUT_MAX_MODEL_LEN"
+    actor_rollout_ref.rollout.max_num_seqs="$ROLLOUT_MAX_NUM_SEQS"
+    actor_rollout_ref.rollout.max_num_batched_tokens="$ROLLOUT_MAX_NUM_BATCHED_TOKENS"
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu="$MAX_TOKEN_LEN_PER_GPU"
     actor_rollout_ref.ref.strategy=fsdp2
@@ -226,14 +218,46 @@ TRAIN_ARGS=(
     trainer.test_freq=-1
     trainer.save_freq="$SAVE_FREQ"
     trainer.total_epochs="$TOTAL_EPOCHS"
+    +trainer.max_train_duration_seconds="$MAX_TRAIN_DURATION_SECONDS"
+    +trainer.save_at_end="$SAVE_AT_END"
     trainer.resume_mode=auto
-    trainer.max_actor_ckpt_to_keep=2
+    trainer.max_actor_ckpt_to_keep=1
 )
 
-python3 -m verl.trainer.main_ppo \
-    "${REWARD_CONFIG[@]}" \
-    "${TRAIN_ARGS[@]}" \
-    "$@" 2>&1 | tee "$TRAIN_DIR/train.log"
+TRAIN_COMMAND=(
+    python3 -m verl.trainer.main_ppo
+    "${HYDRA_ARGS[@]}"
+    "${TRAIN_OVERRIDES[@]}"
+    "${REWARD_CONFIG[@]}"
+    "$@"
+)
+
+if [ "${GRPO_DRY_RUN:-false}" = "true" ]; then
+    EVAL_RESULTS_KIND="${TASK}_avg${PASS_K}_pass${PASS_K}"
+    echo "Task:              $TASK"
+    echo "Base model:        $MODEL_PATH"
+    echo "Train parquet:     $TRAIN_FILE"
+    echo "Validation file:   $TEST_FILE"
+    echo "Training logs:     $TRAIN_DIR"
+    echo "Trained model dir: $CKPTS_DIR"
+    echo "Latest HF model:   $CKPTS_DIR/global_step_<N>/actor/huggingface"
+    echo "Eval results JSON: ${EVAL_RESULTS_FILE:-results/$MODEL_ALIAS/${EXPERIMENT_NAME}_${EVAL_RESULTS_KIND}.json}"
+    echo "Results model key: ${EVAL_MODEL_NAME:-$EXPERIMENT_NAME}"
+    echo "Training time cap: ${MAX_TRAIN_DURATION_SECONDS}s"
+    echo "Save frequency:    $SAVE_FREQ (save_at_end=$SAVE_AT_END)"
+    echo "Rollout memory:    $ROLLOUT_GPU_MEMORY_UTILIZATION"
+    echo "Rollout max len:   $ROLLOUT_MAX_MODEL_LEN"
+    echo "Rollout max seqs:  $ROLLOUT_MAX_NUM_SEQS"
+    echo "Eval datasets:     $EVAL_DATASETS"
+    echo "Eval pass_k:       $PASS_K"
+    print_command "${TRAIN_COMMAND[@]}"
+    exit 0
+fi
+
+mkdir -p "$TRAIN_DIR" "$CKPTS_DIR" "$HF_HOME" "$HF_DATASETS_CACHE"
+set -x
+"${TRAIN_COMMAND[@]}" 2>&1 | tee "$TRAIN_DIR/train.log"
+set +x
 
 RUN_EVAL_AFTER_TRAINING="${RUN_EVAL_AFTER_TRAINING:-true}"
 [ "$RUN_EVAL_AFTER_TRAINING" = "true" ] || exit 0
@@ -243,14 +267,13 @@ if [ -z "${EVAL_MODEL_PATH:-}" ]; then
 fi
 if [ -z "$EVAL_MODEL_PATH" ] || [ ! -d "$EVAL_MODEL_PATH" ]; then
     echo "ERROR: no Hugging Face checkpoint found under $CKPTS_DIR" >&2
-    echo "The scripts save HF checkpoints via actor_rollout_ref.actor.checkpoint.save_contents." >&2
     exit 1
 fi
 
 if [ "$TASK" = "math" ]; then
     export DATASETS="$EVAL_DATASETS"
     export PASS_K
-    export EVAL_DATASETS_DIR="${EVAL_DATASETS_DIR:-/data/data/jiangli/huggingface/datasets}"
+    export EVAL_DATASETS_DIR="${EVAL_DATASETS_DIR:-data/eval_dataset/math}"
     export EVAL_PROMPT_LENGTH="${EVAL_PROMPT_LENGTH:-4096}"
     export EVAL_RESPONSE_LENGTH="${EVAL_RESPONSE_LENGTH:-16384}"
     export EVAL_MAX_MODEL_LEN="${EVAL_MAX_MODEL_LEN:-$((EVAL_PROMPT_LENGTH + EVAL_RESPONSE_LENGTH))}"
@@ -258,10 +281,10 @@ if [ "$TASK" = "math" ]; then
     export GEN_TP="$EVAL_GEN_TP"
     export EVAL_BASE_MODEL_NAME="$MODEL_ALIAS"
     export EVAL_MODEL_NAME="$EXPERIMENT_NAME"
-    export EVAL_RESULTS_FILE="${EVAL_RESULTS_FILE:-$VERL_ROOT/results/$MODEL_ALIAS/${EXPERIMENT_NAME}_math_avg16_pass16.json}"
+    export EVAL_RESULTS_FILE="${EVAL_RESULTS_FILE:-results/$MODEL_ALIAS/${EXPERIMENT_NAME}_math_avg${PASS_K}_pass${PASS_K}.json}"
     export EVAL_RESULTS_CSV_FILE="${EVAL_RESULTS_CSV_FILE:-${EVAL_RESULTS_FILE%.json}.csv}"
-    export GEN_OUTPUT_BASE_DIR="${GEN_OUTPUT_BASE_DIR:-$VERL_ROOT/gen_results/eval/math/grpo}"
-    bash "$VERL_ROOT/recipe/math_evaluation/benchmark_kl_model.sh" "$EVAL_MODEL_PATH" 2>&1 | tee "$TRAIN_DIR/eval.log"
+    export GEN_OUTPUT_BASE_DIR="${GEN_OUTPUT_BASE_DIR:-gen_results/eval/math/grpo}"
+    bash recipe/opd/run/grpo/benchmark_math_local.sh "$EVAL_MODEL_PATH" 2>&1 | tee "$TRAIN_DIR/eval.log"
 else
     export DATASETS="$EVAL_DATASETS"
     export PASS_K
@@ -272,8 +295,8 @@ else
     export GEN_TP="$EVAL_GEN_TP"
     export EVAL_BASE_MODEL_NAME="$MODEL_ALIAS"
     export EVAL_MODEL_NAME="$EXPERIMENT_NAME"
-    export EVAL_RESULTS_FILE="${EVAL_RESULTS_FILE:-$VERL_ROOT/results/$MODEL_ALIAS/${EXPERIMENT_NAME}_code_avg16_pass16.json}"
+    export EVAL_RESULTS_FILE="${EVAL_RESULTS_FILE:-results/$MODEL_ALIAS/${EXPERIMENT_NAME}_code_avg${PASS_K}_pass${PASS_K}.json}"
     export EVAL_RESULTS_CSV_FILE="${EVAL_RESULTS_CSV_FILE:-${EVAL_RESULTS_FILE%.json}.csv}"
-    export EVAL_OUTPUT_DIR="${EVAL_OUTPUT_DIR:-$VERL_ROOT/gen_results/eval/code/grpo/$EXPERIMENT_NAME}"
-    bash "$VERL_ROOT/recipe/code_evaluation/benchmark_code_model.sh" "$EVAL_MODEL_PATH" 2>&1 | tee "$TRAIN_DIR/eval.log"
+    export EVAL_OUTPUT_DIR="${EVAL_OUTPUT_DIR:-gen_results/eval/code/grpo/$EXPERIMENT_NAME}"
+    bash recipe/opd/run/grpo/benchmark_code_local.sh "$EVAL_MODEL_PATH" 2>&1 | tee "$TRAIN_DIR/eval.log"
 fi

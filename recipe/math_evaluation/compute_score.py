@@ -32,7 +32,7 @@ def compute_score_data_source(data_source, response, ground_truth):
         "math500",           # MATH benchmark
         "hmmt25", "hmmt24", "hmmt23",  # HMMT competitions
         "beyondaime",        # BeyondAIME benchmark
-        "deepscaleR",        # DeepScaleR training data
+        "deepscaleR", "deepscaler",  # DeepScaleR training data
     ]
 
     if data_source in math_datasets:

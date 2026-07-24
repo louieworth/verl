@@ -11,7 +11,10 @@ from typing import Any
 
 META_COLUMNS = ["model", "task", "is_lora", "teacher", "y_mode", "kl_type", "kl_method", "clip_ratio", "top_K", "multi_turn"]
 DATASETS = ["humaneval_plus", "mbpp_plus", "livecodebench_v6"]
-FIELDNAMES = META_COLUMNS + [f"{d}_Avg@4" for d in DATASETS] + [f"{d}_Pass@4" for d in DATASETS]
+
+
+def fieldnames(pass_k: int) -> list[str]:
+    return META_COLUMNS + [f"{d}_Avg@{pass_k}" for d in DATASETS] + [f"{d}_Pass@{pass_k}" for d in DATASETS]
 
 
 def parse_meta(key: str) -> dict[str, str]:
@@ -47,14 +50,18 @@ def fmt(v: Any) -> Any:
     return f"{v:.10g}" if isinstance(v, float) else v
 
 
-def build_rows(results: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+def build_rows(results: dict[str, dict[str, Any]], pass_k: int = 4) -> list[dict[str, Any]]:
     rows = []
     for key, entry in results.items():
         row = parse_meta(key)
         for d in DATASETS:
-            row[f"{d}_Avg@4"] = fmt(entry.get(f"{d}_avg4", entry.get(f"{d}_Avg@4", "")))
+            row[f"{d}_Avg@{pass_k}"] = fmt(
+                entry.get(f"{d}_avg{pass_k}", entry.get(f"{d}_Avg@{pass_k}", ""))
+            )
         for d in DATASETS:
-            row[f"{d}_Pass@4"] = fmt(entry.get(f"{d}_pass4", entry.get(f"{d}_Pass@4", "")))
+            row[f"{d}_Pass@{pass_k}"] = fmt(
+                entry.get(f"{d}_pass{pass_k}", entry.get(f"{d}_Pass@{pass_k}", ""))
+            )
         rows.append(row)
     return rows
 
@@ -64,14 +71,17 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--results_file", required=True)
     parser.add_argument("--output_file", default="")
+    parser.add_argument("--pass_k", type=int, default=int(os.environ.get("PASS_K", "4")))
     args = parser.parse_args()
+    if args.pass_k <= 0:
+        parser.error("--pass_k must be positive")
     output_file = args.output_file or str(Path(args.results_file).with_suffix(".csv"))
     with open(args.results_file) as f:
         data = json.load(f)
-    rows = build_rows(data)
+    rows = build_rows(data, args.pass_k)
     os.makedirs(os.path.dirname(output_file) or ".", exist_ok=True)
     with open(output_file, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=FIELDNAMES)
+        writer = csv.DictWriter(f, fieldnames=fieldnames(args.pass_k))
         writer.writeheader()
         writer.writerows(rows)
     print(f"Wrote CSV comparison: {output_file}")

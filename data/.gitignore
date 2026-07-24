@@ -1,0 +1,18 @@
+# Keep the prepared DeepScaleR parquet in Git. Rebuild TACO and raw/download
+# artifacts on each training server.
+/train_dataset/*
+!/train_dataset/deepscaler/
+!/train_dataset/deepscaler/train_grpo.parquet
+/download_cache/
+
+# LiveCodeBench release_v6 is about 4.2 GB. The runtime copy is rebuilt from
+# external/LiveCodeBench by the GRPO preparation script.
+/eval_dataset/code/livecodebench/
+/eval_dataset/code/LiveCodeBench/
+/eval_dataset/code/huggingface_cache/
+/eval_dataset/math/huggingface_cache/
+
+# The root .gitignore excludes every parquet. Keep the small math eval files.
+!/eval_dataset/math/
+!/eval_dataset/math/**/
+!/eval_dataset/math/**/*.parquet

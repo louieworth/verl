@@ -20,6 +20,7 @@ This trainer supports model-agonistic model initialization with huggingface
 
 import json
 import os
+import time
 import uuid
 from collections import defaultdict
 from copy import deepcopy
@@ -1261,6 +1262,15 @@ class RayPPOTrainer:
         # add tqdm
         progress_bar = tqdm(total=self.total_training_steps, initial=self.global_steps, desc="Training Progress")
 
+        max_train_duration_seconds = self.config.trainer.get("max_train_duration_seconds", None)
+        if max_train_duration_seconds is not None:
+            max_train_duration_seconds = float(max_train_duration_seconds)
+            if max_train_duration_seconds <= 0:
+                raise ValueError("trainer.max_train_duration_seconds must be positive")
+            print(f"Training time limit: {max_train_duration_seconds:.0f} seconds")
+        save_at_end = bool(self.config.trainer.get("save_at_end", False))
+        training_start_time = time.monotonic()
+
         # we start from step 1
         self.global_steps += 1
         last_val_metrics = None
@@ -1280,6 +1290,7 @@ class RayPPOTrainer:
                     self.actor_rollout_wg.async_calls_finalize_fn_exec(blocking=False)
                 metrics = {}
                 timing_raw = {}
+                checkpoint_saved_this_step = False
 
                 with marked_timer("start_profile", timing_raw):
                     self._start_profiling(
@@ -1518,6 +1529,7 @@ class RayPPOTrainer:
                                 print("Force saving checkpoint: ESI instance expiration approaching.")
                             with marked_timer("save_checkpoint", timing_raw, color="green"):
                                 self._save_checkpoint()
+                            checkpoint_saved_this_step = True
 
                         # update weights from trainer to rollout
                         with marked_timer("update_weights", timing_raw, color="red"):
@@ -1531,13 +1543,29 @@ class RayPPOTrainer:
                     if rollout_data_dir:
                         self._log_rollout_data(batch, reward_extra_infos_dict, timing_raw, rollout_data_dir)
 
+                training_elapsed_seconds = time.monotonic() - training_start_time
+                is_time_limit_reached = (
+                    max_train_duration_seconds is not None
+                    and training_elapsed_seconds >= max_train_duration_seconds
+                )
+                is_terminal_step = is_last_step or is_time_limit_reached
+                if is_time_limit_reached:
+                    print(
+                        f"Training time limit reached after step {self.global_steps}: "
+                        f"{training_elapsed_seconds:.1f}/{max_train_duration_seconds:.1f} seconds"
+                    )
+                if save_at_end and is_terminal_step and not checkpoint_saved_this_step:
+                    with marked_timer("save_checkpoint", timing_raw, color="green"):
+                        self._save_checkpoint()
+                    checkpoint_saved_this_step = True
+
                 # validate
                 if self.config.trainer.test_freq > 0 and (
-                    is_last_step or self.global_steps % self.config.trainer.test_freq == 0
+                    is_terminal_step or self.global_steps % self.config.trainer.test_freq == 0
                 ):
                     with marked_timer("testing", timing_raw, color="green"):
                         val_metrics: dict = self._validate()
-                        if is_last_step:
+                        if is_terminal_step:
                             last_val_metrics = val_metrics
                     metrics.update(val_metrics)
 
@@ -1563,6 +1591,8 @@ class RayPPOTrainer:
                     {
                         "training/global_step": self.global_steps,
                         "training/epoch": epoch,
+                        "training/elapsed_seconds": training_elapsed_seconds,
+                        "training/time_limit_reached": float(is_time_limit_reached),
                     }
                 )
                 # collect metrics
@@ -1594,7 +1624,7 @@ class RayPPOTrainer:
                         tag=f"post_update_step{self.global_steps}", sub_dir=f"step{self.global_steps}"
                     )
 
-                if is_last_step:
+                if is_terminal_step:
                     if hasattr(self.actor_rollout_wg, "async_calls_finalize_fn_exec"):
                         self.actor_rollout_wg.async_calls_finalize_fn_exec(blocking=True)
                     pprint(f"Final validation metrics: {last_val_metrics}")
