@@ -6,20 +6,37 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 cd "$REPO_ROOT"
 
 MODE="${1:-all}"
+TASK_FILTER="${2:-all}"
 SEQUENCE_DRY_RUN="${SEQUENCE_DRY_RUN:-false}"
 CONTINUE_ON_ERROR="${CONTINUE_ON_ERROR:-false}"
+
+if [ "$MODE" = "math" ] || [ "$MODE" = "code" ]; then
+    TASK_FILTER="$MODE"
+    MODE=all
+fi
 
 usage() {
     cat <<'EOF'
 Usage:
-  bash recipe/opd/run/run_sequence_8h100.sh grpo
-  bash recipe/opd/run/run_sequence_8h100.sh best_of_n
-  bash recipe/opd/run/run_sequence_8h100.sh all
+  bash recipe/opd/run/run_sequence_8h100.sh [grpo|best_of_n|all] [math|code|all]
+  bash recipe/opd/run/run_sequence_8h100.sh [math|code]
+
+Examples:
+  bash recipe/opd/run/run_sequence_8h100.sh math
+  bash recipe/opd/run/run_sequence_8h100.sh code
+  bash recipe/opd/run/run_sequence_8h100.sh all math
+  bash recipe/opd/run/run_sequence_8h100.sh all code
+  bash recipe/opd/run/run_sequence_8h100.sh grpo code
 
 Modes:
   grpo       Run the four Qwen3 GRPO experiments.
   best_of_n  Run the four Qwen3 OPSD Best-of-N experiments.
   all        Run GRPO first, then OPSD Best-of-N (eight jobs total).
+
+Task filters:
+  math       Run only math experiments.
+  code       Run only code experiments.
+  all        Run both math and code experiments (default).
 
 Environment:
   SEQUENCE_DRY_RUN=true    Resolve and validate every command without using GPUs.
@@ -35,6 +52,15 @@ case "$MODE" in
         ;;
     *)
         echo "ERROR: mode must be grpo, best_of_n, or all; got: $MODE" >&2
+        usage >&2
+        exit 2
+        ;;
+esac
+
+case "$TASK_FILTER" in
+    math|code|all) ;;
+    *)
+        echo "ERROR: task filter must be math, code, or all; got: $TASK_FILTER" >&2
         usage >&2
         exit 2
         ;;
@@ -65,14 +91,27 @@ BEST_OF_N_SCRIPTS=(
 
 METHODS=()
 SCRIPTS=()
+
+matches_task_filter() {
+    local script="$1"
+
+    case "$TASK_FILTER" in
+        all) return 0 ;;
+        math) [[ "$script" == *_math_* ]] ;;
+        code) [[ "$script" == *_code_* ]] ;;
+    esac
+}
+
 if [ "$MODE" = "grpo" ] || [ "$MODE" = "all" ]; then
     for script in "${GRPO_SCRIPTS[@]}"; do
+        matches_task_filter "$script" || continue
         METHODS+=(grpo)
         SCRIPTS+=("$script")
     done
 fi
 if [ "$MODE" = "best_of_n" ] || [ "$MODE" = "all" ]; then
     for script in "${BEST_OF_N_SCRIPTS[@]}"; do
+        matches_task_filter "$script" || continue
         METHODS+=(best_of_n)
         SCRIPTS+=("$script")
     done
@@ -103,6 +142,7 @@ total="${#SCRIPTS[@]}"
 failures=()
 
 echo "Sequence mode:      $MODE"
+echo "Task filter:        $TASK_FILTER"
 echo "Experiment count:   $total"
 echo "Dry run:            $SEQUENCE_DRY_RUN"
 echo "Continue on error:  $CONTINUE_ON_ERROR"
