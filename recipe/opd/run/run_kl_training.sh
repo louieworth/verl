@@ -1198,7 +1198,7 @@ sync_resident_y_o_from_checkpoint() {
     echo "  Manifest:   $RESIDENT_YO_MANIFEST"
     echo "=========================================="
 
-    local sync_cmd="torchrun \
+    local sync_cmd="$PYTHON_BIN -m torch.distributed.run \
         --nproc-per-node=$NGPUS_PER_NODE \
         --nnodes=$NNODES \
         --node-rank=\${NODE_RANK} \
@@ -2654,7 +2654,7 @@ EOF
 
     export PYTHONPATH="$VERL_ROOT:$PYTHONPATH"
 
-    local cmd="torchrun \
+    local cmd="$PYTHON_BIN -m torch.distributed.run \
         --nproc-per-node=$NGPUS_PER_NODE \
         --nnodes=$NNODES \
         --node-rank=\${NODE_RANK} \

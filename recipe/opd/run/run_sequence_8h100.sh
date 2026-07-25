@@ -51,15 +51,15 @@ esac
 
 GRPO_SCRIPTS=(
     recipe/opd/run/grpo/qwen3_4b_instruct_math_grpo_8h100.sh
-    recipe/opd/run/grpo/qwen3_4b_instruct_code_grpo_8h100.sh
     recipe/opd/run/grpo/qwen3_8b_math_grpo_8h100.sh
+    recipe/opd/run/grpo/qwen3_4b_instruct_code_grpo_8h100.sh
     recipe/opd/run/grpo/qwen3_8b_code_grpo_8h100.sh
 )
 
 BEST_OF_N_SCRIPTS=(
     recipe/opd/run/opsd_best_of_n/qwen3_4b_instruct_math_best_of_n_8h100.sh
-    recipe/opd/run/opsd_best_of_n/qwen3_4b_instruct_code_best_of_n_8h100.sh
     recipe/opd/run/opsd_best_of_n/qwen3_8b_math_best_of_n_8h100.sh
+    recipe/opd/run/opsd_best_of_n/qwen3_4b_instruct_code_best_of_n_8h100.sh
     recipe/opd/run/opsd_best_of_n/qwen3_8b_code_best_of_n_8h100.sh
 )
 
