@@ -1,7 +1,10 @@
 import pandas as pd
 import pytest
 
-from recipe.opd.generation.expert_y_star_generate import attach_expert_responses
+from recipe.opd.generation.expert_y_star_generate import (
+    attach_expert_responses,
+    select_rows,
+)
 
 
 def test_expert_solution_is_used_verbatim_as_response():
@@ -29,3 +32,20 @@ def test_empty_expert_solution_is_rejected_without_answer_fallback():
 
     with pytest.raises(ValueError, match="non-empty"):
         attach_expert_responses(source)
+
+
+def test_precomputed_trajectory_can_be_sliced_for_multistep_training():
+    source = pd.DataFrame(
+        {
+            "extra_info": [
+                {"expert_cot": f"solution-{index}"}
+                for index in range(5)
+            ],
+            "responses": [[f"solution-{index}"] for index in range(5)],
+        }
+    )
+
+    selected = select_rows(source, start_index=2, num_samples=2)
+    output = attach_expert_responses(selected)
+
+    assert output["responses"].tolist() == [["solution-2"], ["solution-3"]]

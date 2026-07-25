@@ -1,6 +1,0 @@
-{
-    "Qwen3-4B-Instruct-2507_DeepScaleR_Solution_CoT_Only_SFT_pass16": {
-        "model_path": "/data2/tmp/deepscaler_sft_runs/Qwen3-4B-Instruct-2507_solution_cot_only/final_model",
-        "aime24_pass16_generation_pass_16": 0.1
-    }
-}

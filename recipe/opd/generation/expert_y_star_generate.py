@@ -50,6 +50,27 @@ def attach_expert_responses(source: pd.DataFrame) -> pd.DataFrame:
     return output
 
 
+def select_rows(
+    source: pd.DataFrame,
+    *,
+    start_index: int = 0,
+    num_samples: int | None = None,
+) -> pd.DataFrame:
+    if start_index < 0:
+        raise ValueError("start_index must be >= 0")
+    if num_samples is not None and num_samples <= 0:
+        raise ValueError("num_samples must be > 0")
+    stop = len(source) if num_samples is None else start_index + num_samples
+    selected = source.iloc[start_index:stop].reset_index(drop=True)
+    expected = len(source) - start_index if num_samples is None else num_samples
+    if len(selected) != expected:
+        raise ValueError(
+            f"Requested {expected} rows at offset {start_index}, got {len(selected)} "
+            f"from a {len(source)}-row trajectory parquet"
+        )
+    return selected
+
+
 def write_atomic(dataset: pd.DataFrame, output_path: str) -> None:
     output_dir = os.path.dirname(output_path)
     if output_dir:
@@ -70,16 +91,30 @@ def write_atomic(dataset: pd.DataFrame, output_path: str) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--input", required=True, help="Stage-1 prompt parquet")
+    parser.add_argument(
+        "--input",
+        required=True,
+        help="Stage-1 prompt parquet or a precomputed full y* trajectory parquet",
+    )
     parser.add_argument("--output", required=True, help="Stage-1 response parquet")
+    parser.add_argument("--start-index", type=int, default=0)
+    parser.add_argument("--num-samples", type=int)
     args = parser.parse_args()
 
     source = pd.read_parquet(args.input)
     if source.empty:
-        raise ValueError("Input prompt parquet is empty")
+        raise ValueError("Input parquet is empty")
+    source = select_rows(
+        source,
+        start_index=args.start_index,
+        num_samples=args.num_samples,
+    )
     output = attach_expert_responses(source)
     write_atomic(output, args.output)
-    print(f"Wrote {len(output)} y* trajectories from expert_cot -> {args.output}")
+    print(
+        f"Wrote {len(output)} y* trajectories from expert_cot "
+        f"(start={args.start_index}) -> {args.output}"
+    )
 
 
 if __name__ == "__main__":

@@ -146,6 +146,7 @@ WEIGHT_DECAY=${WEIGHT_DECAY:-0.005}
 # Data Settings
 DATA_PATH=${DATA_PATH:-""}  # Optional override; reused across epochs if set
 CORRECTED_RESPONSES_PATH=${CORRECTED_RESPONSES_PATH:-""}  # Optional legacy two-file mode
+PRECOMPUTED_Y_O_TRAJECTORY_PATH=${PRECOMPUTED_Y_O_TRAJECTORY_PATH:-""}
 MAX_SAMPLES=${MAX_SAMPLES:-""}  # For testing, leave empty for full data
 # Offline multi-step on-policy optimization: 0 keeps the historical one-step path.
 # When >0, this is the number of policy updates. Chunk size is derived as
@@ -417,6 +418,16 @@ case "$Y_O_ROLLOUT_MODE" in
     skd|skd_vllm|skd_vllm_internal) ;;
     *) echo "ERROR: Y_O_ROLLOUT_MODE must be one of: student, teacher, expert, skd, skd_vllm, skd_vllm_internal (got: $Y_O_ROLLOUT_MODE)" >&2; exit 1 ;;
 esac
+if [ -n "$PRECOMPUTED_Y_O_TRAJECTORY_PATH" ]; then
+    if [ "$Y_MODE" != "y_o" ] || [ "$Y_O_ROLLOUT_MODE" != "expert" ]; then
+        echo "ERROR: PRECOMPUTED_Y_O_TRAJECTORY_PATH is currently supported only for Y_MODE=y_o and Y_O_ROLLOUT_MODE=expert." >&2
+        exit 1
+    fi
+    if [ ! -s "$PRECOMPUTED_Y_O_TRAJECTORY_PATH" ]; then
+        echo "ERROR: precomputed y_o trajectory parquet is missing: $PRECOMPUTED_Y_O_TRAJECTORY_PATH" >&2
+        exit 1
+    fi
+fi
 case "$TEACHER_TRAJECTORY_CACHE_MODE" in
     off|read_only|read_write) ;;
     *) echo "ERROR: TEACHER_TRAJECTORY_CACHE_MODE must be one of: off, read_only, read_write (got: $TEACHER_TRAJECTORY_CACHE_MODE)" >&2; exit 1 ;;
@@ -610,6 +621,23 @@ PYDATASETLEN_EARLY
     EXPERIMENT_TAG="${EXPERIMENT_TAG}_${MULTISTEP_TAG}"
 fi
 
+if [ -n "$PRECOMPUTED_Y_O_TRAJECTORY_PATH" ]; then
+    PRECOMPUTED_Y_O_TRAJECTORY_ROWS="$(
+        python3 - "$PRECOMPUTED_Y_O_TRAJECTORY_PATH" <<'PYTRAJECTORYLEN'
+import sys
+import pyarrow.parquet as pq
+
+print(pq.ParquetFile(sys.argv[1]).metadata.num_rows)
+PYTRAJECTORYLEN
+    )"
+    REQUIRED_PRECOMPUTED_ROWS="${TOTAL_TRAIN_SAMPLES:-${MAX_SAMPLES:-0}}"
+    if [ "$REQUIRED_PRECOMPUTED_ROWS" -gt 0 ] && \
+       [ "$PRECOMPUTED_Y_O_TRAJECTORY_ROWS" -lt "$REQUIRED_PRECOMPUTED_ROWS" ]; then
+        echo "ERROR: precomputed trajectory has $PRECOMPUTED_Y_O_TRAJECTORY_ROWS rows, but training requires at least $REQUIRED_PRECOMPUTED_ROWS." >&2
+        exit 1
+    fi
+fi
+
 if ! [[ "$GRADIENT_ACCUMULATION_STEPS" =~ ^[1-9][0-9]*$ ]]; then
     echo "ERROR: GRADIENT_ACCUMULATION_STEPS must be a positive integer (got: $GRADIENT_ACCUMULATION_STEPS)."
     exit 1
@@ -761,6 +789,7 @@ y_mode=$Y_MODE
 y_o_rollout_mode=$Y_O_ROLLOUT_MODE
 trajectory_model_name=${TRAJECTORY_MODEL_NAME:-}
 trajectory_model_path=${TRAJECTORY_MODEL_PATH:-}
+precomputed_y_o_trajectory_path=${PRECOMPUTED_Y_O_TRAJECTORY_PATH:-}
 kl_type=$KL_TYPE
 kl_method=$KL_METHOD
 teacher_training_prompt=$TEACHER_TRAINING_PROMPT
@@ -1529,14 +1558,31 @@ generate_stage1_y_o_responses() {
     local stage1_output="$2"
     local current_model_path="$3"
     local current_teacher_model_path="${4:-}"
+    local batch_start="${5:-}"
+    local batch_size="${6:-}"
     local teacher_cache_path=""
+    local expert_trajectory_input=""
+    local -a expert_slice_args=()
 
     case "$Y_O_ROLLOUT_MODE" in
         expert)
-            echo "  [Stage 1] Using non-empty expert solutions as y* responses..."
+            expert_trajectory_input="$stage1_prompts"
+            if [ -n "$PRECOMPUTED_Y_O_TRAJECTORY_PATH" ]; then
+                expert_trajectory_input="$PRECOMPUTED_Y_O_TRAJECTORY_PATH"
+                if [ -n "$batch_start" ]; then
+                    expert_slice_args+=(--start-index "$batch_start")
+                    expert_slice_args+=(--num-samples "$batch_size")
+                elif [ -n "$MAX_SAMPLES" ]; then
+                    expert_slice_args+=(--num-samples "$MAX_SAMPLES")
+                fi
+                echo "  [Stage 1] Slicing precomputed y* trajectory parquet: $expert_trajectory_input"
+            else
+                echo "  [Stage 1] Building y* responses from prompt extra_info..."
+            fi
             python3 -m recipe.opd.generation.expert_y_star_generate \
-                --input "$stage1_prompts" \
-                --output "$stage1_output"
+                --input "$expert_trajectory_input" \
+                --output "$stage1_output" \
+                "${expert_slice_args[@]}"
             ;;
         teacher)
             if [ "$TEACHER_TRAJECTORY_CACHE_MODE" != "off" ]; then
@@ -2391,6 +2437,7 @@ fi
     echo ""
     echo "Data Settings:"
     echo "  Train Data:     $TRAIN_DATA_PATH"
+    echo "  Precomputed y_o: ${PRECOMPUTED_Y_O_TRAJECTORY_PATH:-<none>}"
     echo "  Manual Data Override: ${DATA_PATH:-<auto>}"
     if [ "$Y_MODE" = "y_r" ] && [ -n "$CORRECTED_RESPONSES_PATH" ]; then
         echo "  Legacy Rewrite Targets: $CORRECTED_RESPONSES_PATH"
@@ -2553,7 +2600,13 @@ run_epoch() {
                     echo "  [Stage 1] Generating initial responses..."
                     prepare_stage1_prompts "$stage1_prompts" "$pipeline_batch_start" "$pipeline_current_batch_size"
 
-                    generate_stage1_y_o_responses "$stage1_prompts" "$stage1_output" "$current_model_path" "${current_teacher_model_path:-}"
+                    generate_stage1_y_o_responses \
+                        "$stage1_prompts" \
+                        "$stage1_output" \
+                        "$current_model_path" \
+                        "${current_teacher_model_path:-}" \
+                        "$pipeline_batch_start" \
+                        "$pipeline_current_batch_size"
                 fi
 
                 sleep_resident_y_o_server
@@ -2691,7 +2744,13 @@ run_epoch() {
 
             prepare_stage1_prompts "$stage1_prompts" "$pipeline_batch_start" "$pipeline_current_batch_size"
 
-            generate_stage1_y_o_responses "$stage1_prompts" "$current_data_path" "$current_model_path" "${current_teacher_model_path:-}"
+            generate_stage1_y_o_responses \
+                "$stage1_prompts" \
+                "$current_data_path" \
+                "$current_model_path" \
+                "${current_teacher_model_path:-}" \
+                "$pipeline_batch_start" \
+                "$pipeline_current_batch_size"
         fi
 
         sleep_resident_y_o_server
@@ -2750,6 +2809,7 @@ y_o_rollout_mode: $Y_O_ROLLOUT_MODE
 y_o_rollout_tag: ${Y_O_ROLLOUT_TAG:-}
 trajectory_model_name: ${TRAJECTORY_MODEL_NAME:-null}
 trajectory_model_path: ${TRAJECTORY_MODEL_PATH:-null}
+precomputed_y_o_trajectory_path: ${PRECOMPUTED_Y_O_TRAJECTORY_PATH:-null}
 teacher_trajectory_cache_mode: $TEACHER_TRAJECTORY_CACHE_MODE
 teacher_trajectory_cache_root: $TEACHER_TRAJECTORY_CACHE_ROOT
 use_initial_response: $USE_INITIAL_RESPONSE
@@ -3364,6 +3424,7 @@ y_o_rollout_mode: $Y_O_ROLLOUT_MODE
 y_o_rollout_tag: ${Y_O_ROLLOUT_TAG:-}
 trajectory_model_name: ${TRAJECTORY_MODEL_NAME:-}
 trajectory_model_path: ${TRAJECTORY_MODEL_PATH:-}
+precomputed_y_o_trajectory_path: ${PRECOMPUTED_Y_O_TRAJECTORY_PATH:-}
 teacher_trajectory_cache_mode: $TEACHER_TRAJECTORY_CACHE_MODE
 teacher_trajectory_cache_root: $TEACHER_TRAJECTORY_CACHE_ROOT
 kl_type: $KL_TYPE
