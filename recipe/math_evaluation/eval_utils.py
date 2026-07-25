@@ -300,7 +300,7 @@ def launch_generation_server(
     tensor_model_parallel_size: int,
 ):
     prompt_length = int(os.environ.get("EVAL_PROMPT_LENGTH", "4096"))
-    response_length = int(os.environ.get("EVAL_RESPONSE_LENGTH", "16384"))
+    response_length = int(os.environ.get("EVAL_RESPONSE_LENGTH", "38912"))
     max_model_len = int(os.environ.get("EVAL_MAX_MODEL_LEN", str(prompt_length + response_length)))
 
     config = _build_generation_config(
