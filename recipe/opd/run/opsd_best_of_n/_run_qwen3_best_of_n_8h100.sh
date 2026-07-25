@@ -102,7 +102,7 @@ RUN_ROOT="$(absolute_path "${RUN_ROOT:-outputs/opsd_best_of_n/$EXPERIMENT_NAME}"
 SAMPLING_DIR="$(absolute_path "${SAMPLING_DIR:-gen_results/opsd_best_of_n/$EXPERIMENT_NAME}")"
 PROMPTS_FILE="${PROMPTS_FILE:-$SAMPLING_DIR/stage1_prompts.parquet}"
 CANDIDATES_FILE="${CANDIDATES_FILE:-$SAMPLING_DIR/stage1_best_of_${BEST_OF_N}_candidates.parquet}"
-SELECTED_TRAIN_FILE="${SELECTED_TRAIN_FILE:-$SAMPLING_DIR/train_best_of_${BEST_OF_N}.parquet}"
+SELECTED_TRAIN_FILE="${SELECTED_TRAIN_FILE:-$SAMPLING_DIR/train_best_of_${BEST_OF_N}_correct_only.parquet}"
 MODEL_SAVE_DIR="$(absolute_path "${MODEL_SAVE_DIR:-model/trained/opsd_best_of_n}")"
 
 PREPARE_COMMAND=(

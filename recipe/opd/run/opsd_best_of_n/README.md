@@ -6,12 +6,17 @@ Best-of-4 stage:
 1. Generate four responses per prompt.
 2. Stop generation at the configured sampling-only wall-clock deadline.
 3. Keep only prompts for which all four responses completed.
-4. Select the first correct response. If none is correct, select candidate 0.
+4. Select the first correct response. If none is correct, discard the prompt
+   and all of its candidates from the training dataset.
 5. Train one epoch through the existing `opsd/forward_y_o.sh` path.
 6. Save only at the end, merge `hf_merged`, then run Avg@16/Pass@16 eval.
 
 Sampling budgets include generation server/model startup, but do not limit
 reward scoring, training, checkpoint export, or evaluation.
+
+The filtered training parquet uses the default name
+`train_best_of_<N>_correct_only.parquet`, so an older selection containing
+candidate-0 fallbacks is not reused after upgrading.
 
 ```bash
 bash recipe/opd/run/opsd_best_of_n/qwen3_4b_instruct_math_best_of_n_8h100.sh

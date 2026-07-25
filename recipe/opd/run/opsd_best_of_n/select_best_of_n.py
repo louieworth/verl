@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Select the first correct response from each Best-of-N candidate group."""
+"""Select the first correct response from each Best-of-N candidate group.
+
+Groups without a correct response are excluded from the training dataset.
+"""
 
 from __future__ import annotations
 
@@ -100,12 +103,16 @@ def main() -> None:
         selected_indices[unresolved[newly_correct]] = candidate_index
         unresolved = unresolved[~newly_correct]
 
+    any_correct = np.nan_to_num(scores, nan=-np.inf) >= args.threshold
+    keep_indices = np.flatnonzero(any_correct.any(axis=1))
+
     selected_responses = []
     selected_extra_info = []
-    any_correct = np.nan_to_num(scores, nan=-np.inf) >= args.threshold
-    for row_index, (candidates, row_scores, correct_mask, selected_index) in enumerate(
-        zip(candidate_groups, scores, any_correct, selected_indices)
-    ):
+    for row_index in keep_indices:
+        candidates = candidate_groups[row_index]
+        row_scores = scores[row_index]
+        correct_mask = any_correct[row_index]
+        selected_index = selected_indices[row_index]
         selected_index = int(selected_index)
         selected_responses.append([candidates[selected_index]])
 
@@ -119,18 +126,18 @@ def main() -> None:
         ]
         selected_extra_info.append(extra_info)
 
-    selected = dataset.copy()
+    selected = dataset.iloc[keep_indices].copy().reset_index(drop=True)
     selected["responses"] = selected_responses
     selected["extra_info"] = selected_extra_info
     write_atomic(selected, args.output)
 
-    correct_rows = int(any_correct.any(axis=1).sum())
-    fallback_rows = len(dataset) - correct_rows
+    correct_rows = len(keep_indices)
+    dropped_rows = len(dataset) - correct_rows
     print(
         f"Selected first correct candidate for {correct_rows}/{len(dataset)} rows; "
-        f"used candidate 0 fallback for {fallback_rows} rows."
+        f"dropped {dropped_rows} rows with no correct candidate."
     )
-    counts = np.bincount(selected_indices, minlength=args.n)
+    counts = np.bincount(selected_indices[keep_indices], minlength=args.n)
     print(f"Selected candidate counts: {counts.tolist()}")
     print(f"Wrote {len(selected)} training rows -> {args.output}")
 
