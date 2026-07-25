@@ -27,6 +27,8 @@ Examples:
   bash recipe/opd/run/run_sequence_8h100.sh all math
   bash recipe/opd/run/run_sequence_8h100.sh all code
   bash recipe/opd/run/run_sequence_8h100.sh grpo code
+  bash recipe/opd/run/run_math_group_8h100.sh
+  bash recipe/opd/run/run_code_group_8h100.sh
 
 Modes:
   grpo       Run the four Qwen3 GRPO experiments.
