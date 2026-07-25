@@ -86,8 +86,10 @@ print_command() {
 
 NGPUS_PER_NODE="${NGPUS_PER_NODE:-$(detect_visible_gpu_count)}"
 NNODES="${NNODES:-1}"
-GEN_TP="${GEN_TP:-2}"
-EVAL_GEN_TP="${EVAL_GEN_TP:-$NGPUS_PER_NODE}"
+GEN_TP="${GEN_TP:-1}"
+EVAL_GEN_TP="${EVAL_GEN_TP:-1}"
+EVAL_MAX_NUM_SEQS="${EVAL_MAX_NUM_SEQS:-64}"
+EVAL_GPU_MEMORY_UTILIZATION="${EVAL_GPU_MEMORY_UTILIZATION:-0.90}"
 
 TIMESTAMP="${TIMESTAMP:-$(date +%Y%m%d.%H%M%S)}"
 PROJECT_NAME="${PROJECT_NAME:-verl_grpo_qwen3_8h100}"
@@ -274,7 +276,7 @@ if [ "$TASK" = "math" ]; then
     export DATASETS="$EVAL_DATASETS"
     export PASS_K
     export EVAL_DATASETS_DIR="${EVAL_DATASETS_DIR:-data/eval_dataset/math}"
-    export NGPUS_PER_NODE NNODES
+    export NGPUS_PER_NODE NNODES EVAL_MAX_NUM_SEQS EVAL_GPU_MEMORY_UTILIZATION
     export GEN_TP="$EVAL_GEN_TP"
     export EVAL_BASE_MODEL_NAME="$MODEL_ALIAS"
     export EVAL_MODEL_NAME="$EXPERIMENT_NAME"
@@ -285,7 +287,7 @@ if [ "$TASK" = "math" ]; then
 else
     export DATASETS="$EVAL_DATASETS"
     export PASS_K
-    export NGPUS_PER_NODE
+    export NGPUS_PER_NODE EVAL_MAX_NUM_SEQS EVAL_GPU_MEMORY_UTILIZATION
     export GEN_TP="$EVAL_GEN_TP"
     export EVAL_BASE_MODEL_NAME="$MODEL_ALIAS"
     export EVAL_MODEL_NAME="$EXPERIMENT_NAME"

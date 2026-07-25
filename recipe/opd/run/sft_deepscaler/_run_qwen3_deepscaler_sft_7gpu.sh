@@ -7,6 +7,7 @@ cd "$REPO_ROOT"
 
 export PYTHONPATH="$REPO_ROOT:${PYTHONPATH:-}"
 export WANDB_MODE="${WANDB_MODE:-disabled}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
 
 MODEL_PATH="${MODEL_PATH:?MODEL_PATH is required}"
 MODEL_ALIAS="${MODEL_ALIAS:?MODEL_ALIAS is required}"
@@ -19,7 +20,7 @@ CHECKPOINT_DIR="${CHECKPOINT_DIR:-$RUN_ROOT/checkpoints}"
 FINAL_MODEL_LINK="${FINAL_MODEL_LINK:-$RUN_ROOT/final_model}"
 LOG_DIR="${LOG_DIR:-$RUN_ROOT/logs}"
 
-NUM_GPUS="${NUM_GPUS:-7}"
+NUM_GPUS="${NUM_GPUS:-8}"
 TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-112}"
 MAX_LENGTH="${MAX_LENGTH:-8192}"
 MAX_TOKEN_LEN_PER_GPU="${MAX_TOKEN_LEN_PER_GPU:-16384}"
@@ -27,7 +28,7 @@ MICRO_BATCH_SIZE_PER_GPU="${MICRO_BATCH_SIZE_PER_GPU:-1}"
 TRAIN_MAX_SAMPLES="${TRAIN_MAX_SAMPLES:--1}"
 TOTAL_EPOCHS="${TOTAL_EPOCHS:-1}"
 TOTAL_TRAINING_STEPS="${TOTAL_TRAINING_STEPS:-null}"
-LEARNING_RATE="${LEARNING_RATE:-2e-5}"
+LEARNING_RATE="${LEARNING_RATE:-5e-6}"
 WARMUP_RATIO="${WARMUP_RATIO:-0.1}"
 WEIGHT_DECAY="${WEIGHT_DECAY:-0.01}"
 FSDP_STRATEGY="${FSDP_STRATEGY:-fsdp2}"
@@ -36,7 +37,7 @@ SP_SIZE="${SP_SIZE:-1}"
 USE_TORCH_COMPILE="${USE_TORCH_COMPILE:-true}"
 RESUME_MODE="${RESUME_MODE:-auto}"
 NUM_WORKERS="${NUM_WORKERS:-8}"
-GPU_LOCK_FILE="${GPU_LOCK_FILE:-/data2/tmp/deepscaler_sft_runs/.gpu_1_7.lock}"
+GPU_LOCK_FILE="${GPU_LOCK_FILE:-/data2/tmp/deepscaler_sft_runs/.gpu_0_7.lock}"
 GPU_PREFLIGHT_MAX_USED_MIB="${GPU_PREFLIGHT_MAX_USED_MIB:-1024}"
 
 RUN_EVAL_AFTER_TRAINING="${RUN_EVAL_AFTER_TRAINING:-true}"
@@ -82,15 +83,15 @@ require_model "$MODEL_PATH"
 require_file "$SOURCE_TRAIN_FILE" "DeepScaleR GRPO parquet"
 mkdir -p "$(dirname "$TRAIN_FILE")" "$RUN_ROOT" "$CHECKPOINT_DIR" "$LOG_DIR"
 
-if [ "$NUM_GPUS" -ne 7 ]; then
-    echo "ERROR: this runner requires NUM_GPUS=7, got: $NUM_GPUS" >&2
+if [ "$NUM_GPUS" -ne 8 ]; then
+    echo "ERROR: this runner requires NUM_GPUS=8, got: $NUM_GPUS" >&2
     exit 1
 fi
 
 mkdir -p "$(dirname "$GPU_LOCK_FILE")"
 exec 9>"$GPU_LOCK_FILE"
 if ! flock -n 9; then
-    echo "ERROR: another DeepScaleR SFT pipeline already holds GPU 1–7." >&2
+    echo "ERROR: another DeepScaleR SFT pipeline already holds GPU 0–7." >&2
     echo "Lock file: $GPU_LOCK_FILE" >&2
     exit 1
 fi
@@ -104,14 +105,14 @@ if command -v nvidia-smi >/dev/null 2>&1; then
                     used = $2
                     gsub(/^[[:space:]]+|[[:space:]]+$/, "", gpu_index)
                     gsub(/^[[:space:]]+|[[:space:]]+$/, "", used)
-                    if ((gpu_index + 0) >= 1 && (gpu_index + 0) <= 7 && (used + 0) > limit) {
+                    if ((gpu_index + 0) >= 0 && (gpu_index + 0) <= 7 && (used + 0) > limit) {
                         printf "%s(%s MiB) ", gpu_index, used
                     }
                 }
             '
     )"
     if [ -n "$busy_gpus" ]; then
-        echo "ERROR: refusing to start because GPU 1–7 are not free: $busy_gpus" >&2
+        echo "ERROR: refusing to start because GPU 0–7 are not free: $busy_gpus" >&2
         echo "Set GPU_PREFLIGHT_MAX_USED_MIB only if this occupancy is expected." >&2
         exit 1
     fi
@@ -217,6 +218,8 @@ if [ "$RUN_EVAL_AFTER_TRAINING" = "true" ]; then
     EVAL_OUTPUT_DIR="$EVAL_OUTPUT_DIR" \
     EVAL_RESULTS_FILE="$EVAL_RESULTS_FILE" \
     EVAL_RESULTS_CSV_FILE="${EVAL_RESULTS_FILE%.json}.csv" \
+    EVAL_MAX_NUM_SEQS="${EVAL_MAX_NUM_SEQS:-64}" \
+    EVAL_GPU_MEMORY_UTILIZATION="${EVAL_GPU_MEMORY_UTILIZATION:-0.90}" \
     WRITE_PASS16_AGGREGATES=true \
     WRITE_RESULTS_CSV=true \
         bash "$REPO_ROOT/recipe/math_evaluation/benchmark_kl_model.sh" "$FINAL_MODEL_LINK" \

@@ -1,0 +1,6 @@
+{
+    "Qwen3-4B-Instruct-2507_base_pass16": {
+        "model_path": "/data2/.huggingface/hub/models--Qwen--Qwen3-4B-Instruct-2507/snapshots/cdbee75f17c01a7cc42f958dc650907174af0554",
+        "aime24_pass16_generation_pass_16": 0.8
+    }
+}

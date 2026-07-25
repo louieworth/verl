@@ -106,6 +106,8 @@ def _build_generation_config(
     prompt_length: int,
     response_length: int,
     max_model_len: int,
+    max_num_seqs: int,
+    gpu_memory_utilization: float,
     nnodes: int,
     n_gpus_per_node: int,
     tensor_model_parallel_size: int,
@@ -138,10 +140,11 @@ def _build_generation_config(
                     "prompt_length": prompt_length,
                     "response_length": response_length,
                     "max_model_len": max_model_len,
+                    "max_num_seqs": max_num_seqs,
                     "tensor_model_parallel_size": tensor_model_parallel_size,
                     "pipeline_model_parallel_size": 1,
                     "data_parallel_size": 1,
-                    "gpu_memory_utilization": 0.95,
+                    "gpu_memory_utilization": gpu_memory_utilization,
                     "n": pass_k,
                     "dtype": "bfloat16",
                     "enforce_eager": False,
@@ -302,6 +305,8 @@ def launch_generation_server(
     prompt_length = int(os.environ.get("EVAL_PROMPT_LENGTH", "4096"))
     response_length = int(os.environ.get("EVAL_RESPONSE_LENGTH", "38912"))
     max_model_len = int(os.environ.get("EVAL_MAX_MODEL_LEN", str(prompt_length + response_length)))
+    max_num_seqs = int(os.environ.get("EVAL_MAX_NUM_SEQS", "1024"))
+    gpu_memory_utilization = float(os.environ.get("EVAL_GPU_MEMORY_UTILIZATION", "0.95"))
 
     config = _build_generation_config(
         model_path,
@@ -312,6 +317,8 @@ def launch_generation_server(
         prompt_length=prompt_length,
         response_length=response_length,
         max_model_len=max_model_len,
+        max_num_seqs=max_num_seqs,
+        gpu_memory_utilization=gpu_memory_utilization,
         nnodes=nnodes,
         n_gpus_per_node=n_gpus_per_node,
         tensor_model_parallel_size=tensor_model_parallel_size,
