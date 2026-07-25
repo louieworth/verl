@@ -13,9 +13,10 @@ MODEL_PATH="${MODEL_PATH:?MODEL_PATH is required}"
 MODEL_ALIAS="${MODEL_ALIAS:?MODEL_ALIAS is required}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 
-SOURCE_TRAIN_FILE="${SOURCE_TRAIN_FILE:-$REPO_ROOT/data/train_dataset/deepscaler/train_grpo.parquet}"
-TRAIN_FILE="${TRAIN_FILE:-$REPO_ROOT/data/train_dataset/deepscaler/train_sft.parquet}"
-RUN_ROOT="${RUN_ROOT:-/data2/tmp/deepscaler_sft_runs/$MODEL_ALIAS}"
+SOURCE_SFT_DATA="${SOURCE_SFT_DATA:-/data2/data/jiangli/data/DeepScaleR-Preview-Dataset}"
+SFT_DATA_TAG="${SFT_DATA_TAG:-solution_cot_only}"
+TRAIN_FILE="${TRAIN_FILE:-$REPO_ROOT/data/train_dataset/deepscaler/train_sft_${SFT_DATA_TAG}.parquet}"
+RUN_ROOT="${RUN_ROOT:-/data2/tmp/deepscaler_sft_runs/${MODEL_ALIAS}_${SFT_DATA_TAG}}"
 CHECKPOINT_DIR="${CHECKPOINT_DIR:-$RUN_ROOT/checkpoints}"
 FINAL_MODEL_LINK="${FINAL_MODEL_LINK:-$RUN_ROOT/final_model}"
 LOG_DIR="${LOG_DIR:-$RUN_ROOT/logs}"
@@ -43,13 +44,20 @@ GPU_PREFLIGHT_MAX_USED_MIB="${GPU_PREFLIGHT_MAX_USED_MIB:-1024}"
 RUN_EVAL_AFTER_TRAINING="${RUN_EVAL_AFTER_TRAINING:-true}"
 EVAL_DATASETS="${EVAL_DATASETS:-aime24 aime25 hmmt25 beyondaime amobench}"
 EVAL_DATASETS_DIR="${EVAL_DATASETS_DIR:-$REPO_ROOT/data/eval_dataset/math}"
-EVAL_RESULTS_DIR="${EVAL_RESULTS_DIR:-results/SFT/math/$MODEL_ALIAS}"
+EVAL_RESULTS_DIR="${EVAL_RESULTS_DIR:-results/SFT/math/${MODEL_ALIAS}_${SFT_DATA_TAG}}"
 EVAL_RESULTS_FILE="${EVAL_RESULTS_FILE:-$EVAL_RESULTS_DIR/results.json}"
 EVAL_OUTPUT_DIR="${EVAL_OUTPUT_DIR:-$EVAL_RESULTS_DIR/generations}"
-EVAL_MODEL_NAME="${EVAL_MODEL_NAME:-${MODEL_ALIAS}_DeepScaleR_CoT_SFT_pass16}"
+EVAL_MODEL_NAME="${EVAL_MODEL_NAME:-${MODEL_ALIAS}_DeepScaleR_Solution_CoT_Only_SFT_pass16}"
 
 require_file() {
     if [ ! -s "$1" ]; then
+        echo "ERROR: missing $2: $1" >&2
+        exit 1
+    fi
+}
+
+require_source() {
+    if [ ! -e "$1" ]; then
         echo "ERROR: missing $2: $1" >&2
         exit 1
     fi
@@ -80,7 +88,7 @@ find_final_hf_model() {
 }
 
 require_model "$MODEL_PATH"
-require_file "$SOURCE_TRAIN_FILE" "DeepScaleR GRPO parquet"
+require_source "$SOURCE_SFT_DATA" "raw DeepScaleR dataset"
 mkdir -p "$(dirname "$TRAIN_FILE")" "$RUN_ROOT" "$CHECKPOINT_DIR" "$LOG_DIR"
 
 if [ "$NUM_GPUS" -ne 8 ]; then
@@ -120,14 +128,16 @@ fi
 
 if [ ! -s "$TRAIN_FILE" ]; then
     "$PYTHON_BIN" -m recipe.opd.run.sft_deepscaler.prepare_deepscaler_sft \
-        --input "$SOURCE_TRAIN_FILE" \
+        --input "$SOURCE_SFT_DATA" \
         --output "$TRAIN_FILE"
 else
-    echo "Reusing prepared CoT-only SFT parquet: $TRAIN_FILE"
+    echo "Reusing prepared raw-solution CoT-only SFT parquet: $TRAIN_FILE"
 fi
 
 if [ "${SFT_DRY_RUN:-false}" = "true" ]; then
     echo "Model:              $MODEL_PATH"
+    echo "Raw SFT source:     $SOURCE_SFT_DATA"
+    echo "SFT data tag:       $SFT_DATA_TAG"
     echo "Training data:      $TRAIN_FILE"
     echo "Checkpoint dir:     $CHECKPOINT_DIR"
     echo "GPUs:               $NUM_GPUS"

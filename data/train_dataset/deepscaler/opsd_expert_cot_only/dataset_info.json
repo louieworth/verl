@@ -1,0 +1,46 @@
+{
+  "builder_name": "json",
+  "citation": "",
+  "config_name": "default",
+  "dataset_name": "deep_scale_r-preview-dataset",
+  "dataset_size": 19443229,
+  "description": "",
+  "download_checksums": {
+    "hf://datasets/agentica-org/DeepScaleR-Preview-Dataset@b6ae8c60f5c1f2b594e2140b91c49c9ad0949e29/deepscaler.json": {
+      "num_bytes": 21479374,
+      "checksum": null
+    }
+  },
+  "download_size": 21479374,
+  "features": {
+    "problem": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "answer": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "solution": {
+      "dtype": "string",
+      "_type": "Value"
+    }
+  },
+  "homepage": "",
+  "license": "",
+  "size_in_bytes": 40922603,
+  "splits": {
+    "train": {
+      "name": "train",
+      "num_bytes": 19443229,
+      "num_examples": 40315,
+      "dataset_name": "deep_scale_r-preview-dataset"
+    }
+  },
+  "version": {
+    "version_str": "0.0.0",
+    "major": 0,
+    "minor": 0,
+    "patch": 0
+  }
+}
