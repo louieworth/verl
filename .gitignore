@@ -126,8 +126,9 @@ ENV/
 
 # data
 *.parquet
-!data/train_dataset/deepscaler/train_opsd_y_star_solution_cot_only.parquet
+!data/train_dataset/deepscaler/train_opsd_y_star_solution_or_answer.parquet
 !data/train_dataset/deepscaler/train_sft_solution_cot_only.parquet
+!data/train_dataset/deepscaler/train_opsd_y_t_expert_rewrite_prompts.parquet
 
 
 # local logs

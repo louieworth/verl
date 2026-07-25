@@ -25,7 +25,9 @@ def test_build_teacher_prompt_rewrite_mode_omits_initial_response():
         use_initial_response=False,
     )
 
-    assert "Here is a reference solution" in prompt
+    assert "Given the expert solution below" in prompt
+    assert "**Expert Solution:**" in prompt
+    assert "rewrite the mathematical solution" in prompt
     assert "Your Initial Solution:" not in prompt
 
 

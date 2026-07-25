@@ -21,20 +21,18 @@ export Y_O_ROLLOUT_MODE="expert"
 export TRAJECTORY_MODEL_PATH=""
 export TRAJECTORY_MODEL=""
 
-RAW_DEEPSCALER_PATH="${RAW_DEEPSCALER_PATH:-/data2/data/jiangli/data/DeepScaleR-Preview-Dataset}"
-EXPERT_COT_DATASET="${EXPERT_COT_DATASET:-$VERL_ROOT/data/train_dataset/deepscaler/opsd_expert_cot_only}"
-EXPERT_TRAJECTORY_PARQUET="${EXPERT_TRAJECTORY_PARQUET:-$VERL_ROOT/data/train_dataset/deepscaler/train_opsd_y_star_solution_cot_only.parquet}"
-if [ ! -s "$EXPERT_COT_DATASET/state.json" ]; then
-    python3 "$SCRIPT_DIR/prepare_expert_cot_dataset.py" \
-        --input "$RAW_DEEPSCALER_PATH" \
-        --output "$EXPERT_COT_DATASET"
+CLEANED_DEEPSCALER_PATH="${CLEANED_DEEPSCALER_PATH:-/data2/data/jiangli/data/DeepScaleR-Cleaned}"
+EXPERT_TRAJECTORY_PARQUET="${EXPERT_TRAJECTORY_PARQUET:-$VERL_ROOT/data/train_dataset/deepscaler/train_opsd_y_star_solution_or_answer.parquet}"
+if [ ! -s "$CLEANED_DEEPSCALER_PATH/state.json" ]; then
+    echo "ERROR: missing DeepScaleR-Cleaned dataset: $CLEANED_DEEPSCALER_PATH" >&2
+    exit 1
 fi
 if [ ! -s "$EXPERT_TRAJECTORY_PARQUET" ]; then
     python3 "$SCRIPT_DIR/prepare_expert_trajectory_parquet.py" \
-        --input "$EXPERT_COT_DATASET" \
+        --input "$CLEANED_DEEPSCALER_PATH" \
         --output "$EXPERT_TRAJECTORY_PARQUET"
 fi
-export TRAIN_DATA_PATH="$EXPERT_COT_DATASET"
+export TRAIN_DATA_PATH="$CLEANED_DEEPSCALER_PATH"
 export PRECOMPUTED_Y_O_TRAJECTORY_PATH="$EXPERT_TRAJECTORY_PARQUET"
 
 exec bash "$SCRIPT_DIR/../forward_y_o.sh" "$@"

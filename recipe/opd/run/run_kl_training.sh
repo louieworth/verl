@@ -386,18 +386,22 @@ fi
 ROLLOUT_CHAT_TEMPLATE_TOKEN_BUFFER=${ROLLOUT_CHAT_TEMPLATE_TOKEN_BUFFER:-4096}
 STAGE1_ROLLOUT_MAX_MODEL_LEN=$((STAGE1_PROMPT_LENGTH + MAX_RESPONSE_LENGTH + ROLLOUT_CHAT_TEMPLATE_TOKEN_BUFFER))
 STAGE2_ROLLOUT_MAX_MODEL_LEN=$((STAGE2_PROMPT_LENGTH + MAX_RESPONSE_LENGTH + ROLLOUT_CHAT_TEMPLATE_TOKEN_BUFFER))
+TEACHER_TRAJECTORY_PROMPT_LENGTH=${TEACHER_TRAJECTORY_PROMPT_LENGTH:-$MAX_PROMPT_LENGTH}
+TEACHER_TRAJECTORY_ROLLOUT_MAX_MODEL_LEN=$((TEACHER_TRAJECTORY_PROMPT_LENGTH + MAX_RESPONSE_LENGTH + ROLLOUT_CHAT_TEMPLATE_TOKEN_BUFFER))
 ROLLOUT_MAX_NUM_SEQS=${ROLLOUT_MAX_NUM_SEQS:-64}
 ROLLOUT_GPU_MEMORY_UTILIZATION=${ROLLOUT_GPU_MEMORY_UTILIZATION:-0.85}
 ROLLOUT_MAX_NUM_BATCHED_TOKENS=${ROLLOUT_MAX_NUM_BATCHED_TOKENS:-65536}
 # y_o rollout source. `student` is the historical student-only rollout.
-# `teacher` samples y_t from a fixed, separate trajectory model while leaving
-# the KL teacher unchanged. `expert` uses the dataset's non-empty expert_cot as
-# y* without generation.
+# `teacher` samples y_t from a fixed trajectory policy conditioned on the
+# prepared (x, y*) rewrite prompt while leaving the KL teacher unchanged.  The
+# rollout-variant wrappers set this policy to the corresponding student's base
+# model. `expert` uses the dataset's non-empty expert_cot as y* without generation.
 # `skd`/`skd_vllm` runs student draft + teacher accept/replacement during y_o rollout.
 # `skd_vllm_internal` installs a repo-local vLLM sampler patch and uses vLLM
 # speculative decoding when the installed vLLM supports a plain student draft model.
 Y_O_ROLLOUT_MODE=${Y_O_ROLLOUT_MODE:-"student"}
 TRAJECTORY_MODEL_PATH=${TRAJECTORY_MODEL_PATH:-""}
+TEACHER_TRAJECTORY_PROMPT_PATH=${TEACHER_TRAJECTORY_PROMPT_PATH:-""}
 TEACHER_TRAJECTORY_CACHE_MODE=${TEACHER_TRAJECTORY_CACHE_MODE:-"read_write"}
 TEACHER_TRAJECTORY_CACHE_ROOT=${TEACHER_TRAJECTORY_CACHE_ROOT:-"$VERL_ROOT/gen_results/fixed_teacher_trajectory_cache"}
 if [ -n "${TRAJECTORY_MODEL:-}" ]; then
@@ -414,10 +418,19 @@ case "$Y_O_ROLLOUT_MODE" in
             echo "ERROR: Y_O_ROLLOUT_MODE=teacher requires TRAJECTORY_MODEL_PATH." >&2
             exit 1
         fi
+        if [ -z "$TEACHER_TRAJECTORY_PROMPT_PATH" ] || [ ! -s "$TEACHER_TRAJECTORY_PROMPT_PATH" ]; then
+            echo "ERROR: Y_O_ROLLOUT_MODE=teacher requires a prepared pi(.|x,y*) prompt parquet." >&2
+            echo "       Missing TEACHER_TRAJECTORY_PROMPT_PATH: ${TEACHER_TRAJECTORY_PROMPT_PATH:-<empty>}" >&2
+            exit 1
+        fi
         ;;
     skd|skd_vllm|skd_vllm_internal) ;;
     *) echo "ERROR: Y_O_ROLLOUT_MODE must be one of: student, teacher, expert, skd, skd_vllm, skd_vllm_internal (got: $Y_O_ROLLOUT_MODE)" >&2; exit 1 ;;
 esac
+TEACHER_TRAJECTORY_CONDITIONING=""
+if [ "$Y_O_ROLLOUT_MODE" = "teacher" ]; then
+    TEACHER_TRAJECTORY_CONDITIONING="opsd_x_y_star_expert_rewrite_v1"
+fi
 if [ -n "$PRECOMPUTED_Y_O_TRAJECTORY_PATH" ]; then
     if [ "$Y_MODE" != "y_o" ] || [ "$Y_O_ROLLOUT_MODE" != "expert" ]; then
         echo "ERROR: PRECOMPUTED_Y_O_TRAJECTORY_PATH is currently supported only for Y_MODE=y_o and Y_O_ROLLOUT_MODE=expert." >&2
@@ -453,6 +466,10 @@ SKD_PIPELINE_LANES=${SKD_PIPELINE_LANES:-2}
 STAGE1_ROLLOUT_MAX_NUM_BATCHED_TOKENS=$ROLLOUT_MAX_NUM_BATCHED_TOKENS
 if [ "$STAGE1_ROLLOUT_MAX_NUM_BATCHED_TOKENS" -lt "$STAGE1_ROLLOUT_MAX_MODEL_LEN" ]; then
     STAGE1_ROLLOUT_MAX_NUM_BATCHED_TOKENS=$STAGE1_ROLLOUT_MAX_MODEL_LEN
+fi
+TEACHER_TRAJECTORY_MAX_NUM_BATCHED_TOKENS=$ROLLOUT_MAX_NUM_BATCHED_TOKENS
+if [ "$TEACHER_TRAJECTORY_MAX_NUM_BATCHED_TOKENS" -lt "$TEACHER_TRAJECTORY_ROLLOUT_MAX_MODEL_LEN" ]; then
+    TEACHER_TRAJECTORY_MAX_NUM_BATCHED_TOKENS=$TEACHER_TRAJECTORY_ROLLOUT_MAX_MODEL_LEN
 fi
 if [ "$SKD_VLLM_MAX_NUM_BATCHED_TOKENS" -lt "$STAGE1_ROLLOUT_MAX_NUM_BATCHED_TOKENS" ]; then
     SKD_VLLM_MAX_NUM_BATCHED_TOKENS=$STAGE1_ROLLOUT_MAX_NUM_BATCHED_TOKENS
@@ -654,7 +671,7 @@ RUN_DATE=${RUN_DATE:-$(date +%Y%m%d-%H%M%S)}
 OPTIMIZATION_STEP_TAG="${MULTISTEP_TAG:-ms1}"
 case "$Y_O_ROLLOUT_MODE" in
     student) Y_O_ROLLOUT_TAG="" ;;
-    teacher) Y_O_ROLLOUT_TAG="_y_t_$(sanitize_path_component "$TRAJECTORY_MODEL_NAME")" ;;
+    teacher) Y_O_ROLLOUT_TAG="_y_t_expert_rewrite_$(sanitize_path_component "$TRAJECTORY_MODEL_NAME")" ;;
     expert) Y_O_ROLLOUT_TAG="_y_star" ;;
     skd|skd_vllm) Y_O_ROLLOUT_TAG="_skd" ;;
     skd_vllm_internal) Y_O_ROLLOUT_TAG="_skd_internal" ;;
@@ -772,6 +789,14 @@ compute_gen_results_signature() {
     # Guard resume against accidentally reusing a gen_results tree for a different
     # algorithm/data target. Operational knobs used for recovery, such as
     # TRAIN_BATCH_SIZE and KL_FULL_VOCAB_CHUNK_SIZE, are intentionally excluded.
+    local teacher_trajectory_signature_content=""
+    if [ "$Y_O_ROLLOUT_MODE" = "teacher" ]; then
+        teacher_trajectory_signature_content="
+teacher_trajectory_conditioning=$TEACHER_TRAJECTORY_CONDITIONING
+teacher_trajectory_prompt_path=$TEACHER_TRAJECTORY_PROMPT_PATH
+teacher_trajectory_prompt_length=$TEACHER_TRAJECTORY_PROMPT_LENGTH
+teacher_trajectory_rollout_max_model_len=$TEACHER_TRAJECTORY_ROLLOUT_MAX_MODEL_LEN"
+    fi
     GEN_RESULTS_RUN_SIGNATURE_CONTENT="$(cat <<EOF
 task=$TASK
 distill_family=$DISTILL_FAMILY
@@ -788,7 +813,7 @@ prompt_mode=$PROMPT_MODE_TAG
 y_mode=$Y_MODE
 y_o_rollout_mode=$Y_O_ROLLOUT_MODE
 trajectory_model_name=${TRAJECTORY_MODEL_NAME:-}
-trajectory_model_path=${TRAJECTORY_MODEL_PATH:-}
+trajectory_model_path=${TRAJECTORY_MODEL_PATH:-}${teacher_trajectory_signature_content}
 precomputed_y_o_trajectory_path=${PRECOMPUTED_Y_O_TRAJECTORY_PATH:-}
 kl_type=$KL_TYPE
 kl_method=$KL_METHOD
@@ -1479,22 +1504,46 @@ PYCHUNKPROMPTS
     python3 "$PIPELINE_DIR/y_o_prepare.py" "${args[@]}"
 }
 
-teacher_trajectory_cache_path() {
+prepare_teacher_trajectory_prompt_slice() {
     local stage1_prompts="$1"
+    local output_file="$2"
+    local batch_start="${3:-}"
+    local batch_size="${4:-}"
+    local -a args=(
+        --input "$TEACHER_TRAJECTORY_PROMPT_PATH"
+        --output "$output_file"
+        --task "$TASK"
+        --alignment-input "$stage1_prompts"
+    )
+
+    if [ -n "$batch_start" ]; then
+        args+=(--start-index "$batch_start")
+        args+=(--num-samples "$batch_size")
+    elif [ -n "$MAX_SAMPLES" ]; then
+        args+=(--start-index 0)
+        args+=(--num-samples "$MAX_SAMPLES")
+    fi
+
+    python3 -m recipe.opd.generation.teacher_y_t_prepare "${args[@]}"
+}
+
+teacher_trajectory_cache_path() {
+    local teacher_prompts="$1"
     local prompt_digest config_digest model_tag
 
-    prompt_digest="$(sha256sum "$stage1_prompts" | awk '{print $1}')"
+    prompt_digest="$(sha256sum "$teacher_prompts" | awk '{print $1}')"
     config_digest="$(
         printf '%s\n' \
             "trajectory_model_path=$TRAJECTORY_MODEL_PATH" \
+            "trajectory_conditioning=opsd_x_y_star_expert_rewrite_v1" \
             "task=$TASK" \
             "temperature=0.6" \
             "top_p=0.95" \
             "top_k=20" \
             "n=1" \
-            "base_prompt_length=$BASE_PROMPT_LENGTH" \
+            "teacher_trajectory_prompt_length=$TEACHER_TRAJECTORY_PROMPT_LENGTH" \
             "max_response_length=$MAX_RESPONSE_LENGTH" \
-            "stage1_rollout_max_model_len=$STAGE1_ROLLOUT_MAX_MODEL_LEN" |
+            "teacher_trajectory_rollout_max_model_len=$TEACHER_TRAJECTORY_ROLLOUT_MAX_MODEL_LEN" |
             sha256sum |
             awk '{print $1}'
     )"
@@ -1540,14 +1589,16 @@ write_teacher_trajectory_cache() {
     cat > "${cache_path%.parquet}.metadata.txt" <<EOF
 trajectory_model_path=$TRAJECTORY_MODEL_PATH
 trajectory_model_name=$TRAJECTORY_MODEL_NAME
+trajectory_conditioning=opsd_x_y_star_expert_rewrite_v1
 task=$TASK
 temperature=0.6
 top_p=0.95
 top_k=20
 n=1
-base_prompt_length=$BASE_PROMPT_LENGTH
+teacher_trajectory_prompt_path=$TEACHER_TRAJECTORY_PROMPT_PATH
+teacher_trajectory_prompt_length=$TEACHER_TRAJECTORY_PROMPT_LENGTH
 max_response_length=$MAX_RESPONSE_LENGTH
-stage1_rollout_max_model_len=$STAGE1_ROLLOUT_MAX_MODEL_LEN
+teacher_trajectory_rollout_max_model_len=$TEACHER_TRAJECTORY_ROLLOUT_MAX_MODEL_LEN
 source_prompt_parquet=$source_prompt_path
 EOF
 }
@@ -1585,9 +1636,17 @@ generate_stage1_y_o_responses() {
                 "${expert_slice_args[@]}"
             ;;
         teacher)
+            local teacher_rollout_prompts="${stage1_output%.parquet}_expert_rewrite_prompts.parquet"
+            echo "  [Stage 1] Preparing aligned pi(.|x,y*) expert-rewrite prompts..."
+            prepare_teacher_trajectory_prompt_slice \
+                "$stage1_prompts" \
+                "$teacher_rollout_prompts" \
+                "$batch_start" \
+                "$batch_size"
+
             if [ "$TEACHER_TRAJECTORY_CACHE_MODE" != "off" ]; then
-                teacher_cache_path="$(teacher_trajectory_cache_path "$stage1_prompts")"
-                if teacher_trajectory_cache_is_valid "$teacher_cache_path" "$stage1_prompts"; then
+                teacher_cache_path="$(teacher_trajectory_cache_path "$teacher_rollout_prompts")"
+                if teacher_trajectory_cache_is_valid "$teacher_cache_path" "$teacher_rollout_prompts"; then
                     echo "  [Stage 1] Reusing fixed-teacher y_t cache: $teacher_cache_path"
                     cp "$teacher_cache_path" "$stage1_output"
                     return 0
@@ -1595,7 +1654,7 @@ generate_stage1_y_o_responses() {
                 echo "  [Stage 1] No matching fixed-teacher y_t cache: $teacher_cache_path"
             fi
 
-            echo "  [Stage 1] Generating y_t responses with fixed trajectory model: $TRAJECTORY_MODEL_PATH"
+            echo "  [Stage 1] Generating y_t ~ pi(.|x,y*) with the student's fixed base model: $TRAJECTORY_MODEL_PATH"
             env -u PYTORCH_CUDA_ALLOC_CONF python3 -m verl.trainer.main_generation_server \
                 trainer.nnodes="${NNODES}" \
                 trainer.n_gpus_per_node="${NGPUS_PER_NODE}" \
@@ -1604,20 +1663,20 @@ generate_stage1_y_o_responses() {
                 actor_rollout_ref.rollout.temperature=0.6 \
                 actor_rollout_ref.rollout.top_p=0.95 \
                 actor_rollout_ref.rollout.top_k=20 \
-                actor_rollout_ref.rollout.prompt_length="${BASE_PROMPT_LENGTH}" \
+                actor_rollout_ref.rollout.prompt_length="${TEACHER_TRAJECTORY_PROMPT_LENGTH}" \
                 actor_rollout_ref.rollout.response_length="${MAX_RESPONSE_LENGTH}" \
-                actor_rollout_ref.rollout.max_model_len="${STAGE1_ROLLOUT_MAX_MODEL_LEN}" \
+                actor_rollout_ref.rollout.max_model_len="${TEACHER_TRAJECTORY_ROLLOUT_MAX_MODEL_LEN}" \
                 actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
                 actor_rollout_ref.rollout.gpu_memory_utilization="${ROLLOUT_GPU_MEMORY_UTILIZATION}" \
                 actor_rollout_ref.rollout.max_num_seqs="${ROLLOUT_MAX_NUM_SEQS}" \
-                actor_rollout_ref.rollout.max_num_batched_tokens="${STAGE1_ROLLOUT_MAX_NUM_BATCHED_TOKENS}" \
+                actor_rollout_ref.rollout.max_num_batched_tokens="${TEACHER_TRAJECTORY_MAX_NUM_BATCHED_TOKENS}" \
                 actor_rollout_ref.rollout.name=vllm \
                 actor_rollout_ref.rollout.n=1 \
-                data.train_files="['${stage1_prompts}']" \
+                data.train_files="['${teacher_rollout_prompts}']" \
                 data.prompt_key=prompt \
                 +data.output_path="${stage1_output}"
             if [ "$TEACHER_TRAJECTORY_CACHE_MODE" = "read_write" ]; then
-                write_teacher_trajectory_cache "$stage1_output" "$teacher_cache_path" "$stage1_prompts"
+                write_teacher_trajectory_cache "$stage1_output" "$teacher_cache_path" "$teacher_rollout_prompts"
                 echo "  [Stage 1] Saved fixed-teacher y_t cache: $teacher_cache_path"
             fi
             ;;
@@ -1772,6 +1831,12 @@ metadata_matches_step1_reuse_context() {
     [ "$value" = "$Y_O_ROLLOUT_MODE" ] || return 1
     value="$(gen_results_metadata_value "$meta" trajectory_model_path)"
     [ "$value" = "${TRAJECTORY_MODEL_PATH:-}" ] || return 1
+    if [ "$Y_O_ROLLOUT_MODE" = "teacher" ]; then
+        value="$(gen_results_metadata_value "$meta" teacher_trajectory_conditioning)"
+        [ "$value" = "$TEACHER_TRAJECTORY_CONDITIONING" ] || return 1
+        value="$(gen_results_metadata_value "$meta" teacher_trajectory_prompt_path)"
+        [ "$value" = "${TEACHER_TRAJECTORY_PROMPT_PATH:-}" ] || return 1
+    fi
     value="$(gen_results_metadata_value "$meta" train_data_path)"
     [ "$value" = "$TRAIN_DATA_PATH" ] || return 1
     value="$(gen_results_metadata_value "$meta" max_samples)"
@@ -2424,6 +2489,7 @@ print_base_configuration() {
     echo "  y_o Rollout:    $Y_O_ROLLOUT_MODE"
 if [ "$Y_O_ROLLOUT_MODE" = "teacher" ]; then
     echo "  Trajectory Model: $TRAJECTORY_MODEL_PATH"
+    echo "  Trajectory Prompt: pi(.|x,y*) expert rewrite ($TEACHER_TRAJECTORY_PROMPT_PATH)"
     echo "  Trajectory Cache: $TEACHER_TRAJECTORY_CACHE_MODE ($TEACHER_TRAJECTORY_CACHE_ROOT)"
 elif [ "$Y_O_ROLLOUT_MODE" = "expert" ]; then
     echo "  Trajectory Model: <dataset expert_cot / y*>"
@@ -2809,6 +2875,10 @@ y_o_rollout_mode: $Y_O_ROLLOUT_MODE
 y_o_rollout_tag: ${Y_O_ROLLOUT_TAG:-}
 trajectory_model_name: ${TRAJECTORY_MODEL_NAME:-null}
 trajectory_model_path: ${TRAJECTORY_MODEL_PATH:-null}
+teacher_trajectory_conditioning: ${TEACHER_TRAJECTORY_CONDITIONING:-}
+teacher_trajectory_prompt_path: ${TEACHER_TRAJECTORY_PROMPT_PATH:-null}
+teacher_trajectory_prompt_length: $TEACHER_TRAJECTORY_PROMPT_LENGTH
+teacher_trajectory_rollout_max_model_len: $TEACHER_TRAJECTORY_ROLLOUT_MAX_MODEL_LEN
 precomputed_y_o_trajectory_path: ${PRECOMPUTED_Y_O_TRAJECTORY_PATH:-null}
 teacher_trajectory_cache_mode: $TEACHER_TRAJECTORY_CACHE_MODE
 teacher_trajectory_cache_root: $TEACHER_TRAJECTORY_CACHE_ROOT
@@ -2844,6 +2914,7 @@ teacher_prompt_length: $MAX_PROMPT_LENGTH
 stage2_prompt_length: $STAGE2_PROMPT_LENGTH
 stage1_rollout_max_model_len: $STAGE1_ROLLOUT_MAX_MODEL_LEN
 stage2_rollout_max_model_len: $STAGE2_ROLLOUT_MAX_MODEL_LEN
+teacher_trajectory_max_num_batched_tokens: $TEACHER_TRAJECTORY_MAX_NUM_BATCHED_TOKENS
 rollout_chat_template_token_buffer: $ROLLOUT_CHAT_TEMPLATE_TOKEN_BUFFER
 rollout_max_num_seqs: $ROLLOUT_MAX_NUM_SEQS
 stage1_rollout_max_num_batched_tokens: $STAGE1_ROLLOUT_MAX_NUM_BATCHED_TOKENS
@@ -3424,6 +3495,10 @@ y_o_rollout_mode: $Y_O_ROLLOUT_MODE
 y_o_rollout_tag: ${Y_O_ROLLOUT_TAG:-}
 trajectory_model_name: ${TRAJECTORY_MODEL_NAME:-}
 trajectory_model_path: ${TRAJECTORY_MODEL_PATH:-}
+teacher_trajectory_conditioning: ${TEACHER_TRAJECTORY_CONDITIONING:-}
+teacher_trajectory_prompt_path: ${TEACHER_TRAJECTORY_PROMPT_PATH:-}
+teacher_trajectory_prompt_length: $TEACHER_TRAJECTORY_PROMPT_LENGTH
+teacher_trajectory_rollout_max_model_len: $TEACHER_TRAJECTORY_ROLLOUT_MAX_MODEL_LEN
 precomputed_y_o_trajectory_path: ${PRECOMPUTED_Y_O_TRAJECTORY_PATH:-}
 teacher_trajectory_cache_mode: $TEACHER_TRAJECTORY_CACHE_MODE
 teacher_trajectory_cache_root: $TEACHER_TRAJECTORY_CACHE_ROOT
@@ -3465,6 +3540,7 @@ max_length: $MAX_LENGTH
 max_token_len_per_gpu: $MAX_TOKEN_LEN_PER_GPU
 stage1_rollout_max_model_len: $STAGE1_ROLLOUT_MAX_MODEL_LEN
 stage2_rollout_max_model_len: $STAGE2_ROLLOUT_MAX_MODEL_LEN
+teacher_trajectory_max_num_batched_tokens: $TEACHER_TRAJECTORY_MAX_NUM_BATCHED_TOKENS
 rollout_chat_template_token_buffer: $ROLLOUT_CHAT_TEMPLATE_TOKEN_BUFFER
 rollout_gpu_memory_utilization: $ROLLOUT_GPU_MEMORY_UTILIZATION
 rollout_max_num_seqs: $ROLLOUT_MAX_NUM_SEQS

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the complete OPSD y* training parquet from a CoT-only dataset."""
+"""Build complete OPSD y* data using solution, then answer fallback."""
 
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ from recipe.opd.generation.y_o_prepare import make_map_fn_stage1
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--input", required=True, help="CoT-only DeepScaleR save_to_disk directory")
+    parser.add_argument("--input", required=True, help="DeepScaleR save_to_disk directory")
     parser.add_argument("--output", required=True, help="Complete OPSD y* parquet")
     parser.add_argument("--split", default="train")
     parser.add_argument("--data-source", default="deepscaleR")
@@ -39,15 +39,17 @@ def main() -> None:
     required = {"problem", "answer", "solution"}
     missing = required - set(source.column_names)
     if missing:
-        raise ValueError(f"CoT-only dataset is missing columns: {sorted(missing)}")
+        raise ValueError(f"DeepScaleR dataset is missing columns: {sorted(missing)}")
     empty_indices = [
-        index
-        for index, value in enumerate(source["solution"])
-        if value is None or not str(value).strip()
+        index for index, (solution, answer) in enumerate(
+            zip(source["solution"], source["answer"], strict=True)
+        )
+        if not (solution is not None and str(solution).strip())
+        and not (answer is not None and str(answer).strip())
     ]
     if empty_indices:
         raise ValueError(
-            "CoT-only source contains empty solution values; "
+            "DeepScaleR source contains rows with neither solution nor answer; "
             f"indices include {empty_indices[:10]}"
         )
 

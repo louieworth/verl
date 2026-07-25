@@ -95,25 +95,42 @@ def make_map_fn_stage1(question_key="problem", data_source="deepscaleR", index_o
     def process_fn(example, idx):
         # Extract problem and answer
         question_raw = example[question_key]
-        answer_raw = example['answer']
+        answer_raw = example.get("answer", "")
+
+        # y* uses the full solution/CoT when it is available.  Answer-only
+        # examples remain valid OPSD examples and use the answer as y*.
+        solution_raw = example.get("solution", "")
+        solution_text = "" if solution_raw is None else str(solution_raw).strip()
+        answer_text = "" if answer_raw is None else str(answer_raw).strip()
+        if solution_text:
+            expert_solution = solution_text
+            expert_solution_source = "solution"
+        elif answer_text:
+            expert_solution = answer_text
+            expert_solution_source = "answer"
+        else:
+            raise ValueError(
+                f"Example {index_offset + idx} has neither a non-empty solution nor answer"
+            )
 
         # Store expert CoT for Stage 2
         extra_info = {}
-        extra_info['expert_cot'] = example.get('solution', '')
+        extra_info['expert_cot'] = expert_solution
+        extra_info['expert_solution_source'] = expert_solution_source
         extra_info[question_key] = question_raw
         extra_info['index'] = index_offset + idx
 
         # Store original answer in extra_info
-        extra_info['answer'] = answer_raw
+        extra_info['answer'] = answer_text
 
         # Construct prompt with instruction
         question = question_raw + " " + instruction_following
 
         # Extract ground truth answer
         try:
-            solution = remove_boxed(answer_raw)
+            solution = remove_boxed(answer_text)
         except Exception:
-            solution = answer_raw
+            solution = answer_text
 
         return {
             "data_source": data_source,

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create Stage-1 trajectory data using each row's expert CoT as y*."""
+"""Create Stage-1 trajectory data using solution, then answer fallback, as y*."""
 
 from __future__ import annotations
 
@@ -28,18 +28,26 @@ def attach_expert_responses(source: pd.DataFrame) -> pd.DataFrame:
         if not isinstance(extra_info, dict):
             missing_indices.append(row_index)
             continue
-        expert_cot = clean_text(extra_info.get("expert_cot"))
-        if not expert_cot:
+        expert_solution = clean_text(extra_info.get("expert_cot"))
+        expert_solution_source = clean_text(extra_info.get("expert_solution_source"))
+        if not expert_solution:
+            expert_solution = clean_text(extra_info.get("answer"))
+            expert_solution_source = "answer"
+        if not expert_solution:
             missing_indices.append(row_index)
             continue
+        if not expert_solution_source:
+            expert_solution_source = "solution"
         normalized = dict(extra_info)
-        normalized["trajectory_source"] = "expert_solution"
+        normalized["expert_cot"] = expert_solution
+        normalized["expert_solution_source"] = expert_solution_source
+        normalized["trajectory_source"] = f"expert_{expert_solution_source}"
         normalized_extra_info.append(normalized)
-        responses.append([expert_cot])
+        responses.append([expert_solution])
 
     if missing_indices:
         raise ValueError(
-            "y* rollout requires a non-empty extra_info['expert_cot'] for every row; "
+            "y* rollout requires a non-empty solution or answer for every row; "
             f"missing indices include {missing_indices[:10]} "
             f"({len(missing_indices)}/{len(source)} rows)"
         )
@@ -112,7 +120,7 @@ def main() -> None:
     output = attach_expert_responses(source)
     write_atomic(output, args.output)
     print(
-        f"Wrote {len(output)} y* trajectories from expert_cot "
+        f"Wrote {len(output)} y* trajectories from solution/answer "
         f"(start={args.start_index}) -> {args.output}"
     )
 

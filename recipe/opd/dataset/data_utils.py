@@ -42,15 +42,22 @@ PROMPT_TEMPLATE_STUDENT = """
 {PROBLEM}
 """
 
-# vanilla OPSD: teacher sees problem + expert solution (no initial response).
+# vanilla OPSD: teacher sees problem + expert solution (no initial response)
+# and rewrites the expert solution in its own words.
 PROMPT_TEMPLATE_OPSD_VANILLA_TEACHER = """
+Given the expert solution below, rewrite the mathematical solution in your own words while preserving the correct reasoning and final answer.
+
+**Problem:**
 {PROBLEM}
 
-Here is a reference solution:
+**Expert Solution:**
 {EXPERT_SOLUTION}
 
-After understanding the reference solution, please try to solve this problem using your own approach below:
-Answer:
+**Instructions:**
+1. Use the expert solution as the authoritative reasoning reference
+2. Rewrite the complete solution clearly and correctly
+3. Preserve the expert solution's final answer
+4. Output ONLY the rewritten solution
 """
 
 # refine OPSD: teacher sees problem + expert solution + initial response.
