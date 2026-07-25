@@ -44,6 +44,11 @@ PYTHON_BIN=${PYTHON_BIN:-python3}
 BENCHMARK_CONFIG=${BENCHMARK_CONFIG:-""}
 DRY_RUN_FLAG=""
 
+# Default Qwen3 math evaluation context allocation.
+export EVAL_PROMPT_LENGTH="${EVAL_PROMPT_LENGTH:-2048}"
+export EVAL_RESPONSE_LENGTH="${EVAL_RESPONSE_LENGTH:-38912}"
+export EVAL_MAX_MODEL_LEN="${EVAL_MAX_MODEL_LEN:-40960}"
+
 if [ "${1:-}" = "--dry-run" ]; then
     DRY_RUN_FLAG="--dry_run"
     shift
@@ -150,6 +155,7 @@ evaluate_one_model() {
     fi
     echo "# Model Name: ${MODEL_NAME}"
     echo "# Datasets:   ${DATASETS_TO_TEST}"
+    echo "# Lengths:    prompt=${EVAL_PROMPT_LENGTH}, response=${EVAL_RESPONSE_LENGTH}, max_model=${EVAL_MAX_MODEL_LEN}"
     echo "# Results:    ${RESULTS_FILE}"
     echo "################################################################################"
 
