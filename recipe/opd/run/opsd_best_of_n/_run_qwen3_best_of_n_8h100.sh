@@ -66,11 +66,41 @@ require_file() {
 }
 
 require_model() {
-    if [ ! -d "$1" ] || [ ! -s "$1/config.json" ]; then
-        echo "ERROR: missing local base model or config.json: $1" >&2
-        echo "Run recipe/opd/run/grpo/prepare/download_models.sh or set MODEL_PATH." >&2
-        exit 1
+    local reference="$1"
+    if [ -d "$reference" ]; then
+        if [ ! -s "$reference/config.json" ]; then
+            echo "ERROR: missing config.json in local base model: $reference" >&2
+            exit 1
+        fi
+        return
     fi
+    case "$reference" in
+        /*|./*|../*|model/*)
+            echo "ERROR: missing local base model or config.json: $reference" >&2
+            echo "Run recipe/opd/run/grpo/prepare/download_models.sh or set MODEL_PATH to a Hugging Face repo ID." >&2
+            exit 1
+            ;;
+        */*)
+            echo "Using Hugging Face model reference: $reference"
+            ;;
+        *)
+            echo "ERROR: MODEL_PATH is neither a local model directory nor a Hugging Face repo ID: $reference" >&2
+            exit 1
+            ;;
+    esac
+}
+
+resolve_model_reference() {
+    local reference="$1"
+    if [ -d "$reference" ]; then
+        absolute_path "$reference"
+        return
+    fi
+    case "$reference" in
+        /*|./*|../*|model/*) absolute_path "$reference" ;;
+        */*) printf '%s\n' "$reference" ;;
+        *) absolute_path "$reference" ;;
+    esac
 }
 
 print_command() {
@@ -78,7 +108,7 @@ print_command() {
     printf '\n'
 }
 
-MODEL_PATH="$(absolute_path "$MODEL_PATH")"
+MODEL_PATH="$(resolve_model_reference "$MODEL_PATH")"
 TIMESTAMP="${TIMESTAMP:-$(date +%Y%m%d.%H%M%S)}"
 RUN_VARIANT_SUFFIX=""
 if [ -n "$RUN_VARIANT_TAG" ]; then

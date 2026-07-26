@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 export TASK=math
-export MODEL_PATH="${MODEL_PATH:-model/base/Qwen3-4B-Instruct-2507}"
+export MODEL_PATH="${MODEL_PATH:-Qwen/Qwen3-4B-Instruct-2507}"
 export MODEL_ALIAS="${MODEL_ALIAS:-Qwen3-4B-Instruct-2507}"
 export BEST_OF_N="${BEST_OF_N:-4}"
 

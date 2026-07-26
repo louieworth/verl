@@ -49,14 +49,26 @@ require_file() {
     fi
 }
 
-require_dir() {
-    local path="$1"
-    local description="$2"
-    if [ ! -d "$path" ]; then
-        echo "ERROR: missing $description: $path" >&2
-        echo "Run: bash recipe/opd/run/grpo/prepare/ready_to_train.sh" >&2
-        exit 1
+require_model() {
+    local reference="$1"
+    if [ -d "$reference" ]; then
+        require_file "$reference/config.json" "model config"
+        return
     fi
+    case "$reference" in
+        /*|./*|../*|model/*)
+            echo "ERROR: missing local base model or config.json: $reference" >&2
+            echo "Run: bash recipe/opd/run/grpo/prepare/ready_to_train.sh or set MODEL_PATH to a Hugging Face repo ID." >&2
+            exit 1
+            ;;
+        */*)
+            echo "Using Hugging Face model reference: $reference"
+            ;;
+        *)
+            echo "ERROR: MODEL_PATH is neither a local model directory nor a Hugging Face repo ID: $reference" >&2
+            exit 1
+            ;;
+    esac
 }
 
 latest_hf_checkpoint() {
@@ -122,8 +134,7 @@ fi
 export HF_HOME="${GRPO_HF_HOME:-$REPO_ROOT/data/eval_dataset/$TASK/huggingface_cache}"
 export HF_DATASETS_CACHE="${GRPO_HF_DATASETS_CACHE:-$HF_HOME/datasets}"
 
-require_dir "$MODEL_PATH" "base model"
-require_file "$MODEL_PATH/config.json" "model config"
+require_model "$MODEL_PATH"
 require_file "$TRAIN_FILE" "GRPO training parquet"
 require_file "$TEST_FILE" "validation parquet"
 

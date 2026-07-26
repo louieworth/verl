@@ -19,6 +19,15 @@ export MODEL_NAME="${MODEL_NAME:-Qwen3-8B}"
 export STUDENT_MODEL="${STUDENT_MODEL:-Qwen3-8B}"
 export MULTI_STEP=1
 
+# Keep all non-model inputs and generated artifacts inside this repository.
+export EVAL_DATASETS_DIR="$VERL_ROOT/data/eval_dataset/math"
+export MODEL_SAVE_DIR="$VERL_ROOT/model/trained/opsd_rollout_variants"
+export PIPELINE_ARCHIVE_MODEL_ROOT="$MODEL_SAVE_DIR/archive"
+export GEN_RESULTS_ROOT="$VERL_ROOT/gen_results/opsd_rollout_variants"
+export HF_HOME="$VERL_ROOT/data/download_cache/huggingface"
+export HF_DATASETS_CACHE="$HF_HOME/datasets"
+export NTFY_ENABLED=false
+
 # Keep OPSD's KL reference model unchanged; Qwen3-14B is trajectory-only.
 export TEACHER_MODEL_PATH=""
 export TEACHER_MODEL=""
@@ -34,7 +43,7 @@ export TEACHER_TRAJECTORY_PROMPT_PATH=""
 export TEACHER_TRAJECTORY_CACHE_MODE="${TEACHER_TRAJECTORY_CACHE_MODE:-read_write}"
 # Qwen3-14B sampling is stochastic. Keep this experiment's generated y_t
 # separate from the 4B student experiment.
-TEACHER_TRAJECTORY_CACHE_BASE_ROOT="${TEACHER_TRAJECTORY_CACHE_BASE_ROOT:-$VERL_ROOT/data/train_dataset/gen_y_t}"
+TEACHER_TRAJECTORY_CACHE_BASE_ROOT="$VERL_ROOT/data/train_dataset/gen_y_t"
 export TEACHER_TRAJECTORY_CACHE_ROOT="$TEACHER_TRAJECTORY_CACHE_BASE_ROOT/qwen3_8b_forward_y_t_qwen3_14b_x_only"
 
 Y_T_X_ONLY_PROMPTS="$VERL_ROOT/data/train_dataset/deepscaler/train_grpo.parquet"
