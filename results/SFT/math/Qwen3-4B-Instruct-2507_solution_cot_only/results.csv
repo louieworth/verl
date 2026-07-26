@@ -1,0 +1,2 @@
+model,task,is_lora,teacher,y_mode,kl_type,kl_method,clip_ratio,top_K,multi_turn,aime24_avg@16,aime25_avg@16,hmmt25_avg@16,beyondaime_avg@16,amobench_avg@16,aime24_pass@16,aime25_pass@16,hmmt25_pass@16,beyondaime_pass@16,amobench_pass@16
+Qwen3-4B-Instruct-2507,,,,,,,,0,,0.6395833333,0.4729166667,0.2958333333,0.32375,0.08814102564,0.8666666667,0.7666666667,0.5333333333,0.63,0.3076923077

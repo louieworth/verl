@@ -1,6 +1,20 @@
 {
-    "Qwen3-4B-Instruct-2507_DeepScaleR_Solution_CoT_Only_SFT_pass16": {
-        "model_path": "/data2/tmp/deepscaler_sft_runs/Qwen3-4B-Instruct-2507_solution_cot_only/final_model",
-        "aime24_pass16_generation_pass_16": 0.8666666666666667
-    }
+  "Qwen3-4B-Instruct-2507_DeepScaleR_Solution_CoT_Only_SFT_pass16": {
+    "model_path": "/data2/tmp/deepscaler_sft_runs/Qwen3-4B-Instruct-2507_solution_cot_only/final_model",
+    "aime24_pass16_generation_pass_16": 0.8666666666666667,
+    "aime25_pass16_generation_pass_16": 0.7666666666666667,
+    "hmmt25_pass16_generation_pass_16": 0.5333333333333333,
+    "beyondaime_pass16_generation_pass_16": 0.63,
+    "amobench_pass16_generation_pass_16": 0.3076923076923077,
+    "aime24_avg_pass1_generation_pass_16": 0.6395833333333333,
+    "aime24_pass8_generation_pass_16": 0.8333333333333334,
+    "aime25_avg_pass1_generation_pass_16": 0.47291666666666665,
+    "aime25_pass8_generation_pass_16": 0.7,
+    "hmmt25_avg_pass1_generation_pass_16": 0.29583333333333334,
+    "hmmt25_pass8_generation_pass_16": 0.4666666666666667,
+    "beyondaime_avg_pass1_generation_pass_16": 0.32375,
+    "beyondaime_pass8_generation_pass_16": 0.59,
+    "amobench_avg_pass1_generation_pass_16": 0.08814102564102565,
+    "amobench_pass8_generation_pass_16": 0.23076923076923078
+  }
 }

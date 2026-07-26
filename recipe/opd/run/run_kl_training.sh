@@ -393,9 +393,9 @@ ROLLOUT_GPU_MEMORY_UTILIZATION=${ROLLOUT_GPU_MEMORY_UTILIZATION:-0.85}
 ROLLOUT_MAX_NUM_BATCHED_TOKENS=${ROLLOUT_MAX_NUM_BATCHED_TOKENS:-65536}
 # y_o rollout source. `student` is the historical student-only rollout.
 # `teacher` samples y_t from a fixed trajectory policy conditioned on the
-# prepared (x, y*) rewrite prompt while leaving the KL teacher unchanged.  The
-# rollout-variant wrappers set this policy to the corresponding student's base
-# model. `expert` uses the dataset's non-empty expert_cot as y* without generation.
+# prepared (x, y*) rewrite prompt while leaving the KL teacher unchanged. The
+# rollout-variant wrapper selects the fixed trajectory model. `expert` uses the
+# dataset's non-empty expert_cot as y* without generation.
 # `skd`/`skd_vllm` runs student draft + teacher accept/replacement during y_o rollout.
 # `skd_vllm_internal` installs a repo-local vLLM sampler patch and uses vLLM
 # speculative decoding when the installed vLLM supports a plain student draft model.
@@ -1654,7 +1654,7 @@ generate_stage1_y_o_responses() {
                 echo "  [Stage 1] No matching fixed-teacher y_t cache: $teacher_cache_path"
             fi
 
-            echo "  [Stage 1] Generating y_t ~ pi(.|x,y*) with the student's fixed base model: $TRAJECTORY_MODEL_PATH"
+            echo "  [Stage 1] Generating y_t ~ pi(.|x,y*) with fixed trajectory model: $TRAJECTORY_MODEL_PATH"
             env -u PYTORCH_CUDA_ALLOC_CONF python3 -m verl.trainer.main_generation_server \
                 trainer.nnodes="${NNODES}" \
                 trainer.n_gpus_per_node="${NGPUS_PER_NODE}" \
