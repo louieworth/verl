@@ -197,8 +197,10 @@ MASTER_PORT=${MASTER_PORT:-"29500"}
 # auto: use srun to launch one torchrun agent per node when NNODES>1 under Slurm.
 USE_SLURM_TORCHRUN=${USE_SLURM_TORCHRUN:-"auto"}
 SLURM_GPU_TYPE=${SLURM_GPU_TYPE:-"h100"}
-GEN_TP=${GEN_TP:-1}  # Tensor parallel for generation
-EVAL_GEN_TP=${EVAL_GEN_TP:-$NGPUS_PER_NODE}  # Tensor parallel for post-training evaluation
+# Use every GPU in one tensor-parallel vLLM replica by default for both
+# training-time generation and post-training evaluation.
+GEN_TP=${GEN_TP:-$NGPUS_PER_NODE}
+EVAL_GEN_TP=${EVAL_GEN_TP:-$NGPUS_PER_NODE}
 
 # verl FSDP Settings
 FSDP_STRATEGY=${FSDP_STRATEGY:-"fsdp2"}

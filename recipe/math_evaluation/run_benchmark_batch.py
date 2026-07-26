@@ -178,8 +178,8 @@ def main():
     default_temperature = float(config.get("temperature", 0.6))
     default_top_p = float(config.get("top_p", 0.95))
     default_nnodes = int(config.get("nnodes", 1))
-    default_n_gpus_per_node = int(config.get("n_gpus_per_node", 4))
-    default_gen_tp = int(config.get("gen_tp", 1))
+    default_n_gpus_per_node = int(config.get("n_gpus_per_node", 8))
+    default_gen_tp = int(config.get("gen_tp", default_n_gpus_per_node))
 
     for model_config in config["models"]:
         model_path = normalize_model_path(model_config["model_path"])

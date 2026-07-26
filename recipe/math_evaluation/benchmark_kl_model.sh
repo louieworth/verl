@@ -98,6 +98,17 @@ fi
 NGPUS_PER_NODE=${NGPUS_PER_NODE:-8}
 NNODES=${NNODES:-1}
 GEN_TP=${GEN_TP:-${NGPUS_PER_NODE:-1}}
+if ! [[ "$NGPUS_PER_NODE" =~ ^[1-9][0-9]*$ ]] || \
+   ! [[ "$NNODES" =~ ^[1-9][0-9]*$ ]] || \
+   ! [[ "$GEN_TP" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR: NGPUS_PER_NODE, NNODES, and GEN_TP must be positive integers" >&2
+    exit 1
+fi
+TOTAL_GPUS=$((NGPUS_PER_NODE * NNODES))
+if [ "$GEN_TP" -gt "$TOTAL_GPUS" ] || [ $((TOTAL_GPUS % GEN_TP)) -ne 0 ]; then
+    echo "ERROR: GEN_TP=$GEN_TP must divide total GPUs=$TOTAL_GPUS" >&2
+    exit 1
+fi
 
 # Eval datasets
 EVAL_DATASETS_DIR=${EVAL_DATASETS_DIR:-/data/data/jiangli/huggingface/datasets}
@@ -266,7 +277,16 @@ echo "Will evaluate ${#MODEL_PATHS[@]} model(s):"
 for mp in "${MODEL_PATHS[@]}"; do
     echo "  - ${mp}"
 done
+echo "GPU layout: NNODES=$NNODES NGPUS_PER_NODE=$NGPUS_PER_NODE GEN_TP=$GEN_TP replicas=$((TOTAL_GPUS / GEN_TP))"
 echo ""
+
+if [ -n "$DRY_RUN_FLAG" ]; then
+    echo "Datasets: $DATASETS_TO_TEST"
+    echo "Sampling: pass_k=$PASS_K temperature=0.6 top_p=0.95"
+    echo "Lengths: prompt=$EVAL_PROMPT_LENGTH response=$EVAL_RESPONSE_LENGTH max_model=$EVAL_MAX_MODEL_LEN"
+    echo "Dry run: configuration validated; no model was loaded."
+    exit 0
+fi
 
 for mp in "${MODEL_PATHS[@]}"; do
     evaluate_one_model "${mp}"

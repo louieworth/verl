@@ -38,14 +38,14 @@ detect_visible_gpu_count() {
 
     if command -v nvidia-smi >/dev/null 2>&1; then
         local count
-        count="$(nvidia-smi -L 2>/dev/null | wc -l | tr -d ' ')"
+        count="$(nvidia-smi -L 2>/dev/null | awk '/^GPU [0-9]+:/ { count++ } END { print count + 0 }')"
         if [ -n "$count" ] && [ "$count" -gt 0 ] 2>/dev/null; then
             printf '%s\n' "$count"
             return 0
         fi
     fi
 
-    printf '1\n'
+    printf '8\n'
 }
 
 export NGPUS_PER_NODE="${NGPUS_PER_NODE:-$(detect_visible_gpu_count)}"

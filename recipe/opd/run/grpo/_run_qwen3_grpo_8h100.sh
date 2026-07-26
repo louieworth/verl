@@ -30,7 +30,7 @@ detect_visible_gpu_count() {
     fi
     if command -v nvidia-smi >/dev/null 2>&1; then
         local count
-        count="$(nvidia-smi -L 2>/dev/null | wc -l | tr -d ' ')"
+        count="$(nvidia-smi -L 2>/dev/null | awk '/^GPU [0-9]+:/ { count++ } END { print count + 0 }')"
         if [ -n "$count" ] && [ "$count" -gt 0 ] 2>/dev/null; then
             printf '%s\n' "$count"
             return 0
@@ -98,8 +98,10 @@ print_command() {
 
 NGPUS_PER_NODE="${NGPUS_PER_NODE:-$(detect_visible_gpu_count)}"
 NNODES="${NNODES:-1}"
-GEN_TP="${GEN_TP:-1}"
-EVAL_GEN_TP="${EVAL_GEN_TP:-1}"
+# Use every allocated GPU together in one tensor-parallel vLLM replica for
+# both the training rollout and post-training evaluation.
+GEN_TP="${GEN_TP:-$NGPUS_PER_NODE}"
+EVAL_GEN_TP="${EVAL_GEN_TP:-$NGPUS_PER_NODE}"
 EVAL_MAX_NUM_SEQS="${EVAL_MAX_NUM_SEQS:-64}"
 EVAL_GPU_MEMORY_UTILIZATION="${EVAL_GPU_MEMORY_UTILIZATION:-0.90}"
 
@@ -259,8 +261,10 @@ if [ "${GRPO_DRY_RUN:-false}" = "true" ]; then
     echo "Training time cap: ${MAX_TRAIN_DURATION_SECONDS}s"
     echo "Save frequency:    $SAVE_FREQ (save_at_end=$SAVE_AT_END)"
     echo "Rollout memory:    $ROLLOUT_GPU_MEMORY_UTILIZATION"
+    echo "Rollout TP:        $GEN_TP"
     echo "Rollout max len:   $ROLLOUT_MAX_MODEL_LEN"
     echo "Rollout max seqs:  $ROLLOUT_MAX_NUM_SEQS"
+    echo "Eval TP:           $EVAL_GEN_TP"
     echo "Eval datasets:     $EVAL_DATASETS"
     echo "Eval pass_k:       $PASS_K"
     print_command "${TRAIN_COMMAND[@]}"

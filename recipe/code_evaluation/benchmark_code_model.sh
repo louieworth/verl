@@ -2,7 +2,14 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VERL_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 PYTHON_BIN=${PYTHON_BIN:-python3}
+
+DRY_RUN=false
+if [ "${1:-}" = "--dry-run" ]; then
+    DRY_RUN=true
+    shift
+fi
 
 MODEL_PATHS=("$@")
 if [ ${#MODEL_PATHS[@]} -eq 0 ] && [ -n "${MODEL_PATH:-}" ]; then
@@ -25,10 +32,29 @@ MAX_TOKENS=${CODE_EVAL_MAX_RESPONSE_TOKENS:-${CODE_EVAL_MAX_TOKENS:-16384}}
 MAX_MODEL_LEN=${CODE_EVAL_MAX_MODEL_LEN:-$((MAX_PROMPT_TOKENS + MAX_TOKENS))}
 CODE_EVAL_MAX_NUM_SEQS=${CODE_EVAL_MAX_NUM_SEQS:-128}
 CODE_EVAL_LCB_ENFORCE_EAGER=${CODE_EVAL_LCB_ENFORCE_EAGER:-false}
-GEN_TP=${GEN_TP:-${NGPUS_PER_NODE:-1}}
+NGPUS_PER_NODE=${NGPUS_PER_NODE:-8}
+GEN_TP=${GEN_TP:-$NGPUS_PER_NODE}
+if ! [[ "$NGPUS_PER_NODE" =~ ^[1-9][0-9]*$ ]] || \
+   ! [[ "$GEN_TP" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR: NGPUS_PER_NODE and GEN_TP must be positive integers" >&2
+    exit 1
+fi
+if [ "$GEN_TP" -gt "$NGPUS_PER_NODE" ] || [ $((NGPUS_PER_NODE % GEN_TP)) -ne 0 ]; then
+    echo "ERROR: GEN_TP=$GEN_TP must divide NGPUS_PER_NODE=$NGPUS_PER_NODE" >&2
+    exit 1
+fi
+LCB_REPO=${LCB_REPO:-$VERL_ROOT/external/LiveCodeBench}
 RESULTS_BASE_DIR=${RESULTS_BASE_DIR:-results}
 GEN_OUTPUT_BASE_DIR=${GEN_OUTPUT_BASE_DIR:-gen_results/code_eval}
 WRITE_RESULTS_CSV=${WRITE_RESULTS_CSV:-true}
+case " $DATASETS_TO_TEST " in
+    *" livecodebench"*|*" lcb_"*)
+        if [ ! -d "$LCB_REPO/lcb_runner" ]; then
+            echo "ERROR: LiveCodeBench repo not found at $LCB_REPO" >&2
+            exit 1
+        fi
+        ;;
+esac
 
 require_module() {
     "$PYTHON_BIN" - "$1" <<'PYMOD'
@@ -97,7 +123,7 @@ evalplus_dataset() {
 lcb_dataset() {
     local model_path="$1" model_name="$2" results_file="$3" out_dir="$4"
     require_module lcb_runner || { echo "ERROR: lcb_runner is not installed. Install LiveCodeBench from https://github.com/LiveCodeBench/LiveCodeBench" >&2; exit 1; }
-    local lcb_repo="${LCB_REPO:-/data/verl/external/LiveCodeBench}"
+    local lcb_repo="$LCB_REPO"
     local lcb_model_key="${LCB_MODEL_KEY:-Qwen/Qwen3-235B-A22B}"
     local enforce_eager_arg=""
     if [ "$CODE_EVAL_LCB_ENFORCE_EAGER" = "true" ]; then
@@ -150,7 +176,14 @@ for MODEL_PATH in "${MODEL_PATHS[@]}"; do
     echo "# Datasets:   $DATASETS_TO_TEST"
     echo "# Results:    $RESULTS_FILE"
     echo "# Sampling:   pass_k=$PASS_K temperature=$TEMPERATURE top_p=$TOP_P max_prompt_tokens=$MAX_PROMPT_TOKENS max_response_tokens=$MAX_TOKENS max_model_len=$MAX_MODEL_LEN max_num_seqs=$CODE_EVAL_MAX_NUM_SEQS lcb_enforce_eager=$CODE_EVAL_LCB_ENFORCE_EAGER"
+    echo "# GPU layout: NGPUS_PER_NODE=$NGPUS_PER_NODE GEN_TP=$GEN_TP (one vLLM instance)"
+    echo "# LCB repo:   $LCB_REPO"
     echo "################################################################################"
+
+    if [ "$DRY_RUN" = "true" ]; then
+        echo "Dry run: configuration validated; no model was loaded."
+        continue
+    fi
 
     for ds in $DATASETS_TO_TEST; do
         case "$ds" in

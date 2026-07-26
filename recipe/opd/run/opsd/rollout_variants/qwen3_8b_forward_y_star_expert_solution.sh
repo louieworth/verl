@@ -14,6 +14,9 @@ export MODEL_PATH="${MODEL_PATH:-Qwen/Qwen3-8B}"
 export MODEL_NAME="${MODEL_NAME:-Qwen3-8B}"
 export STUDENT_MODEL="${STUDENT_MODEL:-Qwen3-8B}"
 export MULTI_STEP=1
+export NGPUS_PER_NODE="${NGPUS_PER_NODE:-8}"
+export GEN_TP="${GEN_TP:-$NGPUS_PER_NODE}"
+export EVAL_GEN_TP="${EVAL_GEN_TP:-$NGPUS_PER_NODE}"
 
 # Keep all non-model inputs and generated artifacts inside this repository.
 export EVAL_DATASETS_DIR="$VERL_ROOT/data/eval_dataset/math"

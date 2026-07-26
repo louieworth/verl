@@ -149,8 +149,10 @@ if [ "$ROLLOUT_MAX_NUM_BATCHED_TOKENS" -lt "$ROLLOUT_MAX_MODEL_LEN" ]; then
 fi
 
 PASS_K="${PASS_K:-16}"
-GEN_TP="${GEN_TP:-1}"
-EVAL_GEN_TP="${EVAL_GEN_TP:-1}"
+# Use every allocated GPU together in one tensor-parallel vLLM replica for
+# both Best-of-N sampling and post-training evaluation.
+GEN_TP="${GEN_TP:-$NGPUS_PER_NODE}"
+EVAL_GEN_TP="${EVAL_GEN_TP:-$NGPUS_PER_NODE}"
 EVAL_MAX_NUM_SEQS="${EVAL_MAX_NUM_SEQS:-64}"
 EVAL_GPU_MEMORY_UTILIZATION="${EVAL_GPU_MEMORY_UTILIZATION:-0.90}"
 MAX_SAMPLES="${MAX_SAMPLES:-}"
@@ -232,6 +234,7 @@ if [ "${OPSD_BEST_OF_N_DRY_RUN:-false}" = "true" ]; then
     echo "Final merged model:      $EXPECTED_MODEL_PATH"
     echo "Eval results JSON:       $RESULTS_FILE"
     echo "Results model key:       $EXPECTED_RESULTS_MODEL_KEY"
+    echo "Eval tensor parallel:    $EVAL_GEN_TP"
     echo "Eval datasets:           $EVAL_DATASETS"
     echo "Eval Avg/Pass K:         $PASS_K"
     echo "Periodic saves:          disabled; final save only"

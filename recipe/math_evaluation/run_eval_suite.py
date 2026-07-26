@@ -28,8 +28,8 @@ def parse_args():
     parser.add_argument("--temperature", type=float, default=0.6)
     parser.add_argument("--top_p", type=float, default=0.95)
     parser.add_argument("--nnodes", type=int, default=1)
-    parser.add_argument("--n_gpus_per_node", type=int, default=4)
-    parser.add_argument("--gen_tp", type=int, default=1)
+    parser.add_argument("--n_gpus_per_node", type=int, default=8)
+    parser.add_argument("--gen_tp", type=int, default=8)
     return parser.parse_args()
 
 
