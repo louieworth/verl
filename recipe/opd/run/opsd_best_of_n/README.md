@@ -41,3 +41,18 @@ The `2.1 hrs` code budget is interpreted as decimal hours: 7560 seconds
 
 Use `OPSD_BEST_OF_N_DRY_RUN=true` to print resolved paths and commands without
 requiring GPUs or local model weights.
+
+## Complete sampling without a wall-clock budget
+
+The 4B Math no-budget launcher generates all `N` candidates for every prompt
+before selection and OPSD training:
+
+```bash
+BEST_OF_N=4 bash recipe/opd/run/opsd_best_of_n/qwen3_4b_instruct_math_best_of_n_no_sampling_budget_8h100.sh
+BEST_OF_N=8 bash recipe/opd/run/opsd_best_of_n/qwen3_4b_instruct_math_best_of_n_no_sampling_budget_8h100.sh
+```
+
+It uses the independent `opsd_best_of_n_no_sampling_budget` namespace for
+sampling outputs, training outputs, merged models, internal generation
+metadata, evaluation JSON files, and result keys. It cannot reuse or overwrite
+artifacts produced by the budget-constrained launchers.

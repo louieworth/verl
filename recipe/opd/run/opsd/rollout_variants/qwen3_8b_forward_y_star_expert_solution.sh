@@ -13,6 +13,7 @@ export TASK="math"
 export MODEL_PATH="${MODEL_PATH:-Qwen/Qwen3-8B}"
 export MODEL_NAME="${MODEL_NAME:-Qwen3-8B}"
 export STUDENT_MODEL="${STUDENT_MODEL:-Qwen3-8B}"
+export MULTI_STEP=1
 
 export TEACHER_MODEL_PATH=""
 export TEACHER_MODEL=""
@@ -20,19 +21,15 @@ export Y_MODE="y_o"
 export Y_O_ROLLOUT_MODE="expert"
 export TRAJECTORY_MODEL_PATH=""
 export TRAJECTORY_MODEL=""
+export PRECOMPUTED_STAGE1_PROMPTS_PATH=""
+export PRECOMPUTED_Y_O_TRAJECTORY_PATH=""
 
-CLEANED_DEEPSCALER_PATH="${CLEANED_DEEPSCALER_PATH:-/data2/data/jiangli/data/DeepScaleR-Cleaned}"
-EXPERT_TRAJECTORY_PARQUET="${EXPERT_TRAJECTORY_PARQUET:-$VERL_ROOT/data/train_dataset/deepscaler/train_opsd_y_star_solution_or_answer.parquet}"
-if [ ! -s "$CLEANED_DEEPSCALER_PATH/state.json" ]; then
-    echo "ERROR: missing DeepScaleR-Cleaned dataset: $CLEANED_DEEPSCALER_PATH" >&2
+OPSD_Y_STAR_DATA="${OPSD_Y_STAR_DATA:-$VERL_ROOT/data/train_dataset/deepscaler/train_opsd_y_star_solution_cot_only.parquet}"
+if [ ! -s "$OPSD_Y_STAR_DATA" ]; then
+    echo "ERROR: missing repo-local CoT-only OPSD y* parquet: $OPSD_Y_STAR_DATA" >&2
     exit 1
 fi
-if [ ! -s "$EXPERT_TRAJECTORY_PARQUET" ]; then
-    python3 "$SCRIPT_DIR/prepare_expert_trajectory_parquet.py" \
-        --input "$CLEANED_DEEPSCALER_PATH" \
-        --output "$EXPERT_TRAJECTORY_PARQUET"
-fi
-export TRAIN_DATA_PATH="$CLEANED_DEEPSCALER_PATH"
-export PRECOMPUTED_Y_O_TRAJECTORY_PATH="$EXPERT_TRAJECTORY_PARQUET"
+export TRAIN_DATA_PATH="$OPSD_Y_STAR_DATA"
+export DATA_PATH="$OPSD_Y_STAR_DATA"
 
 exec bash "$SCRIPT_DIR/../forward_y_o.sh" "$@"

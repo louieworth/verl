@@ -147,6 +147,7 @@ WEIGHT_DECAY=${WEIGHT_DECAY:-0.005}
 DATA_PATH=${DATA_PATH:-""}  # Optional override; reused across epochs if set
 CORRECTED_RESPONSES_PATH=${CORRECTED_RESPONSES_PATH:-""}  # Optional legacy two-file mode
 PRECOMPUTED_Y_O_TRAJECTORY_PATH=${PRECOMPUTED_Y_O_TRAJECTORY_PATH:-""}
+PRECOMPUTED_STAGE1_PROMPTS_PATH=${PRECOMPUTED_STAGE1_PROMPTS_PATH:-""}
 MAX_SAMPLES=${MAX_SAMPLES:-""}  # For testing, leave empty for full data
 # Offline multi-step on-policy optimization: 0 keeps the historical one-step path.
 # When >0, this is the number of policy updates. Chunk size is derived as
@@ -392,16 +393,18 @@ ROLLOUT_MAX_NUM_SEQS=${ROLLOUT_MAX_NUM_SEQS:-64}
 ROLLOUT_GPU_MEMORY_UTILIZATION=${ROLLOUT_GPU_MEMORY_UTILIZATION:-0.85}
 ROLLOUT_MAX_NUM_BATCHED_TOKENS=${ROLLOUT_MAX_NUM_BATCHED_TOKENS:-65536}
 # y_o rollout source. `student` is the historical student-only rollout.
-# `teacher` samples y_t from a fixed trajectory policy conditioned on the
-# prepared (x, y*) rewrite prompt while leaving the KL teacher unchanged. The
-# rollout-variant wrapper selects the fixed trajectory model. `expert` uses the
-# dataset's non-empty expert_cot as y* without generation.
+# `teacher` samples y_t from a fixed trajectory policy while leaving the KL
+# teacher unchanged. Its conditioning is selected independently:
+# `pi_T_x_only_v1` samples pi_T(.|x), while
+# `opsd_x_y_star_expert_rewrite_v1` samples pi_T(.|x,y*).
+# `expert` uses the dataset's non-empty expert_cot as y* without generation.
 # `skd`/`skd_vllm` runs student draft + teacher accept/replacement during y_o rollout.
 # `skd_vllm_internal` installs a repo-local vLLM sampler patch and uses vLLM
 # speculative decoding when the installed vLLM supports a plain student draft model.
 Y_O_ROLLOUT_MODE=${Y_O_ROLLOUT_MODE:-"student"}
 TRAJECTORY_MODEL_PATH=${TRAJECTORY_MODEL_PATH:-""}
 TEACHER_TRAJECTORY_PROMPT_PATH=${TEACHER_TRAJECTORY_PROMPT_PATH:-""}
+TEACHER_TRAJECTORY_CONDITIONING=${TEACHER_TRAJECTORY_CONDITIONING:-""}
 TEACHER_TRAJECTORY_CACHE_MODE=${TEACHER_TRAJECTORY_CACHE_MODE:-"read_write"}
 TEACHER_TRAJECTORY_CACHE_ROOT=${TEACHER_TRAJECTORY_CACHE_ROOT:-"$VERL_ROOT/gen_results/fixed_teacher_trajectory_cache"}
 if [ -n "${TRAJECTORY_MODEL:-}" ]; then
@@ -418,18 +421,35 @@ case "$Y_O_ROLLOUT_MODE" in
             echo "ERROR: Y_O_ROLLOUT_MODE=teacher requires TRAJECTORY_MODEL_PATH." >&2
             exit 1
         fi
-        if [ -z "$TEACHER_TRAJECTORY_PROMPT_PATH" ] || [ ! -s "$TEACHER_TRAJECTORY_PROMPT_PATH" ]; then
-            echo "ERROR: Y_O_ROLLOUT_MODE=teacher requires a prepared pi(.|x,y*) prompt parquet." >&2
-            echo "       Missing TEACHER_TRAJECTORY_PROMPT_PATH: ${TEACHER_TRAJECTORY_PROMPT_PATH:-<empty>}" >&2
-            exit 1
+        if [ -z "$TEACHER_TRAJECTORY_CONDITIONING" ]; then
+            TEACHER_TRAJECTORY_CONDITIONING="pi_T_x_only_v1"
         fi
+        case "$TEACHER_TRAJECTORY_CONDITIONING" in
+            pi_T_x_only_v1) ;;
+            opsd_x_y_star_expert_rewrite_v1)
+                if [ -z "$TEACHER_TRAJECTORY_PROMPT_PATH" ] || [ ! -s "$TEACHER_TRAJECTORY_PROMPT_PATH" ]; then
+                    echo "ERROR: expert-rewrite teacher rollout requires a prepared pi(.|x,y*) prompt parquet." >&2
+                    echo "       Missing TEACHER_TRAJECTORY_PROMPT_PATH: ${TEACHER_TRAJECTORY_PROMPT_PATH:-<empty>}" >&2
+                    exit 1
+                fi
+                ;;
+            *)
+                echo "ERROR: unsupported TEACHER_TRAJECTORY_CONDITIONING=$TEACHER_TRAJECTORY_CONDITIONING" >&2
+                echo "       Expected pi_T_x_only_v1 or opsd_x_y_star_expert_rewrite_v1." >&2
+                exit 1
+                ;;
+        esac
         ;;
     skd|skd_vllm|skd_vllm_internal) ;;
     *) echo "ERROR: Y_O_ROLLOUT_MODE must be one of: student, teacher, expert, skd, skd_vllm, skd_vllm_internal (got: $Y_O_ROLLOUT_MODE)" >&2; exit 1 ;;
 esac
-TEACHER_TRAJECTORY_CONDITIONING=""
-if [ "$Y_O_ROLLOUT_MODE" = "teacher" ]; then
-    TEACHER_TRAJECTORY_CONDITIONING="opsd_x_y_star_expert_rewrite_v1"
+if [ "$Y_O_ROLLOUT_MODE" != "teacher" ]; then
+    TEACHER_TRAJECTORY_CONDITIONING=""
+elif [ "$TEACHER_TRAJECTORY_CONDITIONING" = "pi_T_x_only_v1" ]; then
+    # x-only rollout uses the ordinary problem prompt, not the larger OPSD
+    # training-time prompt budget that reserves space for y*.
+    TEACHER_TRAJECTORY_PROMPT_LENGTH=$BASE_PROMPT_LENGTH
+    TEACHER_TRAJECTORY_ROLLOUT_MAX_MODEL_LEN=$STAGE1_ROLLOUT_MAX_MODEL_LEN
 fi
 if [ -n "$PRECOMPUTED_Y_O_TRAJECTORY_PATH" ]; then
     if [ "$Y_MODE" != "y_o" ] || [ "$Y_O_ROLLOUT_MODE" != "expert" ]; then
@@ -671,7 +691,16 @@ RUN_DATE=${RUN_DATE:-$(date +%Y%m%d-%H%M%S)}
 OPTIMIZATION_STEP_TAG="${MULTISTEP_TAG:-ms1}"
 case "$Y_O_ROLLOUT_MODE" in
     student) Y_O_ROLLOUT_TAG="" ;;
-    teacher) Y_O_ROLLOUT_TAG="_y_t_expert_rewrite_$(sanitize_path_component "$TRAJECTORY_MODEL_NAME")" ;;
+    teacher)
+        case "$TEACHER_TRAJECTORY_CONDITIONING" in
+            pi_T_x_only_v1)
+                Y_O_ROLLOUT_TAG="_y_t_$(sanitize_path_component "$TRAJECTORY_MODEL_NAME")"
+                ;;
+            opsd_x_y_star_expert_rewrite_v1)
+                Y_O_ROLLOUT_TAG="_y_t_expert_rewrite_$(sanitize_path_component "$TRAJECTORY_MODEL_NAME")"
+                ;;
+        esac
+        ;;
     expert) Y_O_ROLLOUT_TAG="_y_star" ;;
     skd|skd_vllm) Y_O_ROLLOUT_TAG="_skd" ;;
     skd_vllm_internal) Y_O_ROLLOUT_TAG="_skd_internal" ;;
@@ -697,9 +726,9 @@ case "$USE_LORA" in
         SIGNATURE_LORA_ALPHA="0"
         ;;
 esac
-RESULTS_MODEL_KEY="${MODEL_NAME}_${DISTILL_FAMILY}${TASK_RESULT_SUFFIX}_${MODEL_RUN_NAME}${RESULTS_TUNING_SUFFIX}"
+RESULTS_MODEL_KEY="${RESULTS_MODEL_KEY:-${MODEL_NAME}_${DISTILL_FAMILY}${TASK_RESULT_SUFFIX}_${MODEL_RUN_NAME}${RESULTS_TUNING_SUFFIX}}"
 RESULTS_BASE_MODEL_NAME="${DISTILL_FAMILY}${TASK_PATH_SUFFIX}/${MODEL_NAME}"
-RESULTS_FILE="$VERL_ROOT/results/${DISTILL_FAMILY}${TASK_PATH_SUFFIX}/${MODEL_NAME}${TASK_FILE_SUFFIX}.json"
+RESULTS_FILE="${RESULTS_FILE:-$VERL_ROOT/results/${DISTILL_FAMILY}${TASK_PATH_SUFFIX}/${MODEL_NAME}${TASK_FILE_SUFFIX}.json}"
 
 if [ -z "$OUTPUT_DIR" ]; then
     OUTPUT_BASE_DIR="$VERL_ROOT/outputs/${DISTILL_FAMILY}${TASK_PATH_SUFFIX}/${MODEL_NAME}/${MODEL_RUN_NAME}"
@@ -1450,6 +1479,70 @@ ensure_full_stage1_prompts() {
         return
     fi
 
+    if [ -n "$PRECOMPUTED_STAGE1_PROMPTS_PATH" ]; then
+        if [ ! -s "$PRECOMPUTED_STAGE1_PROMPTS_PATH" ]; then
+            echo "ERROR: repo-local Stage 1 prompt parquet is missing: $PRECOMPUTED_STAGE1_PROMPTS_PATH" >&2
+            exit 1
+        fi
+        echo "  [Stage 1 prompt cache] Loading prepared prompts: $PRECOMPUTED_STAGE1_PROMPTS_PATH"
+        python3 - \
+            "$PRECOMPUTED_STAGE1_PROMPTS_PATH" \
+            "$FULL_STAGE1_PROMPTS" \
+            "${MAX_SAMPLES:-}" \
+            "$TEACHER_TRAJECTORY_CONDITIONING" <<'PYPREPAREDSTAGE1'
+import os
+import sys
+
+import pandas as pd
+
+input_path, output_path, max_samples, conditioning = sys.argv[1:5]
+frame = pd.read_parquet(input_path)
+required = {"data_source", "prompt", "ability", "reward_model", "extra_info"}
+missing = required - set(frame.columns)
+if missing:
+    raise SystemExit(
+        f"prepared Stage 1 parquet is missing columns: {sorted(missing)}"
+    )
+if max_samples:
+    frame = frame.iloc[: int(max_samples)].copy()
+else:
+    frame = frame.copy()
+
+# A y* trajectory parquet may also contain its target responses. They are never
+# rollout inputs and must not be mistaken for teacher-generated y_t.
+if "responses" in frame.columns:
+    frame = frame.drop(columns=["responses"])
+
+if conditioning == "pi_T_x_only_v1":
+    for index, row in frame.iterrows():
+        prompt = row["prompt"]
+        if hasattr(prompt, "tolist"):
+            prompt = prompt.tolist()
+        messages = prompt if isinstance(prompt, list) else [prompt]
+        prompt_text = "\n".join(
+            str(message.get("content", "")) if isinstance(message, dict) else str(message)
+            for message in messages
+        )
+        extra = row["extra_info"]
+        expert = extra.get("expert_cot", "") if isinstance(extra, dict) else ""
+        if expert and str(expert) in prompt_text:
+            raise SystemExit(
+                f"x-only trajectory prompt at row {index} contains expert_cot"
+            )
+        if "Given the expert solution below" in prompt_text:
+            raise SystemExit(
+                f"x-only trajectory prompt at row {index} contains the expert-rewrite instruction"
+            )
+
+os.makedirs(os.path.dirname(output_path), exist_ok=True)
+temporary = output_path + ".tmp"
+frame.to_parquet(temporary, index=False)
+os.replace(temporary, output_path)
+print(f"Wrote {len(frame)} prepared Stage 1 prompts -> {output_path}")
+PYPREPAREDSTAGE1
+        return
+    fi
+
     echo "  [Stage 1 prompt cache] Preparing all prompts once: $FULL_STAGE1_PROMPTS"
     local args=(
         --input_path "$TRAIN_DATA_PATH"
@@ -1535,7 +1628,7 @@ teacher_trajectory_cache_path() {
     config_digest="$(
         printf '%s\n' \
             "trajectory_model_path=$TRAJECTORY_MODEL_PATH" \
-            "trajectory_conditioning=opsd_x_y_star_expert_rewrite_v1" \
+            "trajectory_conditioning=$TEACHER_TRAJECTORY_CONDITIONING" \
             "task=$TASK" \
             "temperature=0.6" \
             "top_p=0.95" \
@@ -1589,7 +1682,7 @@ write_teacher_trajectory_cache() {
     cat > "${cache_path%.parquet}.metadata.txt" <<EOF
 trajectory_model_path=$TRAJECTORY_MODEL_PATH
 trajectory_model_name=$TRAJECTORY_MODEL_NAME
-trajectory_conditioning=opsd_x_y_star_expert_rewrite_v1
+trajectory_conditioning=$TEACHER_TRAJECTORY_CONDITIONING
 task=$TASK
 temperature=0.6
 top_p=0.95
@@ -1636,13 +1729,20 @@ generate_stage1_y_o_responses() {
                 "${expert_slice_args[@]}"
             ;;
         teacher)
-            local teacher_rollout_prompts="${stage1_output%.parquet}_expert_rewrite_prompts.parquet"
-            echo "  [Stage 1] Preparing aligned pi(.|x,y*) expert-rewrite prompts..."
-            prepare_teacher_trajectory_prompt_slice \
-                "$stage1_prompts" \
-                "$teacher_rollout_prompts" \
-                "$batch_start" \
-                "$batch_size"
+            local teacher_rollout_prompts="$stage1_prompts"
+            local trajectory_distribution="pi_T(.|x)"
+            if [ "$TEACHER_TRAJECTORY_CONDITIONING" = "opsd_x_y_star_expert_rewrite_v1" ]; then
+                teacher_rollout_prompts="${stage1_output%.parquet}_expert_rewrite_prompts.parquet"
+                trajectory_distribution="pi_T(.|x,y*)"
+                echo "  [Stage 1] Preparing aligned pi_T(.|x,y*) expert-rewrite prompts..."
+                prepare_teacher_trajectory_prompt_slice \
+                    "$stage1_prompts" \
+                    "$teacher_rollout_prompts" \
+                    "$batch_start" \
+                    "$batch_size"
+            else
+                echo "  [Stage 1] Using original problem prompts for pi_T(.|x) rollout."
+            fi
 
             if [ "$TEACHER_TRAJECTORY_CACHE_MODE" != "off" ]; then
                 teacher_cache_path="$(teacher_trajectory_cache_path "$teacher_rollout_prompts")"
@@ -1654,7 +1754,7 @@ generate_stage1_y_o_responses() {
                 echo "  [Stage 1] No matching fixed-teacher y_t cache: $teacher_cache_path"
             fi
 
-            echo "  [Stage 1] Generating y_t ~ pi(.|x,y*) with fixed trajectory model: $TRAJECTORY_MODEL_PATH"
+            echo "  [Stage 1] Generating y_t ~ $trajectory_distribution with fixed trajectory model: $TRAJECTORY_MODEL_PATH"
             env -u PYTORCH_CUDA_ALLOC_CONF python3 -m verl.trainer.main_generation_server \
                 trainer.nnodes="${NNODES}" \
                 trainer.n_gpus_per_node="${NGPUS_PER_NODE}" \
@@ -2489,7 +2589,11 @@ print_base_configuration() {
     echo "  y_o Rollout:    $Y_O_ROLLOUT_MODE"
 if [ "$Y_O_ROLLOUT_MODE" = "teacher" ]; then
     echo "  Trajectory Model: $TRAJECTORY_MODEL_PATH"
-    echo "  Trajectory Prompt: pi(.|x,y*) expert rewrite ($TEACHER_TRAJECTORY_PROMPT_PATH)"
+    if [ "$TEACHER_TRAJECTORY_CONDITIONING" = "pi_T_x_only_v1" ]; then
+        echo "  Trajectory Prompt: pi_T(.|x), original problem prompt"
+    else
+        echo "  Trajectory Prompt: pi_T(.|x,y*) expert rewrite ($TEACHER_TRAJECTORY_PROMPT_PATH)"
+    fi
     echo "  Trajectory Cache: $TEACHER_TRAJECTORY_CACHE_MODE ($TEACHER_TRAJECTORY_CACHE_ROOT)"
 elif [ "$Y_O_ROLLOUT_MODE" = "expert" ]; then
     echo "  Trajectory Model: <dataset expert_cot / y*>"

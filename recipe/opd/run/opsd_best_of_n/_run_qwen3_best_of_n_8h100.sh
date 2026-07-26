@@ -11,23 +11,45 @@ export WANDB_MODE="${WANDB_MODE:-offline}"
 TASK="${TASK:?TASK must be math or code}"
 MODEL_PATH="${MODEL_PATH:?MODEL_PATH is required}"
 MODEL_ALIAS="${MODEL_ALIAS:?MODEL_ALIAS is required}"
-SAMPLING_BUDGET_SECONDS="${SAMPLING_BUDGET_SECONDS:?SAMPLING_BUDGET_SECONDS is required}"
+SAMPLING_BUDGET_MODE="${SAMPLING_BUDGET_MODE:-limited}"
+SAMPLING_BUDGET_SECONDS="${SAMPLING_BUDGET_SECONDS:-}"
 BEST_OF_N="${BEST_OF_N:-4}"
+RUN_NAMESPACE="${RUN_NAMESPACE:-opsd_best_of_n}"
+RUN_VARIANT_TAG="${RUN_VARIANT_TAG:-}"
 
 case "$TASK" in
     math|code) ;;
     *) echo "ERROR: TASK must be math or code, got: $TASK" >&2; exit 1 ;;
 esac
-case "$SAMPLING_BUDGET_SECONDS" in
-    *[!0-9]*|"") echo "ERROR: SAMPLING_BUDGET_SECONDS must be a positive integer" >&2; exit 1 ;;
+case "$SAMPLING_BUDGET_MODE" in
+    limited)
+        case "$SAMPLING_BUDGET_SECONDS" in
+            *[!0-9]*|"") echo "ERROR: limited sampling requires a positive SAMPLING_BUDGET_SECONDS" >&2; exit 1 ;;
+        esac
+        if [ "$SAMPLING_BUDGET_SECONDS" -le 0 ]; then
+            echo "ERROR: SAMPLING_BUDGET_SECONDS must be positive in limited mode" >&2
+            exit 1
+        fi
+        ;;
+    unlimited) ;;
+    *)
+        echo "ERROR: SAMPLING_BUDGET_MODE must be limited or unlimited, got: $SAMPLING_BUDGET_MODE" >&2
+        exit 1
+        ;;
 esac
 case "$BEST_OF_N" in
     *[!0-9]*|"") echo "ERROR: BEST_OF_N must be an integer greater than 1" >&2; exit 1 ;;
 esac
-if [ "$SAMPLING_BUDGET_SECONDS" -le 0 ] || [ "$BEST_OF_N" -le 1 ]; then
-    echo "ERROR: sampling budget must be positive and BEST_OF_N must be greater than 1" >&2
+if [ "$BEST_OF_N" -le 1 ]; then
+    echo "ERROR: BEST_OF_N must be greater than 1" >&2
     exit 1
 fi
+case "$RUN_NAMESPACE" in
+    *[!a-zA-Z0-9_.-]*|"") echo "ERROR: invalid RUN_NAMESPACE: $RUN_NAMESPACE" >&2; exit 1 ;;
+esac
+case "$RUN_VARIANT_TAG" in
+    *[!a-zA-Z0-9_.-]*) echo "ERROR: invalid RUN_VARIANT_TAG: $RUN_VARIANT_TAG" >&2; exit 1 ;;
+esac
 
 absolute_path() {
     case "$1" in
@@ -58,8 +80,12 @@ print_command() {
 
 MODEL_PATH="$(absolute_path "$MODEL_PATH")"
 TIMESTAMP="${TIMESTAMP:-$(date +%Y%m%d.%H%M%S)}"
-EXPERIMENT_NAME="${EXPERIMENT_NAME:-${MODEL_ALIAS}_${TASK}_opsd_best_of_${BEST_OF_N}_${TIMESTAMP}}"
-RUN_DATE="${RUN_DATE:-bon${BEST_OF_N}_${TIMESTAMP}}"
+RUN_VARIANT_SUFFIX=""
+if [ -n "$RUN_VARIANT_TAG" ]; then
+    RUN_VARIANT_SUFFIX="_${RUN_VARIANT_TAG}"
+fi
+EXPERIMENT_NAME="${EXPERIMENT_NAME:-${MODEL_ALIAS}_${TASK}_opsd_best_of_${BEST_OF_N}${RUN_VARIANT_SUFFIX}_${TIMESTAMP}}"
+RUN_DATE="${RUN_DATE:-bon${BEST_OF_N}${RUN_VARIANT_SUFFIX}_${TIMESTAMP}}"
 
 if [ "$TASK" = "math" ]; then
     TRAIN_FILE="$(absolute_path "${TRAIN_FILE:-data/train_dataset/deepscaler/train_grpo.parquet}")"
@@ -100,12 +126,13 @@ EVAL_GPU_MEMORY_UTILIZATION="${EVAL_GPU_MEMORY_UTILIZATION:-0.90}"
 MAX_SAMPLES="${MAX_SAMPLES:-}"
 GENERATION_MAX_CONCURRENCY="${GENERATION_MAX_CONCURRENCY:-128}"
 
-RUN_ROOT="$(absolute_path "${RUN_ROOT:-outputs/opsd_best_of_n/$EXPERIMENT_NAME}")"
-SAMPLING_DIR="$(absolute_path "${SAMPLING_DIR:-gen_results/opsd_best_of_n/$EXPERIMENT_NAME}")"
+RUN_ROOT="$(absolute_path "${RUN_ROOT:-outputs/$RUN_NAMESPACE/$EXPERIMENT_NAME}")"
+SAMPLING_DIR="$(absolute_path "${SAMPLING_DIR:-gen_results/$RUN_NAMESPACE/$EXPERIMENT_NAME}")"
 PROMPTS_FILE="${PROMPTS_FILE:-$SAMPLING_DIR/stage1_prompts.parquet}"
 CANDIDATES_FILE="${CANDIDATES_FILE:-$SAMPLING_DIR/stage1_best_of_${BEST_OF_N}_candidates.parquet}"
 SELECTED_TRAIN_FILE="${SELECTED_TRAIN_FILE:-$SAMPLING_DIR/train_best_of_${BEST_OF_N}_correct_only.parquet}"
-MODEL_SAVE_DIR="$(absolute_path "${MODEL_SAVE_DIR:-model/trained/opsd_best_of_n}")"
+MODEL_SAVE_DIR="$(absolute_path "${MODEL_SAVE_DIR:-model/trained/$RUN_NAMESPACE}")"
+GEN_RESULTS_ROOT="$(absolute_path "${GEN_RESULTS_ROOT:-gen_results}")"
 
 PREPARE_COMMAND=(
     python3 -m recipe.opd.run.opsd_best_of_n.prepare_best_of_n_prompts
@@ -149,29 +176,41 @@ SELECT_COMMAND=(
 
 MODEL_RUN_NAME="y_o_kl_forward_full_vocab_clip0_vanilla_ms1_${RUN_DATE}"
 EXPECTED_MODEL_PATH="$MODEL_SAVE_DIR/OPSD_${TASK^^}/$MODEL_ALIAS/$MODEL_RUN_NAME/epoch1/ms1/batch00001/hf_merged"
-RESULTS_FILE="$REPO_ROOT/results/OPSD/$TASK/${MODEL_ALIAS}_${TASK}.json"
-RESULTS_MODEL_KEY="${MODEL_ALIAS}_OPSD_${TASK^^}_${MODEL_RUN_NAME}_LORA_step00001of00001"
+RESULTS_FILE="$(absolute_path "${RESULTS_FILE:-results/OPSD/$TASK/${MODEL_ALIAS}_${TASK}.json}")"
+RESULTS_MODEL_KEY_BASE="${RESULTS_MODEL_KEY:-${MODEL_ALIAS}_OPSD_${TASK^^}_${MODEL_RUN_NAME}_LORA}"
+EXPECTED_RESULTS_MODEL_KEY="${RESULTS_MODEL_KEY_BASE}_step00001of00001"
 
 if [ "${OPSD_BEST_OF_N_DRY_RUN:-false}" = "true" ]; then
     echo "Task:                    $TASK"
     echo "Base model:              $MODEL_PATH"
     echo "Source train parquet:    $TRAIN_FILE"
     echo "Best-of-N:               $BEST_OF_N"
-    echo "Sampling-only budget:    ${SAMPLING_BUDGET_SECONDS}s"
+    if [ "$SAMPLING_BUDGET_MODE" = "limited" ]; then
+        echo "Sampling-only budget:    ${SAMPLING_BUDGET_SECONDS}s"
+    else
+        echo "Sampling-only budget:    none (generate the complete dataset)"
+    fi
+    echo "Run namespace:           $RUN_NAMESPACE"
+    echo "Run variant tag:         ${RUN_VARIANT_TAG:-<none>}"
     echo "Rollout memory:          $ROLLOUT_GPU_MEMORY_UTILIZATION"
     echo "Rollout tensor parallel: $GEN_TP"
     echo "Rollout max model len:   $ROLLOUT_MAX_MODEL_LEN"
     echo "Candidate parquet:       $CANDIDATES_FILE"
     echo "Selected train parquet:  $SELECTED_TRAIN_FILE"
     echo "Training output:         $RUN_ROOT"
+    echo "Training gen-results:    $GEN_RESULTS_ROOT"
     echo "Final merged model:      $EXPECTED_MODEL_PATH"
     echo "Eval results JSON:       $RESULTS_FILE"
-    echo "Results model key:       $RESULTS_MODEL_KEY"
+    echo "Results model key:       $EXPECTED_RESULTS_MODEL_KEY"
     echo "Eval datasets:           $EVAL_DATASETS"
     echo "Eval Avg/Pass K:         $PASS_K"
     echo "Periodic saves:          disabled; final save only"
     print_command "${PREPARE_COMMAND[@]}"
-    echo "Sampling command receives +data.generation_deadline_epoch_seconds=<start+$SAMPLING_BUDGET_SECONDS>:"
+    if [ "$SAMPLING_BUDGET_MODE" = "limited" ]; then
+        echo "Sampling command receives +data.generation_deadline_epoch_seconds=<start+$SAMPLING_BUDGET_SECONDS>:"
+    else
+        echo "Sampling command has no generation deadline:"
+    fi
     print_command "${SAMPLING_COMMAND_PREFIX[@]}"
     print_command "${SELECT_COMMAND[@]}"
     exit 0
@@ -188,13 +227,19 @@ else
 fi
 
 if [ ! -s "$CANDIDATES_FILE" ]; then
-    sampling_start_epoch="$(date +%s)"
-    sampling_deadline_epoch=$((sampling_start_epoch + SAMPLING_BUDGET_SECONDS))
-    echo "Starting Best-of-$BEST_OF_N sampling; deadline=$sampling_deadline_epoch budget=${SAMPLING_BUDGET_SECONDS}s"
     export GENERATION_MAX_CONCURRENCY
-    "${SAMPLING_COMMAND_PREFIX[@]}" \
-        +data.generation_deadline_epoch_seconds="$sampling_deadline_epoch" \
-        2>&1 | tee "$RUN_ROOT/sampling.log"
+    if [ "$SAMPLING_BUDGET_MODE" = "limited" ]; then
+        sampling_start_epoch="$(date +%s)"
+        sampling_deadline_epoch=$((sampling_start_epoch + SAMPLING_BUDGET_SECONDS))
+        echo "Starting Best-of-$BEST_OF_N sampling; deadline=$sampling_deadline_epoch budget=${SAMPLING_BUDGET_SECONDS}s"
+        "${SAMPLING_COMMAND_PREFIX[@]}" \
+            +data.generation_deadline_epoch_seconds="$sampling_deadline_epoch" \
+            2>&1 | tee "$RUN_ROOT/sampling.log"
+    else
+        echo "Starting complete Best-of-$BEST_OF_N sampling with no wall-clock deadline"
+        "${SAMPLING_COMMAND_PREFIX[@]}" \
+            2>&1 | tee "$RUN_ROOT/sampling.log"
+    fi
 else
     echo "Reusing completed candidate parquet: $CANDIDATES_FILE"
 fi
@@ -219,6 +264,8 @@ export BASE_PROMPT_LENGTH MAX_RESPONSE_LENGTH EXPERT_SOLUTION_PROMPT_LENGTH
 export NGPUS_PER_NODE NNODES EVAL_GEN_TP EVAL_MAX_NUM_SEQS EVAL_GPU_MEMORY_UTILIZATION
 export PASS_K EVAL_DATASETS EVAL_DATASETS_DIR
 export RUN_DATE
+export RESULTS_FILE GEN_RESULTS_ROOT
+export RESULTS_MODEL_KEY="$RESULTS_MODEL_KEY_BASE"
 export OUTPUT_DIR="$RUN_ROOT/training"
 export MODEL_SAVE_DIR
 export PIPELINE_ARCHIVE_MODEL_ROOT="$MODEL_SAVE_DIR/archive"

@@ -12,7 +12,7 @@
 #   MAX_RESPONSE_LENGTH     : default 16384
 #   TEMPERATURE             : default 1.0
 #   TOTAL_EPOCHS            : default 1
-#   MULTI_STEP              : default 40 offline on-policy updates
+#   MULTI_STEP              : default 1 (generate the full trajectory set, then train)
 #   TEACHER_TRAINING_PROMPT : "vanilla" (auto for y_o) | "refine"
 #
 # Inert / not applicable:
@@ -34,7 +34,7 @@ export TOP_K=0
 
 export TEMPERATURE="${TEMPERATURE:-1.0}"
 export TOTAL_EPOCHS="${TOTAL_EPOCHS:-1}"
-export MULTI_STEP="${MULTI_STEP:-40}"
+export MULTI_STEP="${MULTI_STEP:-1}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 exec "$(dirname "$SCRIPT_DIR")/run_kl_training.sh" "$@"
