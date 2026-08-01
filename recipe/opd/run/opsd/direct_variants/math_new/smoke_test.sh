@@ -32,8 +32,13 @@ for model_dir in qwen3-4b-instruct qwen3-8b; do
     done
 done
 
-if [ "${#wrappers[@]}" -ne 10 ]; then
-    echo "ERROR: expected 10 model/variant wrappers, found ${#wrappers[@]}" >&2
+if [ ! -x "$SCRIPT_DIR/qwen3-8b/skd.sh" ]; then
+    echo "ERROR: missing executable wrapper: qwen3-8b/skd.sh" >&2
+    exit 1
+fi
+
+if [ "${#wrappers[@]}" -ne 11 ]; then
+    echo "ERROR: expected 11 model/variant wrappers, found ${#wrappers[@]}" >&2
     printf '  %s\n' "${wrappers[@]}" >&2
     exit 1
 fi
@@ -77,6 +82,10 @@ PY
 for wrapper in "${wrappers[@]}"; do
     bash "$wrapper" --dry-run >/dev/null
 done
+
+skd_preflight="$(RUN_DATE=smoke bash "$SCRIPT_DIR/qwen3-8b/skd.sh" --dry-run)"
+[[ "$skd_preflight" == *"run name:                 y_o_skd_kl_forward_full_vocab_clip0_vanilla_ms1_smoke"* ]]
+[[ "$skd_preflight" == *"evaluation:               after_train=true, avg@16 / pass@16"* ]]
 
 poisoned_preflight="$(
     HF_HOME=/outside/huggingface \

@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export MODEL_PATH="${MODEL_PATH:-/data2/.huggingface/hub/models--Qwen--Qwen3-1.7B/snapshots/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e}"
+export MODEL_ALIAS="${MODEL_ALIAS:-Qwen3-1.7B}"
+exec "$SCRIPT_DIR/_run_qwen3_deepscaler_sft.sh" "$@"

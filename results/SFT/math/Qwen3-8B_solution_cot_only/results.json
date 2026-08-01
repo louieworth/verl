@@ -1,8 +1,0 @@
-{
-    "Qwen3-8B_DeepScaleR_Solution_CoT_Only_SFT_pass16": {
-        "model_path": "/data2/tmp/deepscaler_sft_runs/Qwen3-8B_solution_cot_only/final_model",
-        "aime24_pass16_generation_pass_16": 0.8666666666666667,
-        "aime25_pass16_generation_pass_16": 0.9,
-        "hmmt25_pass16_generation_pass_16": 0.7
-    }
-}

@@ -6,8 +6,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
 
 SFT_SCRIPTS=(
-    "$SCRIPT_DIR/qwen3_4b_instruct_deepscaler_sft_7gpu.sh"
-    "$SCRIPT_DIR/qwen3_8b_deepscaler_sft_7gpu.sh"
+    "$SCRIPT_DIR/qwen3_4b_instruct_deepscaler_sft.sh"
+    "$SCRIPT_DIR/qwen3_8b_deepscaler_sft.sh"
 )
 
 echo "DeepScaleR SFT sequence"

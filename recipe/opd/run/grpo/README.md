@@ -1,7 +1,8 @@
 # Portable Qwen3 GRPO Runs
 
 All asset preparation utilities are grouped under `prepare/`. The GRPO root
-contains only training entrypoints, rewards, and evaluation wrappers.
+contains only training entrypoints, rewards, evaluation wrappers, and a
+CPU-only launcher smoke test.
 
 All runtime assets use paths relative to the repository root:
 
@@ -24,6 +25,12 @@ Prepare everything after installing the Python environment:
 bash recipe/opd/run/grpo/prepare/ready_to_train.sh
 ```
 
+To prepare only the repo-local train and evaluation data used by these runs:
+
+```bash
+bash recipe/opd/run/grpo/prepare/prepare_data.sh
+```
+
 Individual preparation targets are also available:
 
 ```bash
@@ -33,16 +40,18 @@ bash recipe/opd/run/grpo/prepare/ready_to_train.sh eval-data
 bash recipe/opd/run/grpo/prepare/ready_to_train.sh verify
 ```
 
-Run one of the four 8xH100 jobs:
+Run one of the six 8xH100 jobs:
 
 ```bash
+bash recipe/opd/run/grpo/qwen3_1_7b_math_grpo_8h100.sh
+bash recipe/opd/run/grpo/qwen3_1_7b_code_grpo_8h100.sh
 bash recipe/opd/run/grpo/qwen3_4b_instruct_math_grpo_8h100.sh
 bash recipe/opd/run/grpo/qwen3_4b_instruct_code_grpo_8h100.sh
 bash recipe/opd/run/grpo/qwen3_8b_math_grpo_8h100.sh
 bash recipe/opd/run/grpo/qwen3_8b_code_grpo_8h100.sh
 ```
 
-Run all four GRPO jobs sequentially:
+Run the four existing 4B/8B GRPO jobs sequentially:
 
 ```bash
 bash recipe/opd/run/run_sequence_8h100.sh grpo
@@ -50,14 +59,24 @@ bash recipe/opd/run/run_sequence_8h100.sh grpo
 
 The combined rollout plus optimizer loop is wall-clock limited at complete
 optimizer-step boundaries. The timer starts immediately before the first
-rollout. Defaults are 5.5 hours for 4B math, 2.5 hours for 4B code, 9.5 hours
-for 8B math, and 4 hours for 8B code. A run finishes its current step after
-reaching the limit, saves one final checkpoint, and then starts evaluation.
-Model/data setup, the final checkpoint save, and evaluation are outside the
-budget. Override `MAX_TRAIN_DURATION_SECONDS` to use a different limit.
+rollout. The Qwen3-1.7B defaults are 4.5 hours for math and 2h15m06s for code.
+The existing defaults are 5.5 hours for 4B math, 2.5 hours for 4B code, 9.5
+hours for 8B math, and 4 hours for 8B code. A run finishes its current step
+after reaching the limit, saves one final checkpoint, and then starts
+evaluation. Model/data setup, the final checkpoint save, and evaluation are
+outside the budget. Override `MAX_TRAIN_DURATION_SECONDS` to use a different
+limit.
 
-Set `GRPO_DRY_RUN=true` to validate local model/data files and print the
-resolved training command without starting Ray or allocating GPUs.
+Set `GRPO_DRY_RUN=true` to validate model/data files and print the resolved
+training command without starting Ray or allocating GPUs. Set
+`GRPO_DRY_RUN=print` to resolve the command before assets have been prepared;
+this mode deliberately skips asset validation.
+
+Run the CPU-only structural test for the two Qwen3-1.7B launchers with:
+
+```bash
+bash recipe/opd/run/grpo/smoke_test.sh
+```
 
 The math evaluator keeps the reference settings: 4096 prompt tokens, 16384
 response tokens, temperature 0.6, top-p 0.95, and avg@16/pass@16. The code

@@ -8,6 +8,12 @@ cd "$REPO_ROOT"
 export PYTHONPATH=".:${PYTHONPATH:-}"
 export WANDB_MODE="${WANDB_MODE:-offline}"
 
+GRPO_DRY_RUN="${GRPO_DRY_RUN:-false}"
+case "$GRPO_DRY_RUN" in
+    false|true|print) ;;
+    *) echo "ERROR: GRPO_DRY_RUN must be false, true, or print" >&2; exit 2 ;;
+esac
+
 TASK="${TASK:?TASK must be math or code}"
 MODEL_PATH="${MODEL_PATH:?MODEL_PATH is required}"
 MODEL_ALIAS="${MODEL_ALIAS:?MODEL_ALIAS is required}"
@@ -136,9 +142,11 @@ fi
 export HF_HOME="${GRPO_HF_HOME:-$REPO_ROOT/data/eval_dataset/$TASK/huggingface_cache}"
 export HF_DATASETS_CACHE="${GRPO_HF_DATASETS_CACHE:-$HF_HOME/datasets}"
 
-require_model "$MODEL_PATH"
-require_file "$TRAIN_FILE" "GRPO training parquet"
-require_file "$TEST_FILE" "validation parquet"
+if [ "$GRPO_DRY_RUN" != "print" ]; then
+    require_model "$MODEL_PATH"
+    require_file "$TRAIN_FILE" "GRPO training parquet"
+    require_file "$TEST_FILE" "validation parquet"
+fi
 
 TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-64}"
 PPO_MINI_BATCH_SIZE="${PPO_MINI_BATCH_SIZE:-32}"
@@ -247,8 +255,13 @@ TRAIN_COMMAND=(
     "$@"
 )
 
-if [ "${GRPO_DRY_RUN:-false}" = "true" ]; then
+if [ "$GRPO_DRY_RUN" != "false" ]; then
     EVAL_RESULTS_KIND="${TASK}_avg${PASS_K}_pass${PASS_K}"
+    if [ "$GRPO_DRY_RUN" = "print" ]; then
+        echo "Asset validation:   skipped (GRPO_DRY_RUN=print)"
+    else
+        echo "Asset validation:   passed"
+    fi
     echo "Task:              $TASK"
     echo "Base model:        $MODEL_PATH"
     echo "Train parquet:     $TRAIN_FILE"
@@ -267,6 +280,7 @@ if [ "${GRPO_DRY_RUN:-false}" = "true" ]; then
     echo "Eval TP:           $EVAL_GEN_TP"
     echo "Eval datasets:     $EVAL_DATASETS"
     echo "Eval pass_k:       $PASS_K"
+    echo "Eval after train:  ${RUN_EVAL_AFTER_TRAINING:-true}"
     print_command "${TRAIN_COMMAND[@]}"
     exit 0
 fi

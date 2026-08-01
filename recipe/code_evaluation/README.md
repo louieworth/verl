@@ -2,27 +2,28 @@
 
 Evaluates OPD/OPSD code-task checkpoints on HumanEval+, MBPP+, and LiveCodeBench v6.
 
-Defaults follow the code-generation setup used for this extension: `PASS_K=4`, `temperature=1.0`, `top_p=1.0`, `max_prompt_length=2048`, and `max_response_length=8192`. The prompt limit covers the full current code evaluation set by tokenizer scan: HumanEval+ max 446, MBPP+ max 229, and LiveCodeBench v6 max 1938 tokens. Results are written to JSON plus CSV summaries with `Avg@4` and `Pass@4`.
+The table-baseline defaults are `PASS_K=16`, `temperature=0.6`, `top_p=0.95`, `max_prompt_length=2048`, and `max_response_length=16384`. Results are written to JSON plus CSV summaries with `Avg@16` and `Pass@16`.
 
 Dependencies, in the `verl` conda environment:
 
 ```bash
 conda run -n verl python -m pip install "evalplus[vllm]"
-git clone https://github.com/LiveCodeBench/LiveCodeBench.git /data/verl/external/LiveCodeBench
-conda run -n verl python -m pip install -e /data/verl/external/LiveCodeBench
 ```
 
-TACO training data is expected at:
+The repository-local EvalPlus files, LiveCodeBench runner, and all six release-v6 JSONL files are expected under:
 
 ```text
-/data/data/jiangli/huggingface/datasets/TACO
+data/eval_dataset/code/
+├── evalplus/
+├── LiveCodeBench/
+└── livecodebench/code_generation_lite/{test.jsonl,...,test6.jsonl}
 ```
 
 Run a trained model manually:
 
 ```bash
-cd /data/verl
-PYTHON_BIN="/data/conda/envs/verl/bin/python" TASK=code PASS_K=4 DATASETS="humaneval_plus mbpp_plus livecodebench_v6" bash recipe/code_evaluation/benchmark_code_model.sh /path/to/hf_merged
+cd /data2/verl
+PYTHON_BIN="/data2/conda/envs/verl/bin/python" PASS_K=16 DATASETS="humaneval_plus mbpp_plus livecodebench_v6" bash recipe/code_evaluation/benchmark_code_model.sh /path/to/hf_model
 ```
 
 Default outputs:
@@ -38,4 +39,26 @@ When invoked by `recipe/opd/run/run_kl_training.sh` with `TASK=code`, outputs ar
 results/<OPD_or_OPSD>/code/<student_model>_code.json
 results/<OPD_or_OPSD>/code/<student_model>_code.csv
 gen_results/eval/code/<result_model_key>/
+```
+
+For long EvalPlus runs, `run_evalplus_vllm.py` can generate disjoint numeric
+task-ID ranges without evaluating partial datasets:
+
+```bash
+python recipe/code_evaluation/run_evalplus_vllm.py \
+  --dataset mbpp --model /path/to/hf_model --root /path/to/shard-output \
+  --n_samples 16 --id_range 400 600 --skip_evaluation
+```
+
+After all ranges finish, merge them with strict coverage validation. The merge
+fails unless every benchmark task has exactly `--n_samples` sanitized and raw
+outputs:
+
+```bash
+python recipe/code_evaluation/merge_evalplus_shards.py \
+  --dataset mbpp --n_samples 16 \
+  --input /path/to/shard-a.jsonl --input /path/to/shard-b.jsonl \
+  --raw_input /path/to/shard-a.raw.jsonl \
+  --raw_input /path/to/shard-b.raw.jsonl \
+  --output /path/to/merged.jsonl --raw_output /path/to/merged.raw.jsonl
 ```

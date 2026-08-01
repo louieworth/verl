@@ -9,6 +9,10 @@ Qwen3-4B-Instruct-2507 and Qwen3-8B:
 - `reverse_kl.sh`: reverse KL on \(y_o\)
 - `reverse_kl_topk.sh`: reverse KL on \(y_o\), teacher top-k 32
 
+Qwen3-8B additionally provides `skd.sh`: SKD rollout followed by forward-KL
+training on \(y_o\). It uses gamma 5, teacher acceptance top-k 25, and all
+eight GPUs for the shared student/teacher vLLM engine by default.
+
 They are self-contained with respect to repository data. By default they read:
 
 - `data/train_dataset/deepscaler/train_grpo.parquet`
@@ -30,10 +34,12 @@ For example:
 ```bash
 bash recipe/opd/run/opsd/direct_variants/math_new/qwen3-4b-instruct/forward_kl.sh
 bash recipe/opd/run/opsd/direct_variants/math_new/qwen3-8b/forward_kl.sh
+bash recipe/opd/run/opsd/direct_variants/math_new/qwen3-8b/skd.sh
 ```
 
-Replace `forward_kl.sh` with any of the five filenames above. Environment
-variables can still override operational defaults such as `MAX_SAMPLES`,
+Replace `forward_kl.sh` with any of the five common variant filenames above;
+`skd.sh` is available for Qwen3-8B only. Environment variables can still
+override operational defaults such as `MAX_SAMPLES`,
 `RUN_EVAL_AFTER_TRAINING`, and `PIPELINE_RESUME_MODE`. Repo path overrides use
 the `MATH_NEW_*` namespace (for example, `MATH_NEW_MODEL_SAVE_DIR`), so stale
 machine-wide variables such as `HF_HOME` or `TRAIN_DATA_PATH` cannot silently

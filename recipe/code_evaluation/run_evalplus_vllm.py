@@ -3,8 +3,12 @@ from __future__ import annotations
 
 import argparse
 import gc
+import importlib
 import os
+import signal
 import sys
+import threading
+import time
 from pathlib import Path
 from typing import List
 
@@ -15,10 +19,80 @@ sys.path = [path for path in sys.path if Path(path or os.getcwd()).resolve() != 
 from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
 
-from evalplus.codegen import codegen
 from evalplus.evaluate import evaluate
 from evalplus.provider.base import DecoderBase
 from evalplus.provider.utility import extra_eos_for_direct_completion, make_raw_chat_prompt
+
+
+# EvalPlus's sanitizer recursively walks the generated AST. Pathological model
+# outputs can exceed Python's recursion limit and abort the entire resumable
+# generation job. Treat a sanitizer failure like any other invalid solution:
+# preserve the raw output, emit an empty sanitized solution, and keep going.
+_evalplus_codegen = importlib.import_module("evalplus.codegen")
+_evalplus_sanitize = _evalplus_codegen.sanitize
+_sanitize_timeout_seconds = float(os.environ.get("EVALPLUS_SANITIZE_TIMEOUT_SECONDS", "3"))
+_sanitize_max_chars = int(os.environ.get("EVALPLUS_SANITIZE_MAX_CHARS", "50000"))
+_sanitize_max_lines = int(os.environ.get("EVALPLUS_SANITIZE_MAX_LINES", "400"))
+
+
+def _raise_sanitize_timeout(_signum, _frame) -> None:
+    raise TimeoutError(
+        f"EvalPlus sanitizer exceeded {_sanitize_timeout_seconds:g} seconds"
+    )
+
+
+def _safe_sanitize(*args, **kwargs) -> str:
+    code = args[0] if args else kwargs.get("code", "")
+    if isinstance(code, str):
+        char_count = len(code)
+        line_count = code.count("\n") + 1
+        if char_count > _sanitize_max_chars or line_count > _sanitize_max_lines:
+            print(
+                "WARNING: EvalPlus sanitizer input exceeds the safety limit "
+                f"(chars={char_count}, lines={line_count}); recording this sample "
+                "as an empty solution.",
+                file=sys.stderr,
+            )
+            return ""
+    use_timeout = (
+        _sanitize_timeout_seconds > 0
+        and threading.current_thread() is threading.main_thread()
+        and hasattr(signal, "setitimer")
+    )
+    previous_handler = None
+    previous_timer = (0.0, 0.0)
+    started_at = time.monotonic()
+    try:
+        if use_timeout:
+            previous_handler = signal.getsignal(signal.SIGALRM)
+            signal.signal(signal.SIGALRM, _raise_sanitize_timeout)
+            previous_timer = signal.setitimer(
+                signal.ITIMER_REAL, _sanitize_timeout_seconds
+            )
+        return _evalplus_sanitize(*args, **kwargs)
+    except Exception as exc:
+        print(
+            f"WARNING: EvalPlus sanitizer failed ({type(exc).__name__}: {exc}); "
+            "recording this sample as an empty solution.",
+            file=sys.stderr,
+        )
+        return ""
+    finally:
+        if use_timeout:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, previous_handler)
+            previous_delay, previous_interval = previous_timer
+            if previous_delay > 0:
+                elapsed = time.monotonic() - started_at
+                signal.setitimer(
+                    signal.ITIMER_REAL,
+                    max(previous_delay - elapsed, 1e-6),
+                    previous_interval,
+                )
+
+
+_evalplus_codegen.sanitize = _safe_sanitize
+codegen = _evalplus_codegen.codegen
 
 
 class EvalPlusVllmDecoder(DecoderBase):
@@ -95,7 +169,22 @@ def main() -> None:
     parser.add_argument("--version", default="default")
     parser.add_argument("--parallel", type=int, default=None)
     parser.add_argument("--resume", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--id_range",
+        nargs=2,
+        type=int,
+        metavar=("LOW", "HIGH"),
+        help="Generate only task IDs in the half-open numeric range [LOW, HIGH).",
+    )
+    parser.add_argument(
+        "--skip_evaluation",
+        action="store_true",
+        help="Stop after generation so disjoint shards can be merged before evaluation.",
+    )
     args = parser.parse_args()
+
+    if args.id_range is not None and args.id_range[0] >= args.id_range[1]:
+        parser.error("--id_range requires LOW < HIGH")
 
     os.makedirs(args.root, exist_ok=True)
     batch_size = args.bs if args.bs is not None else min(args.n_samples, 32)
@@ -118,6 +207,8 @@ def main() -> None:
         force_base_prompt=args.force_base_prompt,
     )
     identifier = Path(args.model.strip("./").replace("/", "--")).name + f"_vllm_temp_{args.temperature}_top_p_{args.top_p}_max_tokens_{args.max_tokens}"
+    if args.id_range is not None:
+        identifier += f"_ids_{args.id_range[0]}_{args.id_range[1]}"
     target_path = os.path.join(args.root, args.dataset, identifier + ".jsonl")
     os.makedirs(os.path.dirname(target_path), exist_ok=True)
     codegen(
@@ -125,11 +216,14 @@ def main() -> None:
         model=model,
         dataset=args.dataset,
         n_samples=args.n_samples,
+        id_range=tuple(args.id_range) if args.id_range is not None else None,
         version=args.version,
         resume=args.resume,
     )
     del model
     gc.collect()
+    if args.skip_evaluation:
+        return
     evaluate(
         dataset=args.dataset,
         samples=target_path,

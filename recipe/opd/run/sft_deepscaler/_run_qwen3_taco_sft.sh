@@ -18,11 +18,11 @@ else
 fi
 PYTHON_BIN="${PYTHON_BIN:-$DEFAULT_PYTHON_BIN}"
 
-SOURCE_SFT_DATA="${SOURCE_SFT_DATA:-/data2/data/jiangli/data/DeepScaleR-Preview-Dataset}"
-SFT_DATA_TAG="${SFT_DATA_TAG:-solution_cot_only}"
-TRAIN_FILE="${TRAIN_FILE:-$REPO_ROOT/data/train_dataset/deepscaler/train_sft_${SFT_DATA_TAG}.parquet}"
+SOURCE_SFT_DATA="${SOURCE_SFT_DATA:-/data2/data/jiangli/huggingface/datasets/TACO}"
+SFT_DATA_TAG="${SFT_DATA_TAG:-taco_solution_only_max8192}"
+TRAIN_FILE="${TRAIN_FILE:-$REPO_ROOT/data/train_dataset/taco/train_sft_${SFT_DATA_TAG}.parquet}"
 LEARNING_RATE="${LEARNING_RATE:-1e-7}"
-RUN_ROOT="${RUN_ROOT:-/data2/tmp/deepscaler_sft_runs/${MODEL_ALIAS}_${SFT_DATA_TAG}_lr${LEARNING_RATE}}"
+RUN_ROOT="${RUN_ROOT:-/data2/tmp/taco_sft_runs/${MODEL_ALIAS}_${SFT_DATA_TAG}_lr${LEARNING_RATE}}"
 CHECKPOINT_DIR="${CHECKPOINT_DIR:-$RUN_ROOT/checkpoints}"
 FINAL_MODEL_LINK="${FINAL_MODEL_LINK:-$RUN_ROOT/final_model}"
 LOG_DIR="${LOG_DIR:-$RUN_ROOT/logs}"
@@ -49,12 +49,12 @@ GPU_LOCK_DIR="${GPU_LOCK_DIR:-/data2/tmp/sft_gpu_locks}"
 GPU_PREFLIGHT_MAX_USED_MIB="${GPU_PREFLIGHT_MAX_USED_MIB:-1024}"
 
 RUN_EVAL_AFTER_TRAINING="${RUN_EVAL_AFTER_TRAINING:-true}"
-EVAL_DATASETS="${EVAL_DATASETS:-aime24 aime25 hmmt25 beyondaime amobench}"
-EVAL_DATASETS_DIR="${EVAL_DATASETS_DIR:-$REPO_ROOT/data/eval_dataset/math}"
-EVAL_RESULTS_DIR="${EVAL_RESULTS_DIR:-results/SFT/math/${MODEL_ALIAS}_${SFT_DATA_TAG}_lr${LEARNING_RATE}}"
+EVAL_DATASETS="${EVAL_DATASETS:-humaneval_plus mbpp_plus livecodebench_v6}"
+EVAL_RESULTS_DIR="${EVAL_RESULTS_DIR:-results/SFT/code/${MODEL_ALIAS}_${SFT_DATA_TAG}_lr${LEARNING_RATE}}"
 EVAL_RESULTS_FILE="${EVAL_RESULTS_FILE:-$EVAL_RESULTS_DIR/results.json}"
 EVAL_OUTPUT_DIR="${EVAL_OUTPUT_DIR:-$EVAL_RESULTS_DIR/generations}"
-EVAL_MODEL_NAME="${EVAL_MODEL_NAME:-${MODEL_ALIAS}_DeepScaleR_Solution_CoT_Only_SFT_lr${LEARNING_RATE}_pass16}"
+EVAL_MODEL_NAME="${EVAL_MODEL_NAME:-${MODEL_ALIAS}_TACO_Solution_Only_SFT_lr${LEARNING_RATE}_pass16}"
+CODE_EVAL_GEN_TP="${CODE_EVAL_GEN_TP:-1}"
 
 require_file() {
     if [ ! -s "$1" ]; then
@@ -107,6 +107,14 @@ validate_gpu_config() {
         echo "ERROR: TRAIN_BATCH_SIZE=$TRAIN_BATCH_SIZE must be divisible by NUM_GPUS=$NUM_GPUS" >&2
         exit 1
     fi
+    if ! [[ "$CODE_EVAL_GEN_TP" =~ ^[1-9][0-9]*$ ]]; then
+        echo "ERROR: CODE_EVAL_GEN_TP must be a positive integer, got: $CODE_EVAL_GEN_TP" >&2
+        exit 1
+    fi
+    if [ "$CODE_EVAL_GEN_TP" -gt "$NUM_GPUS" ] || [ $((NUM_GPUS % CODE_EVAL_GEN_TP)) -ne 0 ]; then
+        echo "ERROR: CODE_EVAL_GEN_TP=$CODE_EVAL_GEN_TP must divide NUM_GPUS=$NUM_GPUS" >&2
+        exit 1
+    fi
     local gpu_id
     for gpu_id in "${VISIBLE_GPU_IDS[@]}"; do
         if ! [[ "$gpu_id" =~ ^[0-9]+$ ]]; then
@@ -123,7 +131,7 @@ acquire_gpu_locks() {
     for gpu_id in "${VISIBLE_GPU_IDS[@]}"; do
         exec {lock_fd}>"$GPU_LOCK_DIR/gpu_${gpu_id}.lock"
         if ! flock -n "$lock_fd"; then
-            echo "ERROR: GPU $gpu_id is reserved by another SFT pipeline." >&2
+            echo "ERROR: GPU $gpu_id is reserved by another TACO SFT pipeline." >&2
             exit 1
         fi
         GPU_LOCK_FDS+=("$lock_fd")
@@ -156,7 +164,7 @@ check_selected_gpus_are_free() {
 }
 
 require_model "$MODEL_PATH"
-require_source "$SOURCE_SFT_DATA" "raw DeepScaleR dataset"
+require_source "$SOURCE_SFT_DATA" "local TACO dataset"
 validate_gpu_config
 
 if [ "${SFT_DRY_RUN:-false}" = "true" ]; then
@@ -167,7 +175,6 @@ if [ "${SFT_DRY_RUN:-false}" = "true" ]; then
     echo "Checkpoint dir:     $CHECKPOINT_DIR"
     echo "Visible GPUs:       $CUDA_VISIBLE_DEVICES"
     echo "Number of GPUs:     $NUM_GPUS"
-    echo "GPU lock dir:       $GPU_LOCK_DIR"
     echo "Global batch:       $TRAIN_BATCH_SIZE"
     echo "Max length:         $MAX_LENGTH"
     echo "Max tokens/GPU:     $MAX_TOKEN_LEN_PER_GPU"
@@ -175,6 +182,7 @@ if [ "${SFT_DRY_RUN:-false}" = "true" ]; then
     echo "Epochs:             $TOTAL_EPOCHS"
     echo "Eval datasets:      $EVAL_DATASETS"
     echo "Eval pass@k:        16"
+    echo "Eval tensor parallel:$CODE_EVAL_GEN_TP"
     echo "Eval results:       $EVAL_RESULTS_FILE"
     echo "Eval generations:   $EVAL_OUTPUT_DIR"
     exit 0
@@ -185,17 +193,19 @@ acquire_gpu_locks
 check_selected_gpus_are_free
 
 if [ ! -s "$TRAIN_FILE" ]; then
-    "$PYTHON_BIN" -m recipe.opd.run.sft_deepscaler.prepare_deepscaler_sft \
+    "$PYTHON_BIN" -m recipe.opd.run.sft_deepscaler.prepare_taco_sft \
         --input "$SOURCE_SFT_DATA" \
-        --output "$TRAIN_FILE"
+        --output "$TRAIN_FILE" \
+        --model-path "$MODEL_PATH" \
+        --max-length "$MAX_LENGTH"
 else
-    echo "Reusing prepared raw-solution CoT-only SFT parquet: $TRAIN_FILE"
+    echo "Reusing prepared length-safe TACO SFT parquet: $TRAIN_FILE"
 fi
 
 if [ -L "$FINAL_MODEL_LINK" ] && [ -s "$FINAL_MODEL_LINK/config.json" ]; then
-    echo "Reusing completed SFT model: $FINAL_MODEL_LINK"
+    echo "Reusing completed TACO SFT model: $FINAL_MODEL_LINK"
 else
-    echo "Starting DeepScaleR CoT SFT for $MODEL_ALIAS"
+    echo "Starting TACO solution-only SFT for $MODEL_ALIAS"
     "$PYTHON_BIN" -m torch.distributed.run \
         --standalone \
         --nnodes=1 \
@@ -235,7 +245,7 @@ else
         trainer.total_epochs="$TOTAL_EPOCHS" \
         trainer.total_training_steps="$TOTAL_TRAINING_STEPS" \
         trainer.logger="['console']" \
-        trainer.project_name=deepscaler-cot-sft \
+        trainer.project_name=taco-solution-sft \
         trainer.experiment_name="$MODEL_ALIAS" \
         trainer.default_local_dir="$CHECKPOINT_DIR" \
         trainer.resume_mode="$RESUME_MODE" \
@@ -248,17 +258,15 @@ else
 
     final_hf_model="$(find_final_hf_model)"
     ln -sfn "$final_hf_model" "$FINAL_MODEL_LINK"
-    echo "Final SFT model: $FINAL_MODEL_LINK -> $final_hf_model"
+    echo "Final TACO SFT model: $FINAL_MODEL_LINK -> $final_hf_model"
 fi
 
 if [ "$RUN_EVAL_AFTER_TRAINING" = "true" ]; then
     mkdir -p "$(dirname "$EVAL_RESULTS_FILE")" "$EVAL_OUTPUT_DIR"
-    echo "Starting pass@16 / Avg@16 evaluation for $MODEL_ALIAS"
+    echo "Starting code Avg@16 / Pass@16 evaluation for $MODEL_ALIAS"
     PYTHON_BIN="$PYTHON_BIN" \
     NGPUS_PER_NODE="$NUM_GPUS" \
-    NNODES=1 \
-    GEN_TP=1 \
-    EVAL_DATASETS_DIR="$EVAL_DATASETS_DIR" \
+    GEN_TP="$CODE_EVAL_GEN_TP" \
     DATASETS="$EVAL_DATASETS" \
     PASS_K=16 \
     EVAL_BASE_MODEL_NAME="$MODEL_ALIAS" \
@@ -266,12 +274,9 @@ if [ "$RUN_EVAL_AFTER_TRAINING" = "true" ]; then
     EVAL_OUTPUT_DIR="$EVAL_OUTPUT_DIR" \
     EVAL_RESULTS_FILE="$EVAL_RESULTS_FILE" \
     EVAL_RESULTS_CSV_FILE="${EVAL_RESULTS_FILE%.json}.csv" \
-    EVAL_MAX_NUM_SEQS="${EVAL_MAX_NUM_SEQS:-64}" \
-    EVAL_GPU_MEMORY_UTILIZATION="${EVAL_GPU_MEMORY_UTILIZATION:-0.90}" \
-    WRITE_PASS16_AGGREGATES=true \
     WRITE_RESULTS_CSV=true \
-        bash "$REPO_ROOT/recipe/math_evaluation/benchmark_kl_model.sh" "$FINAL_MODEL_LINK" \
+        bash "$REPO_ROOT/recipe/code_evaluation/benchmark_code_model.sh" "$FINAL_MODEL_LINK" \
         2>&1 | tee "$LOG_DIR/eval_pass16.log"
 fi
 
-echo "DeepScaleR CoT SFT pipeline complete: $MODEL_ALIAS"
+echo "TACO solution-only SFT pipeline complete: $MODEL_ALIAS"

@@ -25,6 +25,7 @@ done
 
 DATASETS_TO_TEST=${DATASETS:-"humaneval_plus mbpp_plus livecodebench_v6"}
 PASS_K=${PASS_K:-16}
+export PASS_K
 TEMPERATURE=${CODE_EVAL_TEMPERATURE:-0.6}
 TOP_P=${CODE_EVAL_TOP_P:-0.95}
 MAX_PROMPT_TOKENS=${CODE_EVAL_MAX_PROMPT_TOKENS:-2048}
@@ -43,16 +44,43 @@ if [ "$GEN_TP" -gt "$NGPUS_PER_NODE" ] || [ $((NGPUS_PER_NODE % GEN_TP)) -ne 0 ]
     echo "ERROR: GEN_TP=$GEN_TP must divide NGPUS_PER_NODE=$NGPUS_PER_NODE" >&2
     exit 1
 fi
-LCB_REPO=${LCB_REPO:-$VERL_ROOT/external/LiveCodeBench}
+CODE_EVAL_DATA_ROOT=${CODE_EVAL_DATA_ROOT:-$VERL_ROOT/data/eval_dataset/code}
+LCB_REPO=${LCB_REPO:-$CODE_EVAL_DATA_ROOT/LiveCodeBench}
+LCB_CODEGEN_LITE_DIR=${LCB_CODEGEN_LITE_DIR:-$CODE_EVAL_DATA_ROOT/livecodebench/code_generation_lite}
+HUMANEVAL_OVERRIDE_PATH=${HUMANEVAL_OVERRIDE_PATH:-$CODE_EVAL_DATA_ROOT/evalplus/HumanEvalPlus-v0.1.10.jsonl}
+MBPP_OVERRIDE_PATH=${MBPP_OVERRIDE_PATH:-$CODE_EVAL_DATA_ROOT/evalplus/MbppPlus-v0.2.0.jsonl}
+export HUMANEVAL_OVERRIDE_PATH MBPP_OVERRIDE_PATH LCB_CODEGEN_LITE_DIR
 RESULTS_BASE_DIR=${RESULTS_BASE_DIR:-results}
 GEN_OUTPUT_BASE_DIR=${GEN_OUTPUT_BASE_DIR:-gen_results/code_eval}
 WRITE_RESULTS_CSV=${WRITE_RESULTS_CSV:-true}
+case " $DATASETS_TO_TEST " in
+    *" humaneval_plus "*|*" humaneval+ "*)
+        [ -s "$HUMANEVAL_OVERRIDE_PATH" ] || {
+            echo "ERROR: local HumanEval+ dataset not found: $HUMANEVAL_OVERRIDE_PATH" >&2
+            exit 1
+        }
+        ;;
+esac
+case " $DATASETS_TO_TEST " in
+    *" mbpp_plus "*|*" mbpp+ "*)
+        [ -s "$MBPP_OVERRIDE_PATH" ] || {
+            echo "ERROR: local MBPP+ dataset not found: $MBPP_OVERRIDE_PATH" >&2
+            exit 1
+        }
+        ;;
+esac
 case " $DATASETS_TO_TEST " in
     *" livecodebench"*|*" lcb_"*)
         if [ ! -d "$LCB_REPO/lcb_runner" ]; then
             echo "ERROR: LiveCodeBench repo not found at $LCB_REPO" >&2
             exit 1
         fi
+        for lcb_file in test.jsonl test2.jsonl test3.jsonl test4.jsonl test5.jsonl test6.jsonl; do
+            if [ ! -s "$LCB_CODEGEN_LITE_DIR/$lcb_file" ]; then
+                echo "ERROR: LiveCodeBench v6 dataset file not found: $LCB_CODEGEN_LITE_DIR/$lcb_file" >&2
+                exit 1
+            fi
+        done
         ;;
 esac
 
@@ -122,17 +150,43 @@ evalplus_dataset() {
 
 lcb_dataset() {
     local model_path="$1" model_name="$2" results_file="$3" out_dir="$4"
-    require_module lcb_runner || { echo "ERROR: lcb_runner is not installed. Install LiveCodeBench from https://github.com/LiveCodeBench/LiveCodeBench" >&2; exit 1; }
     local lcb_repo="$LCB_REPO"
+    if ! (cd "$lcb_repo" && require_module lcb_runner); then
+        echo "ERROR: lcb_runner is not importable from $lcb_repo" >&2
+        exit 1
+    fi
     local lcb_model_key="${LCB_MODEL_KEY:-Qwen/Qwen3-235B-A22B}"
     local enforce_eager_arg=""
     if [ "$CODE_EVAL_LCB_ENFORCE_EAGER" = "true" ]; then
         enforce_eager_arg="--enforce_eager"
     fi
     mkdir -p "$out_dir/livecodebench"
-    touch "$out_dir/livecodebench/.run_start"
+    local metrics avg pass
+    local lcb_extract_args=(--root "$out_dir/livecodebench" --pass_k "$PASS_K")
+    if [ "${LCB_AGGREGATE_ALL:-false}" = "true" ]; then
+        lcb_extract_args+=(--aggregate_all)
+        if [ -n "${LCB_EXPECTED_TASKS:-}" ]; then
+            lcb_extract_args+=(--expected_tasks "$LCB_EXPECTED_TASKS")
+        fi
+    fi
+    if metrics=$("$PYTHON_BIN" "$SCRIPT_DIR/extract_lcb_metrics.py" "${lcb_extract_args[@]}" 2>/dev/null); then
+        echo "Existing LiveCodeBench v6 eval results found under $out_dir/livecodebench; skipping generation/evaluation."
+        avg=$(echo "$metrics" | awk -F= '/^avg=/{print $2}')
+        pass=$(echo "$metrics" | awk -F= '/^pass=/{print $2}')
+        update_result "$results_file" "$model_name" "$model_path" "livecodebench_v6" "$avg" "$pass"
+        return
+    fi
+    local runtime_dir="$out_dir/livecodebench/runtime"
+    mkdir -p "$runtime_dir"
+    # LiveCodeBench loads its few-shot prompt fixtures through paths relative to
+    # the current working directory.  Keep outputs isolated in runtime_dir while
+    # making those repository-relative paths available there.
+    if [ ! -e "$runtime_dir/lcb_runner" ]; then
+        ln -s "$lcb_repo/lcb_runner" "$runtime_dir/lcb_runner"
+    fi
     (
-        cd "$lcb_repo"
+        cd "$runtime_dir"
+        export PYTHONPATH="$lcb_repo:${PYTHONPATH:-}"
         "$PYTHON_BIN" -m lcb_runner.runner.main \
             --model "$lcb_model_key" \
             --local_model_path "$model_path" \
@@ -147,14 +201,13 @@ lcb_dataset() {
             --max_model_len "$MAX_MODEL_LEN" \
             --max_num_seqs "$CODE_EVAL_MAX_NUM_SEQS" \
             --tensor_parallel_size "$GEN_TP" \
+            --continue_existing \
+            --use_cache \
+            --cache_batch_size "${LCB_CACHE_BATCH_SIZE:-32}" \
             $enforce_eager_arg \
             ${LCB_EXTRA_ARGS:-}
     )
-    find "$lcb_repo/output" -type f \
-        \( -name '*_eval.json' -o -name '*_eval_all.json' -o -name 'codegeneration_*.json' \) \
-        -newer "$out_dir/livecodebench/.run_start" -exec cp --parents {} "$out_dir/livecodebench" \; 2>/dev/null || true
-    local metrics avg pass
-    metrics=$("$PYTHON_BIN" "$SCRIPT_DIR/extract_lcb_metrics.py" --root "$out_dir/livecodebench" --pass_k "$PASS_K")
+    metrics=$("$PYTHON_BIN" "$SCRIPT_DIR/extract_lcb_metrics.py" "${lcb_extract_args[@]}")
     avg=$(echo "$metrics" | awk -F= '/^avg=/{print $2}')
     pass=$(echo "$metrics" | awk -F= '/^pass=/{print $2}')
     update_result "$results_file" "$model_name" "$model_path" "livecodebench_v6" "$avg" "$pass"
@@ -177,7 +230,9 @@ for MODEL_PATH in "${MODEL_PATHS[@]}"; do
     echo "# Results:    $RESULTS_FILE"
     echo "# Sampling:   pass_k=$PASS_K temperature=$TEMPERATURE top_p=$TOP_P max_prompt_tokens=$MAX_PROMPT_TOKENS max_response_tokens=$MAX_TOKENS max_model_len=$MAX_MODEL_LEN max_num_seqs=$CODE_EVAL_MAX_NUM_SEQS lcb_enforce_eager=$CODE_EVAL_LCB_ENFORCE_EAGER"
     echo "# GPU layout: NGPUS_PER_NODE=$NGPUS_PER_NODE GEN_TP=$GEN_TP (one vLLM instance)"
+    echo "# EvalPlus:   humaneval=$HUMANEVAL_OVERRIDE_PATH mbpp=$MBPP_OVERRIDE_PATH"
     echo "# LCB repo:   $LCB_REPO"
+    echo "# LCB v6 data:$LCB_CODEGEN_LITE_DIR"
     echo "################################################################################"
 
     if [ "$DRY_RUN" = "true" ]; then

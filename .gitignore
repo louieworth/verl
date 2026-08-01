@@ -141,3 +141,10 @@ outputs
 LMOps
 gen_results
 agentica-org
+
+.codex/
+models/
+.vscode/
+.agent/
+results/
+outputs/

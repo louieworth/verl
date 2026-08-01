@@ -59,6 +59,14 @@ case "$DIRECT_VARIANT" in
         export KL_TOKEN_CLIP="0"
         export TOP_K="${TOP_K:-32}"
         ;;
+    skd)
+        export KL_TYPE="forward"
+        export KL_METHOD="full_vocab"
+        export Y_MODE="y_o"
+        export TEACHER_TRAINING_PROMPT="${TEACHER_TRAINING_PROMPT:-vanilla}"
+        export KL_TOKEN_CLIP="0"
+        export TOP_K="0"
+        ;;
     *)
         echo "ERROR: unsupported DIRECT_VARIANT=$DIRECT_VARIANT" >&2
         exit 2
@@ -71,6 +79,23 @@ export DISTILL_MODE="opsd"
 export STUDENT_MODEL="${STUDENT_MODEL:-$MODEL_NAME}"
 export TEACHER_MODEL_PATH=""
 unset TEACHER_MODEL
+
+if [ "$DIRECT_VARIANT" = "skd" ]; then
+    export Y_O_ROLLOUT_MODE="skd_vllm"
+    export SKD_GAMMA="${SKD_GAMMA:-5}"
+    export SKD_ACCEPT_TOP_K="${SKD_ACCEPT_TOP_K:-25}"
+    export SKD_ACCEPT_TOP_P="${SKD_ACCEPT_TOP_P:-1.0}"
+    export SKD_SHARED_GPUS="${SKD_SHARED_GPUS:-0,1,2,3,4,5,6,7}"
+    export SKD_STUDENT_GPUS="${SKD_STUDENT_GPUS:-$SKD_SHARED_GPUS}"
+    export SKD_TEACHER_GPUS="${SKD_TEACHER_GPUS:-$SKD_SHARED_GPUS}"
+    export SKD_ROLLOUT_BATCH_SIZE="${SKD_ROLLOUT_BATCH_SIZE:-64}"
+    export SKD_VLLM_MAX_NUM_SEQS="${SKD_VLLM_MAX_NUM_SEQS:-$SKD_ROLLOUT_BATCH_SIZE}"
+    export SKD_PIPELINE_LANES="${SKD_PIPELINE_LANES:-2}"
+    export STEP1_STAGE1_RESPONSE_REUSE_PATH="${STEP1_STAGE1_RESPONSE_REUSE_PATH:-${SKD_STAGE1_RESPONSE_REUSE_PATH:-auto}}"
+    export PIPELINE_CLEANUP_BATCH_DATA="${PIPELINE_CLEANUP_BATCH_DATA:-false}"
+else
+    export Y_O_ROLLOUT_MODE="student"
+fi
 
 # Repo-local prepared data. MULTI_STEP=1 is the one-update equivalent of the
 # historical one-step pipeline, while allowing the already-prepared parquet to
@@ -177,9 +202,16 @@ if [ "${1:-}" = "--dry-run" ]; then
 fi
 
 if [ "$dry_run" = "true" ]; then
+    clip_tag="clip${KL_TOKEN_CLIP//./}"
+    topk_tag=""
+    [ "$TOP_K" -le 0 ] || topk_tag="_topk${TOP_K}"
+    rollout_tag=""
+    [ "$Y_O_ROLLOUT_MODE" != "skd_vllm" ] || rollout_tag="_skd"
+    run_name="${Y_MODE}${rollout_tag}_kl_${KL_TYPE}_${KL_METHOD}_${clip_tag}${topk_tag}_${TEACHER_TRAINING_PROMPT}_ms${MULTI_STEP}_${RUN_DATE}"
     cat <<EOF
 math_new direct variant preflight: OK
   variant:                  $DIRECT_VARIANT
+  run name:                 $run_name
   model:                    $MODEL_NAME ($MODEL_PATH)
   train parquet:            $TRAIN_DATA_PATH
   prepared prompt parquet:  $PRECOMPUTED_STAGE1_PROMPTS_PATH
@@ -190,7 +222,9 @@ math_new direct variant preflight: OK
   batch / grad accum:       $TRAIN_BATCH_SIZE / $GRADIENT_ACCUMULATION_STEPS
   lengths:                  prompt=$MAX_PROMPT_LENGTH response=$MAX_RESPONSE_LENGTH total=$MAX_LENGTH
   policy updates:           $MULTI_STEP
+  y_o rollout:              $Y_O_ROLLOUT_MODE
   GPUs / generation TP:     $NGPUS_PER_NODE / $GEN_TP
+  evaluation:               after_train=$RUN_EVAL_AFTER_TRAINING, avg@${PASS_K} / pass@${PASS_K}
   model root:               $MODEL_SAVE_DIR
   gen root:                 $GEN_RESULTS_ROOT
   output:                   $OUTPUT_DIR
