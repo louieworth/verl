@@ -139,8 +139,11 @@ else
         reward.custom_reward_function.name=compute_score
     )
 fi
-export HF_HOME="${GRPO_HF_HOME:-$REPO_ROOT/data/eval_dataset/$TASK/huggingface_cache}"
+export HF_HOME="${GRPO_HF_HOME:-data/eval_dataset/$TASK/huggingface_cache}"
 export HF_DATASETS_CACHE="${GRPO_HF_DATASETS_CACHE:-$HF_HOME/datasets}"
+export HF_HUB_CACHE="${GRPO_HF_HUB_CACHE:-$HF_HOME/hub}"
+export HUGGINGFACE_HUB_CACHE="$HF_HUB_CACHE"
+unset TRANSFORMERS_CACHE
 
 if [ "$GRPO_DRY_RUN" != "print" ]; then
     require_model "$MODEL_PATH"

@@ -202,8 +202,13 @@ def main() -> None:
     write_atomic(frame, args.output)
 
     first_prompt = _as_messages(frame.iloc[0]["prompt"])[0]["content"] if len(frame) else ""
+    expected_expert_marker = (
+        "Here is a reference Python solution:"
+        if args.task == "code"
+        else "**Expert Solution:**"
+    )
     if len(frame) and (
-        "**Expert Solution:**" not in first_prompt
+        expected_expert_marker not in first_prompt
         or "**Your Initial Solution:**" in first_prompt
     ):
         raise ValueError("Prepared prompt is not the expected pi(. | x, y*) expert rewrite prompt")

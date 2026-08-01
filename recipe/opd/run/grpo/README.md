@@ -10,7 +10,7 @@ All runtime assets use paths relative to the repository root:
 data/
   train_dataset/
     deepscaler/{raw,train_grpo.parquet}
-    taco/{raw,train_grpo.parquet}
+    taco/{raw,train_grpo.parquet,train_grpo_expert_cot.parquet}
   eval_dataset/
     math/{aime24,aime25,hmmt25,beyondaime,amobench}
     code/{evalplus,livecodebench,LiveCodeBench}
@@ -97,6 +97,11 @@ The prepared math parquet in this workspace comes from the local
 DeepScaleR-Cleaned dataset (40,245 rows). If it is absent, the ready script
 downloads the public `agentica-org/DeepScaleR-Preview-Dataset`; override
 `MATH_TRAIN_REPO` when an exact cleaned mirror is available.
+
+TACO preparation writes two code-training views. `train_grpo.parquet` keeps
+all runnable TACO rows for GRPO and OPD. `train_grpo_expert_cot.parquet` keeps
+only rows with a non-empty `extra_info.expert_cot`; OPSD/SKD uses this strict
+view whenever its teacher prompt conditions on dataset CoT `y*`.
 
 DeepScaleR train parquet and the small math/EvalPlus evaluation datasets stay
 in Git. TACO train parquet, LiveCodeBench JSONL, base models, and checkpoints

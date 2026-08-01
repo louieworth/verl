@@ -3,6 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VERL_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+cd "$VERL_ROOT"
 PYTHON_BIN=${PYTHON_BIN:-python3}
 
 DRY_RUN=false
@@ -44,7 +45,7 @@ if [ "$GEN_TP" -gt "$NGPUS_PER_NODE" ] || [ $((NGPUS_PER_NODE % GEN_TP)) -ne 0 ]
     echo "ERROR: GEN_TP=$GEN_TP must divide NGPUS_PER_NODE=$NGPUS_PER_NODE" >&2
     exit 1
 fi
-CODE_EVAL_DATA_ROOT=${CODE_EVAL_DATA_ROOT:-$VERL_ROOT/data/eval_dataset/code}
+CODE_EVAL_DATA_ROOT=${CODE_EVAL_DATA_ROOT:-data/eval_dataset/code}
 LCB_REPO=${LCB_REPO:-$CODE_EVAL_DATA_ROOT/LiveCodeBench}
 LCB_CODEGEN_LITE_DIR=${LCB_CODEGEN_LITE_DIR:-$CODE_EVAL_DATA_ROOT/livecodebench/code_generation_lite}
 HUMANEVAL_OVERRIDE_PATH=${HUMANEVAL_OVERRIDE_PATH:-$CODE_EVAL_DATA_ROOT/evalplus/HumanEvalPlus-v0.1.10.jsonl}

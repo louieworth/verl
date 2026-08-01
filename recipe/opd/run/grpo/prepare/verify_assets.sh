@@ -48,6 +48,7 @@ check_models() {
 check_train_data() {
     check_file data/train_dataset/deepscaler/train_grpo.parquet
     check_file data/train_dataset/taco/train_grpo.parquet
+    check_file data/train_dataset/taco/train_grpo_expert_cot.parquet
     if [ "$failed" -eq 0 ]; then
         python3 - <<'PY'
 import pyarrow.parquet as pq
@@ -56,6 +57,7 @@ required = {"data_source", "prompt", "ability", "reward_model", "extra_info"}
 for path in (
     "data/train_dataset/deepscaler/train_grpo.parquet",
     "data/train_dataset/taco/train_grpo.parquet",
+    "data/train_dataset/taco/train_grpo_expert_cot.parquet",
 ):
     parquet = pq.ParquetFile(path)
     missing = required - set(parquet.schema_arrow.names)
@@ -67,6 +69,13 @@ for path in (
     if not isinstance(reward_model, dict) or "ground_truth" not in reward_model:
         raise SystemExit(f"{path}: reward_model.ground_truth is missing")
     print(f"SCHEMA  {path}: {parquet.metadata.num_rows} rows")
+
+expert_path = "data/train_dataset/taco/train_grpo_expert_cot.parquet"
+for index, row in enumerate(pq.read_table(expert_path, columns=["extra_info"]).to_pylist()):
+    expert_cot = str((row["extra_info"] or {}).get("expert_cot") or "").strip()
+    if not expert_cot:
+        raise SystemExit(f"{expert_path}: empty extra_info.expert_cot at row {index}")
+print(f"EXPERT  {expert_path}: every row has non-empty extra_info.expert_cot")
 PY
     fi
 }

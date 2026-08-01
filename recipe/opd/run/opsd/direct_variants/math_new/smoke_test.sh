@@ -87,30 +87,31 @@ skd_preflight="$(RUN_DATE=smoke bash "$SCRIPT_DIR/qwen3-8b/skd.sh" --dry-run)"
 [[ "$skd_preflight" == *"run name:                 y_o_skd_kl_forward_full_vocab_clip0_vanilla_ms1_smoke"* ]]
 [[ "$skd_preflight" == *"evaluation:               after_train=true, avg@16 / pass@16"* ]]
 
+stale_root="../outside"
 poisoned_preflight="$(
-    HF_HOME=/outside/huggingface \
-    TRAIN_DATA_PATH=/outside/train.parquet \
-    PRECOMPUTED_STAGE1_PROMPTS_PATH=/outside/prompts.parquet \
-    EVAL_DATASETS_DIR=/outside/eval \
-    MODEL_SAVE_DIR=/outside/model \
-    PIPELINE_ARCHIVE_MODEL_ROOT=/outside/archive \
-    PIPELINE_TEMP_MODEL_DIR=/outside/tmp \
-    GEN_RESULTS_ROOT=/outside/gen \
-    OUTPUT_DIR=/outside/output \
-    RESULTS_FILE=/outside/results.json \
-    DATA_PATH=/outside/data.parquet \
-    EVAL_OUTPUT_DIR=/outside/eval-output \
-    EVAL_RESULTS_FILE=/outside/eval-results.json \
-    TOKENIZER_PATH=/outside/tokenizer \
+    HF_HOME="$stale_root/huggingface" \
+    TRAIN_DATA_PATH="$stale_root/train.parquet" \
+    PRECOMPUTED_STAGE1_PROMPTS_PATH="$stale_root/prompts.parquet" \
+    EVAL_DATASETS_DIR="$stale_root/eval" \
+    MODEL_SAVE_DIR="$stale_root/model" \
+    PIPELINE_ARCHIVE_MODEL_ROOT="$stale_root/archive" \
+    PIPELINE_TEMP_MODEL_DIR="$stale_root/tmp" \
+    GEN_RESULTS_ROOT="$stale_root/gen" \
+    OUTPUT_DIR="$stale_root/output" \
+    RESULTS_FILE="$stale_root/results.json" \
+    DATA_PATH="$stale_root/data.parquet" \
+    EVAL_OUTPUT_DIR="$stale_root/eval-output" \
+    EVAL_RESULTS_FILE="$stale_root/eval-results.json" \
+    TOKENIZER_PATH="$stale_root/tokenizer" \
     bash "$SCRIPT_DIR/qwen3-8b/forward_kl.sh" --dry-run
 )"
-if [[ "$poisoned_preflight" == *"/outside/"* ]]; then
+if [[ "$poisoned_preflight" == *"$stale_root/"* ]]; then
     echo "ERROR: a stale machine-wide path leaked into the resolved config" >&2
     printf '%s\n' "$poisoned_preflight" >&2
     exit 1
 fi
 
-if rg -n '/data2/|/data/data/|/opt/dlami/|/home/|DeepScaleR-Cleaned' "$SCRIPT_DIR" \
+if rg -n '/(data2?|home|opt)/|DeepScaleR-Cleaned' "$SCRIPT_DIR" \
     --glob '*.sh' \
     --glob '!smoke_test.sh' \
     --glob '*.md'; then

@@ -12,8 +12,11 @@ export LCB_REPO="${LCB_REPO:-$CODE_EVAL_ROOT/LiveCodeBench}"
 export LCB_CODEGEN_LITE_DIR="${LCB_CODEGEN_LITE_DIR:-$CODE_EVAL_ROOT/livecodebench/code_generation_lite}"
 export HF_HOME="${GRPO_CODE_EVAL_HF_HOME:-$CODE_EVAL_ROOT/huggingface_cache}"
 export HF_DATASETS_CACHE="${GRPO_CODE_EVAL_HF_DATASETS_CACHE:-$HF_HOME/datasets}"
+export HF_HUB_CACHE="${GRPO_CODE_EVAL_HF_HUB_CACHE:-$HF_HOME/hub}"
+export HUGGINGFACE_HUB_CACHE="$HF_HUB_CACHE"
+unset TRANSFORMERS_CACHE
 export PYTHONPATH="$LCB_REPO:.:${PYTHONPATH:-}"
-mkdir -p "$HF_HOME" "$HF_DATASETS_CACHE"
+mkdir -p "$HF_HOME" "$HF_DATASETS_CACHE" "$HF_HUB_CACHE"
 
 for dataset_file in "$HUMANEVAL_OVERRIDE_PATH" "$MBPP_OVERRIDE_PATH"; do
     if [ ! -s "$dataset_file" ]; then

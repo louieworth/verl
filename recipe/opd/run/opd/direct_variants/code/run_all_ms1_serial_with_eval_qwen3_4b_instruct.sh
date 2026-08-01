@@ -5,7 +5,7 @@ set -o pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VERL_ROOT="$(cd "$SCRIPT_DIR/../../../../../.." && pwd)"
 cd "$VERL_ROOT"
-export PYTHONPATH="$VERL_ROOT:${PYTHONPATH:-}"
+export PYTHONPATH=".:${PYTHONPATH:-}"
 export TASK="code"
 
 # Qwen3-4B-Instruct-2507 student variant. Teacher remains Qwen3-8B unless overridden.
@@ -16,9 +16,9 @@ export TEACHER_MODEL_PATH="${TEACHER_MODEL_PATH:-Qwen/Qwen3-8B}"
 export TEACHER_MODEL="${TEACHER_MODEL:-Qwen3-8B}"
 
 export PIPELINE_RESUME_MODE="${PIPELINE_RESUME_MODE:-resume_matching}"
-export STEP1_STAGE1_RESPONSE_REUSE_PATH="${STEP1_STAGE1_RESPONSE_REUSE_PATH:-/data/verl/gen_results/gen_code_ms1_uid-672f94e0aa76b0e78a4c525d/epoch1/ms1/batch00001/code_stage1_responses.parquet}"
+export STEP1_STAGE1_RESPONSE_REUSE_PATH="${STEP1_STAGE1_RESPONSE_REUSE_PATH:-auto}"
 
-RUNNER_LOG_DIR="${RUNNER_LOG_DIR:-$VERL_ROOT/outputs/OPD/code/direct_variants_ms1_serial_logs_qwen3_4b_instruct}"
+RUNNER_LOG_DIR="${RUNNER_LOG_DIR:-outputs/OPD/code/direct_variants_ms1_serial_logs_qwen3_4b_instruct}"
 mkdir -p "$RUNNER_LOG_DIR"
 RUNNER_LOG="$RUNNER_LOG_DIR/run_all_ms1_serial_with_eval_qwen3_4b_instruct_$(date +%Y%m%d_%H%M%S).log"
 

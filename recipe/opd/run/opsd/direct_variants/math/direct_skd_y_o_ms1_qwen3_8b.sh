@@ -5,7 +5,7 @@ set -o pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VERL_ROOT="$(cd "$SCRIPT_DIR/../../../../../.." && pwd)"
 cd "$VERL_ROOT"
-export PYTHONPATH="$VERL_ROOT:${PYTHONPATH:-}"
+export PYTHONPATH=".:${PYTHONPATH:-}"
 export TASK="math"
 
 export MODEL_PATH="${MODEL_PATH:-Qwen/Qwen3-8B}"

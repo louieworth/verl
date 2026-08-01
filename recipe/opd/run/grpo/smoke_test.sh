@@ -34,7 +34,7 @@ for launcher in "${launchers[@]}"; do
     [[ "$output" == *"avg16_pass16.json"* ]]
 done
 
-if rg -n '/data2/|/data/data/|/opt/dlami/|/home/' "${launchers[@]}"; then
+if rg -n '/(data2?|home|opt)/' "${launchers[@]}"; then
     echo "ERROR: a Qwen3-1.7B launcher contains a machine-specific path" >&2
     exit 1
 fi

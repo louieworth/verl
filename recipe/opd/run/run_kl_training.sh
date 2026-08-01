@@ -159,7 +159,7 @@ PIPELINE_KEEP_STEPS=${PIPELINE_KEEP_STEPS:-""}      # Optional comma list, e.g. 
 PIPELINE_KEEP_INTERVAL=${PIPELINE_KEEP_INTERVAL:-"0"}  # 0 = final only; >0 keeps every N updates.
 PIPELINE_LOCAL_KEEP_POLICY=${PIPELINE_LOCAL_KEEP_POLICY:-"last_hf_only"}  # last_hf_only | all_kept
 PIPELINE_ARCHIVE_PRUNED_MODE=${PIPELINE_ARCHIVE_PRUNED_MODE:-"delete"}  # delete | move
-PIPELINE_ARCHIVE_MODEL_ROOT=${PIPELINE_ARCHIVE_MODEL_ROOT:-"/opt/dlami/nvme/jiangli"}
+PIPELINE_ARCHIVE_MODEL_ROOT=${PIPELINE_ARCHIVE_MODEL_ROOT:-"model/archive"}
 PIPELINE_ARCHIVE_MODEL_DIR=${PIPELINE_ARCHIVE_MODEL_DIR:-""}  # resolved after DISTILL_TASK_FAMILY/MODEL_NAME are known
 PIPELINE_ARCHIVE_KEEP_MODE=${PIPELINE_ARCHIVE_KEEP_MODE:-"off"}  # copy | off; fixed checkpoints for eval, not resume
 PIPELINE_CLEANUP_BATCH_DATA=${PIPELINE_CLEANUP_BATCH_DATA:-"true"}
@@ -218,7 +218,7 @@ OFFLOAD_POLICY=${OFFLOAD_POLICY:-"false"}
 
 # Output Settings
 OUTPUT_DIR=${OUTPUT_DIR:-""}  # Base output dir; epoch subdirs are appended
-MODEL_SAVE_DIR=${MODEL_SAVE_DIR:-"/data/data/jiangli/models"}  # Base model save dir; epoch subdirs are appended
+MODEL_SAVE_DIR=${MODEL_SAVE_DIR:-"model/trained"}  # Base model save dir; epoch subdirs are appended
 WANDB_PROJECT=${WANDB_PROJECT:-"verl-kl-training"}
 WANDB_RUN_NAME=${WANDB_RUN_NAME:-""}  # Base wandb run name; _epochN is appended
 export WANDB_MODE="${WANDB_MODE:-offline}"
@@ -257,12 +257,11 @@ RUN_EVAL_AFTER_TRAINING=${RUN_EVAL_AFTER_TRAINING:-"true"}
 # EVAL_DATASETS=${EVAL_DATASETS:-"aime24,aime25,math500,hmmt25"} DEFAULT_DATASETS="math500 hmmt25 beyondaime amobench gsm8k"
 if [ "$TASK" = "code" ]; then
     EVAL_DATASETS=${EVAL_DATASETS:-"humaneval_plus,mbpp_plus,livecodebench_v6"}
-    PASS_K=${PASS_K:-4}
+    PASS_K=${PASS_K:-16}
 else
     EVAL_DATASETS=${EVAL_DATASETS:-"aime24,aime25,hmmt25,beyondaime,amobench"}
     PASS_K=${PASS_K:-16}
 fi
-EVAL_DATASETS_DIR=${EVAL_DATASETS_DIR:-"/data/data/jiangli/huggingface/datasets"}
 
 # Notification Settings
 NTFY_ENABLED=${NTFY_ENABLED:-"true"}
@@ -279,15 +278,33 @@ NTFY_JOB_START_TS=$(date +%s)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RECIPE_DIR="$(dirname "$SCRIPT_DIR")"                           # recipe/opd
 VERL_ROOT="$(dirname "$(dirname "$RECIPE_DIR")")"               # repo root
-PIPELINE_DIR="$RECIPE_DIR/generation"                           # recipe/opd/generation
+cd "$VERL_ROOT"
+SCRIPT_DIR="recipe/opd/run"
+RECIPE_DIR="recipe/opd"
+PIPELINE_DIR="recipe/opd/generation"
+export HF_HOME="${OPD_HF_HOME:-data/download_cache/huggingface}"
+export HF_DATASETS_CACHE="${OPD_HF_DATASETS_CACHE:-$HF_HOME/datasets}"
+export HF_HUB_CACHE="${OPD_HF_HUB_CACHE:-$HF_HOME/hub}"
+export HUGGINGFACE_HUB_CACHE="$HF_HUB_CACHE"
+unset TRANSFORMERS_CACHE
+
+if [ "$TASK" = "code" ]; then
+    EVAL_DATASETS_DIR=${EVAL_DATASETS_DIR:-"data/eval_dataset/code"}
+else
+    EVAL_DATASETS_DIR=${EVAL_DATASETS_DIR:-"data/eval_dataset/math"}
+fi
 
 # Training data path (for prompts)
 if [ "$TASK" = "code" ]; then
-    TRAIN_DATA_PATH=${TRAIN_DATA_PATH:-"/data/data/jiangli/huggingface/datasets/TACO"}
+    if [ "$DISTILL_MODE" = "opsd" ]; then
+        TRAIN_DATA_PATH=${TRAIN_DATA_PATH:-"data/train_dataset/taco/train_grpo_expert_cot.parquet"}
+    else
+        TRAIN_DATA_PATH=${TRAIN_DATA_PATH:-"data/train_dataset/taco/train_grpo.parquet"}
+    fi
     TRAIN_DATA_SOURCE=${TRAIN_DATA_SOURCE:-"BAAI/TACO"}
     SCORE_STAGE1=${SCORE_STAGE1:-"auto"}
 else
-    TRAIN_DATA_PATH=${TRAIN_DATA_PATH:-"/data/data/jiangli/data/DeepScaleR-Cleaned"}
+    TRAIN_DATA_PATH=${TRAIN_DATA_PATH:-"data/train_dataset/deepscaler/train_grpo.parquet"}
     TRAIN_DATA_SOURCE=${TRAIN_DATA_SOURCE:-"deepscaleR"}
     SCORE_STAGE1=${SCORE_STAGE1:-"auto"}
 fi
@@ -408,7 +425,7 @@ TRAJECTORY_MODEL_PATH=${TRAJECTORY_MODEL_PATH:-""}
 TEACHER_TRAJECTORY_PROMPT_PATH=${TEACHER_TRAJECTORY_PROMPT_PATH:-""}
 TEACHER_TRAJECTORY_CONDITIONING=${TEACHER_TRAJECTORY_CONDITIONING:-""}
 TEACHER_TRAJECTORY_CACHE_MODE=${TEACHER_TRAJECTORY_CACHE_MODE:-"read_write"}
-TEACHER_TRAJECTORY_CACHE_ROOT=${TEACHER_TRAJECTORY_CACHE_ROOT:-"$VERL_ROOT/gen_results/fixed_teacher_trajectory_cache"}
+TEACHER_TRAJECTORY_CACHE_ROOT=${TEACHER_TRAJECTORY_CACHE_ROOT:-"gen_results/fixed_teacher_trajectory_cache"}
 if [ -n "${TRAJECTORY_MODEL:-}" ]; then
     TRAJECTORY_MODEL_NAME="$TRAJECTORY_MODEL"
 elif [ -n "$TRAJECTORY_MODEL_PATH" ]; then
@@ -730,15 +747,15 @@ case "$USE_LORA" in
 esac
 RESULTS_MODEL_KEY="${RESULTS_MODEL_KEY:-${MODEL_NAME}_${DISTILL_FAMILY}${TASK_RESULT_SUFFIX}_${MODEL_RUN_NAME}${RESULTS_TUNING_SUFFIX}}"
 RESULTS_BASE_MODEL_NAME="${DISTILL_FAMILY}${TASK_PATH_SUFFIX}/${MODEL_NAME}"
-RESULTS_FILE="${RESULTS_FILE:-$VERL_ROOT/results/${DISTILL_FAMILY}${TASK_PATH_SUFFIX}/${MODEL_NAME}${TASK_FILE_SUFFIX}.json}"
+RESULTS_FILE="${RESULTS_FILE:-results/${DISTILL_FAMILY}${TASK_PATH_SUFFIX}/${MODEL_NAME}${TASK_FILE_SUFFIX}.json}"
 
 if [ -z "$OUTPUT_DIR" ]; then
-    OUTPUT_BASE_DIR="$VERL_ROOT/outputs/${DISTILL_FAMILY}${TASK_PATH_SUFFIX}/${MODEL_NAME}/${MODEL_RUN_NAME}"
+    OUTPUT_BASE_DIR="outputs/${DISTILL_FAMILY}${TASK_PATH_SUFFIX}/${MODEL_NAME}/${MODEL_RUN_NAME}"
 else
     OUTPUT_BASE_DIR="$OUTPUT_DIR"
 fi
 
-MODEL_SAVE_ROOT="${MODEL_SAVE_DIR:-/data/data/jiangli/models}"
+MODEL_SAVE_ROOT="${MODEL_SAVE_DIR:-model/trained}"
 MODEL_SAVE_BASE_DIR="$MODEL_SAVE_ROOT/${DISTILL_TASK_FAMILY}/${MODEL_NAME}/${MODEL_RUN_NAME}"
 if [ -z "$PIPELINE_ARCHIVE_MODEL_DIR" ]; then
     PIPELINE_ARCHIVE_MODEL_DIR="$PIPELINE_ARCHIVE_MODEL_ROOT/${DISTILL_TASK_FAMILY}/${MODEL_NAME}"
@@ -751,7 +768,7 @@ RESIDENT_YO_MANIFEST_USER_VALUE="$RESIDENT_YO_MANIFEST"
 # the signature below, not by RUN_DATE. In resume_matching mode we scan existing
 # gen_results metadata for the same signature, switch back to that run's
 # model_save_base_dir/gen_results_base_dir, and continue from its checkpoints.
-GEN_RESULTS_ROOT="${GEN_RESULTS_ROOT:-$VERL_ROOT/gen_results}"
+GEN_RESULTS_ROOT="${GEN_RESULTS_ROOT:-gen_results}"
 GEN_RESULTS_STUDENT_TAG="$(sanitize_path_component "$MODEL_NAME")"
 GEN_RESULTS_TEACHER_TAG="$(sanitize_path_component "$TEACHER_MODEL_NAME")"
 GEN_RESULTS_MAX_SAMPLES_TAG="${MAX_SAMPLES:-all}"
@@ -883,6 +900,31 @@ EOF
 }
 
 compute_gen_results_signature
+
+case "${KL_CONFIG_DRY_RUN:-false}" in
+    true)
+        echo "KL configuration dry run"
+        echo "  task:                $TASK"
+        echo "  distill mode:        $DISTILL_MODE"
+        echo "  y mode:              $Y_MODE"
+        echo "  rollout mode:        $Y_O_ROLLOUT_MODE"
+        echo "  train data:          $TRAIN_DATA_PATH"
+        echo "  train samples:       ${TOTAL_TRAIN_SAMPLES:-unknown}"
+        echo "  eval root:           $EVAL_DATASETS_DIR"
+        echo "  hf cache:            $HF_HOME"
+        echo "  eval datasets:       $EVAL_DATASETS"
+        echo "  eval pass_k:         $PASS_K"
+        echo "  student model:       $MODEL_PATH"
+        echo "  teacher model:       ${TEACHER_MODEL_PATH:-$MODEL_PATH}"
+        echo "  run name:            $MODEL_RUN_NAME"
+        echo "  output dir:          $OUTPUT_BASE_DIR"
+        echo "  model dir:           $MODEL_SAVE_BASE_DIR"
+        echo "  results key:         $RESULTS_MODEL_KEY"
+        exit 0
+        ;;
+    false) ;;
+    *) echo "ERROR: KL_CONFIG_DRY_RUN must be true or false" >&2; exit 1 ;;
+esac
 
 GEN_RESULTS_RUN_ID_FILE_USER_VALUE="${GEN_RESULTS_RUN_ID_FILE:-}"
 GEN_RESULTS_RUN_SIGNATURE_FILE_USER_VALUE="${GEN_RESULTS_RUN_SIGNATURE_FILE:-}"
@@ -1786,7 +1828,7 @@ generate_stage1_y_o_responses() {
             echo "  [Stage 1] Generating SKD y_o responses with vLLM..."
             echo "    student_gpus=$SKD_STUDENT_GPUS teacher_gpus=$SKD_TEACHER_GPUS shared_gpus=$SKD_SHARED_GPUS"
             echo "    skd_top_k=$SKD_ACCEPT_TOP_K skd_top_p=$SKD_ACCEPT_TOP_P gamma=$SKD_GAMMA parallel_student_teacher=$SKD_PARALLEL_STUDENT_TEACHER"
-            PYTHONPATH="$VERL_ROOT/local_vllm_patch:${PYTHONPATH:-}" env -u PYTORCH_CUDA_ALLOC_CONF python3 -m recipe.opd.generation.skd_vllm_y_o_generate \
+            PYTHONPATH="local_vllm_patch:${PYTHONPATH:-}" env -u PYTORCH_CUDA_ALLOC_CONF python3 -m recipe.opd.generation.skd_vllm_y_o_generate \
                 --input "$stage1_prompts" \
                 --output "$stage1_output" \
                 --prompt_key prompt \
@@ -1818,7 +1860,7 @@ generate_stage1_y_o_responses() {
             echo "  [Stage 1] Generating SKD y_o responses with vLLM internal sampler..."
             echo "    shared_gpus=$SKD_SHARED_GPUS teacher_tp=${SKD_TEACHER_TP:-auto} student_tp=${SKD_STUDENT_TP:-auto}"
             echo "    skd_top_k=$SKD_ACCEPT_TOP_K skd_top_p=$SKD_ACCEPT_TOP_P gamma=$SKD_GAMMA"
-            PYTHONPATH="$VERL_ROOT/local_vllm_patch:${PYTHONPATH:-}" env -u PYTORCH_CUDA_ALLOC_CONF python3 -m recipe.opd.generation.skd_vllm_internal_y_o_generate \
+            PYTHONPATH="local_vllm_patch:${PYTHONPATH:-}" env -u PYTORCH_CUDA_ALLOC_CONF python3 -m recipe.opd.generation.skd_vllm_internal_y_o_generate \
                 --input "$stage1_prompts" \
                 --output "$stage1_output" \
                 --prompt_key prompt \
@@ -2040,17 +2082,22 @@ reuse_ms1_responses_if_available() {
 
 train_dataset_num_rows() {
     python3 - "$TRAIN_DATA_PATH" "${MAX_SAMPLES:-}" <<'PYDATASETLEN'
+import os
 import sys
 import datasets
 
 path, max_samples = sys.argv[1], sys.argv[2]
-try:
-    ds_loaded = datasets.load_from_disk(path)
-    ds_raw = ds_loaded["train"] if isinstance(ds_loaded, datasets.DatasetDict) else ds_loaded
-except (ValueError, FileNotFoundError):
-    ds_raw = datasets.load_dataset(path, split="train")
+if os.path.isfile(path) and path.lower().endswith(".parquet"):
+    import pyarrow.parquet as pq
 
-n = len(ds_raw)
+    n = pq.ParquetFile(path).metadata.num_rows
+else:
+    try:
+        ds_loaded = datasets.load_from_disk(path)
+        ds_raw = ds_loaded["train"] if isinstance(ds_loaded, datasets.DatasetDict) else ds_loaded
+    except (ValueError, FileNotFoundError):
+        ds_raw = datasets.load_dataset(path, split="train")
+    n = len(ds_raw)
 if max_samples:
     n = min(n, int(max_samples))
 print(n)
@@ -2509,7 +2556,7 @@ resolve_update_model_path() {
     echo "       Required previous step: $prev_update" >&2
     echo "       Step marker: $marker" >&2
     echo "       Recorded model_path: ${marker_model_path:-missing}" >&2
-    echo "       Resume state must be fixed in /data/verl/gen_results/gen_uid-...; no local batch-path fallback is used." >&2
+    echo "       Resume state must be fixed under gen_results/gen_uid-...; no local batch-path fallback is used." >&2
     exit 1
 }
 
@@ -3364,7 +3411,7 @@ run_post_training_eval_if_needed() {
     if [ "$MULTI_STEP" -gt 0 ] && [ -n "$update_index" ] && [ -n "$total_updates" ]; then
         _eval_model_name="${_eval_model_name}_step$(format_pipeline_batch_id "$update_index")of$(format_pipeline_batch_id "$total_updates")"
     fi
-    local _eval_output_dir="$VERL_ROOT/gen_results/eval/${TASK}/${_eval_model_name}"
+    local _eval_output_dir="gen_results/eval/${TASK}/${_eval_model_name}"
 
     if eval_results_complete "$_eval_model_name" "$_eval_output_dir"; then
         echo "Evaluation already complete, skipping eval"
@@ -3423,10 +3470,10 @@ run_post_training_eval_if_needed() {
         return 0
     fi
 
-    local EVAL_RECIPE_DIR="$VERL_ROOT/recipe/math_evaluation"
+    local EVAL_RECIPE_DIR="recipe/math_evaluation"
     local EVAL_BENCHMARK_SCRIPT="benchmark_kl_model.sh"
     if [ "$TASK" = "code" ]; then
-        EVAL_RECIPE_DIR="$VERL_ROOT/recipe/code_evaluation"
+        EVAL_RECIPE_DIR="recipe/code_evaluation"
         EVAL_BENCHMARK_SCRIPT="benchmark_code_model.sh"
     fi
 
@@ -3869,9 +3916,9 @@ if [ "$SAVE_MERGED_MODEL" = "true" ]; then
         echo "Final Alias: $(pipeline_final_alias_dir)/hf_merged"
     fi
     if [ "$TASK" = "code" ]; then
-        echo "Benchmark: TASK=code bash $VERL_ROOT/recipe/code_evaluation/benchmark_code_model.sh $FINAL_MODEL_SAVE_DIR/hf_merged"
+        echo "Benchmark: TASK=code bash recipe/code_evaluation/benchmark_code_model.sh $FINAL_MODEL_SAVE_DIR/hf_merged"
     else
-        echo "Benchmark: bash $VERL_ROOT/recipe/math_evaluation/benchmark_kl_model.sh $FINAL_MODEL_SAVE_DIR/hf_merged"
+        echo "Benchmark: bash recipe/math_evaluation/benchmark_kl_model.sh $FINAL_MODEL_SAVE_DIR/hf_merged"
     fi
 else
     echo "FSDP Checkpoints: $FINAL_MODEL_SAVE_DIR/global_step_*"

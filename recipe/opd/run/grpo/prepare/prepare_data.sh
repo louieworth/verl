@@ -15,8 +15,21 @@ case "$TARGET" in
 esac
 
 export PYTHONPATH=".:${PYTHONPATH:-}"
-export HF_HOME="${HF_HOME:-data/download_cache/huggingface}"
-mkdir -p data/train_dataset data/eval_dataset "$HF_HOME"
+
+set_hf_cache() {
+    local cache_root="$1"
+    export HF_HOME="$cache_root"
+    export HF_DATASETS_CACHE="$cache_root/datasets"
+    export HF_HUB_CACHE="$cache_root/hub"
+    export HUGGINGFACE_HUB_CACHE="$HF_HUB_CACHE"
+    unset TRANSFORMERS_CACHE
+    mkdir -p "$HF_DATASETS_CACHE" "$HF_HUB_CACHE"
+}
+
+# Do not inherit machine-specific Hugging Face cache paths. Use GRPO_HF_HOME
+# when an explicit override is needed; otherwise keep every asset repo-local.
+set_hf_cache "${GRPO_HF_HOME:-data/download_cache/huggingface}"
+mkdir -p data/train_dataset data/eval_dataset
 
 download_snapshot() {
     local repo_id="$1"
@@ -41,6 +54,7 @@ prepare_train_data() {
     local math_output="data/train_dataset/deepscaler/train_grpo.parquet"
     local code_raw="data/train_dataset/taco/raw"
     local code_output="data/train_dataset/taco/train_grpo.parquet"
+    local code_expert_output="data/train_dataset/taco/train_grpo_expert_cot.parquet"
 
     if [ ! -s "$math_output" ] || [ "${FORCE_DOWNLOAD:-false}" = "true" ]; then
         mkdir -p "$math_raw"
@@ -75,6 +89,19 @@ prepare_train_data() {
     else
         echo "Code GRPO train parquet already exists, skipping: $code_output"
     fi
+
+    if [ ! -s "$code_expert_output" ] || [ "${FORCE_DOWNLOAD:-false}" = "true" ]; then
+        code_expert_overwrite=()
+        [ "${FORCE_DOWNLOAD:-false}" = "true" ] && code_expert_overwrite=(--overwrite)
+        python3 recipe/opd/run/grpo/prepare/prepare_grpo_train_data.py \
+            --task code \
+            --input "$code_raw" \
+            --output "$code_expert_output" \
+            --require-expert-cot \
+            "${code_expert_overwrite[@]}"
+    else
+        echo "Code expert-CoT parquet already exists, skipping: $code_expert_output"
+    fi
 }
 
 copy_lcb_runtime() {
@@ -103,7 +130,7 @@ prepare_eval_data() {
     if [ "$math_ready" = "true" ] && [ "${FORCE_DOWNLOAD:-false}" != "true" ]; then
         echo "Math evaluation datasets already exist, skipping downloads."
     else
-        export HF_HOME="$math_dir/huggingface_cache"
+        set_hf_cache "$math_dir/huggingface_cache"
         python3 recipe/math_evaluation/datasets/prepare_aime.py \
             --local_save_dir "$math_dir"
         python3 recipe/math_evaluation/datasets/prepare_hmmt.py \
@@ -125,7 +152,7 @@ prepare_eval_data() {
         mkdir -p "$lcb_data_dir"
         cp -a "$LCB_SOURCE_DIR/." "$lcb_data_dir/"
     fi
-    export HF_HOME="$code_dir/huggingface_cache"
+    set_hf_cache "$code_dir/huggingface_cache"
     python3 recipe/opd/run/grpo/prepare/prepare_lcb_release_v6.py \
         --output-dir "$lcb_data_dir"
 }

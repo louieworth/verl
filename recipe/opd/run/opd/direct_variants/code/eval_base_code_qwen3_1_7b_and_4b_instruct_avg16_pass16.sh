@@ -6,7 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VERL_ROOT="$(cd "$SCRIPT_DIR/../../../../../.." && pwd)"
 cd "$VERL_ROOT"
 
-export PYTHONPATH="$VERL_ROOT:${PYTHONPATH:-}"
+export PYTHONPATH=".:${PYTHONPATH:-}"
 export TASK="code"
 
 BENCHMARK_SCRIPT="$VERL_ROOT/recipe/code_evaluation/benchmark_code_model.sh"
@@ -54,9 +54,9 @@ export GEN_TP="${GEN_TP:-$NGPUS_PER_NODE}"
 QWEN3_1_7B_BASE_MODEL_PATH="${QWEN3_1_7B_BASE_MODEL_PATH:-Qwen/Qwen3-1.7B}"
 QWEN3_4B_INSTRUCT_BASE_MODEL_PATH="${QWEN3_4B_INSTRUCT_BASE_MODEL_PATH:-Qwen/Qwen3-4B-Instruct-2507}"
 
-BASE_EVAL_RESULTS_DIR="${BASE_EVAL_RESULTS_DIR:-$VERL_ROOT/results/base/code}"
-BASE_EVAL_OUTPUT_BASE_DIR="${BASE_EVAL_OUTPUT_BASE_DIR:-$VERL_ROOT/gen_results/eval/code/base}"
-BASE_EVAL_LOG_DIR="${BASE_EVAL_LOG_DIR:-$VERL_ROOT/outputs/OPD/code/base_eval_logs}"
+BASE_EVAL_RESULTS_DIR="${BASE_EVAL_RESULTS_DIR:-results/base/code}"
+BASE_EVAL_OUTPUT_BASE_DIR="${BASE_EVAL_OUTPUT_BASE_DIR:-gen_results/eval/code/base}"
+BASE_EVAL_LOG_DIR="${BASE_EVAL_LOG_DIR:-outputs/OPD/code/base_eval_logs}"
 mkdir -p "$BASE_EVAL_RESULTS_DIR" "$BASE_EVAL_OUTPUT_BASE_DIR" "$BASE_EVAL_LOG_DIR"
 BASE_EVAL_LOG="$BASE_EVAL_LOG_DIR/eval_base_code_avg16_pass16_$(date +%Y%m%d_%H%M%S).log"
 
@@ -86,7 +86,7 @@ resolve_model_path() {
         if [ -n "${TRANSFORMERS_CACHE:-}" ]; then cache_dirs+=("$TRANSFORMERS_CACHE"); fi
         if [ -n "${HF_HOME:-}" ]; then cache_dirs+=("$HF_HOME/hub"); fi
         if [ -n "${HOME:-}" ]; then cache_dirs+=("$HOME/.cache/huggingface/hub"); fi
-        cache_dirs+=("/data/data/jiangli/huggingface/hub" "/scratch/l/luli/hf/hub" "/data/hf/hub")
+        cache_dirs+=("data/download_cache/huggingface/hub")
 
         for cache_dir in "${cache_dirs[@]}"; do
             snapshots_dir="$cache_dir/$repo_dir/snapshots"

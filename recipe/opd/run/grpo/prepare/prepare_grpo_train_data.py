@@ -40,6 +40,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", required=True, help="GRPO parquet output path.")
     parser.add_argument("--split", default="train")
     parser.add_argument("--max-samples", type=int, default=None)
+    parser.add_argument(
+        "--require-expert-cot",
+        action="store_true",
+        help="Keep only rows with a non-empty extra_info.expert_cot target.",
+    )
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
 
@@ -183,7 +188,9 @@ def main() -> None:
     mapper = map_math if args.task == "math" else map_code
     output_path.parent.mkdir(parents=True, exist_ok=True)
     map_cache = output_path.with_suffix(".map.arrow")
+    filter_cache = output_path.with_suffix(".filter.arrow")
     map_cache.unlink(missing_ok=True)
+    filter_cache.unlink(missing_ok=True)
     converted = dataset.map(
         mapper,
         with_indices=True,
@@ -191,6 +198,15 @@ def main() -> None:
         cache_file_name=str(map_cache),
         load_from_cache_file=False,
     )
+    mapped_rows = len(converted)
+    if args.require_expert_cot:
+        converted = converted.filter(
+            lambda example: bool(
+                str((example.get("extra_info") or {}).get("expert_cot") or "").strip()
+            ),
+            cache_file_name=str(filter_cache),
+            load_from_cache_file=False,
+        )
     expected_columns = {"data_source", "prompt", "ability", "reward_model", "extra_info"}
     if set(converted.column_names) != expected_columns:
         raise ValueError(f"Unexpected output columns: {converted.column_names}")
@@ -201,13 +217,16 @@ def main() -> None:
         converted.to_parquet(str(output_path))
     finally:
         map_cache.unlink(missing_ok=True)
+        filter_cache.unlink(missing_ok=True)
     print(
         json.dumps(
             {
                 "task": args.task,
                 "input": args.input,
                 "output": str(output_path),
+                "mapped_rows": mapped_rows,
                 "rows": len(converted),
+                "require_expert_cot": args.require_expert_cot,
                 "columns": converted.column_names,
             },
             indent=2,

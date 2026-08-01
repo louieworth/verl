@@ -8,6 +8,8 @@
 import os
 import argparse
 import json
+from pathlib import Path
+
 import datasets
 from verl.utils.reward_score.math_reward import remove_boxed
 
@@ -146,7 +148,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--input_path",
-        default="/data/data/jiangli/huggingface/datasets/DeepScaleR-Preview-Dataset-Update",
+        default="data/train_dataset/deepscaler/train_grpo.parquet",
         help="Path to DeepScaleR dataset directory",
     )
     parser.add_argument(
@@ -191,18 +193,22 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     print(f"Loading dataset from: {args.input_path}")
-    # Try load_from_disk first (for datasets saved with save_to_disk)
-    # Fallback to load_dataset for HuggingFace hub datasets
-    try:
-        ds_loaded = datasets.load_from_disk(args.input_path)
-        # If it's a DatasetDict, get the 'train' split
-        if isinstance(ds_loaded, datasets.DatasetDict):
-            ds_raw = ds_loaded['train']
-        else:
-            ds_raw = ds_loaded
-    except (ValueError, FileNotFoundError):
-        # Not a disk-saved dataset, try loading from HuggingFace hub
-        ds_raw = datasets.load_dataset(args.input_path, split="train")
+    input_path = Path(args.input_path)
+    if input_path.is_file() and input_path.suffix.lower() == ".parquet":
+        ds_raw = datasets.load_dataset(
+            "parquet", data_files=str(input_path), split="train"
+        )
+    else:
+        # Try load_from_disk first (for datasets saved with save_to_disk), then
+        # treat the value as a Hugging Face dataset ID.
+        try:
+            ds_loaded = datasets.load_from_disk(args.input_path)
+            if isinstance(ds_loaded, datasets.DatasetDict):
+                ds_raw = ds_loaded["train"]
+            else:
+                ds_raw = ds_loaded
+        except (ValueError, FileNotFoundError):
+            ds_raw = datasets.load_dataset(args.input_path, split="train")
 
     # Limit samples for testing if max_samples is specified
     if args.max_samples is not None:
@@ -221,18 +227,28 @@ if __name__ == "__main__":
         ds_raw = ds_raw.select(range(start, stop))
 
     print(f"Processing {len(ds_raw)} examples...")
-    ds_processed = ds_raw.map(
-        (make_map_fn_stage1_code(
-            data_source=args.data_source,
-            index_offset=args.start_index,
-        ) if args.task == "code" else make_map_fn_stage1(
-            question_key=args.question_key,
-            data_source=args.data_source,
-            index_offset=args.start_index,
-        )),
-        with_indices=True,
-        remove_columns=[col for col in ds_raw.column_names if col not in ['data_source', 'prompt', 'ability', 'reward_model', 'extra_info']],
-    )
+    prepared_columns = {
+        "data_source", "prompt", "ability", "reward_model", "extra_info"
+    }
+    if prepared_columns.issubset(ds_raw.column_names):
+        # The portable prepare_data.sh output is already in the Stage-1 schema.
+        # Preserve its serialized code tests and expert_cot verbatim.
+        ds_processed = ds_raw.select_columns(sorted(prepared_columns))
+    else:
+        ds_processed = ds_raw.map(
+            (make_map_fn_stage1_code(
+                data_source=args.data_source,
+                index_offset=args.start_index,
+            ) if args.task == "code" else make_map_fn_stage1(
+                question_key=args.question_key,
+                data_source=args.data_source,
+                index_offset=args.start_index,
+            )),
+            with_indices=True,
+            remove_columns=[
+                col for col in ds_raw.column_names if col not in prepared_columns
+            ],
+        )
 
     # Create output directory
     output_dir = os.path.dirname(args.output_file)

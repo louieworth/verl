@@ -11,7 +11,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VERL_ROOT="$(cd "$SCRIPT_DIR/../../../../../.." && pwd)"
 cd "$VERL_ROOT"
 
-export PYTHONPATH="$VERL_ROOT${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH=".${PYTHONPATH:+:$PYTHONPATH}"
 
 : "${MODEL_PATH:?The model wrapper must set MODEL_PATH}"
 : "${MODEL_NAME:?The model wrapper must set MODEL_NAME}"
@@ -100,7 +100,7 @@ fi
 # Repo-local prepared data. MULTI_STEP=1 is the one-update equivalent of the
 # historical one-step pipeline, while allowing the already-prepared parquet to
 # bypass y_o_prepare.py's raw Dataset/save_to_disk input adapter.
-export TRAIN_DATA_PATH="${MATH_NEW_TRAIN_DATA_PATH:-$VERL_ROOT/data/train_dataset/deepscaler/train_grpo.parquet}"
+export TRAIN_DATA_PATH="${MATH_NEW_TRAIN_DATA_PATH:-data/train_dataset/deepscaler/train_grpo.parquet}"
 export PRECOMPUTED_STAGE1_PROMPTS_PATH="${MATH_NEW_PRECOMPUTED_STAGE1_PROMPTS_PATH:-$TRAIN_DATA_PATH}"
 export TRAIN_DATA_SOURCE="${TRAIN_DATA_SOURCE:-deepscaleR}"
 export MULTI_STEP="${MATH_NEW_MULTI_STEP:-1}"
@@ -110,7 +110,7 @@ export PRECOMPUTED_Y_O_TRAJECTORY_PATH=""
 
 # Repo-local evaluation data.
 export EVAL_DATASETS="${EVAL_DATASETS:-aime24,aime25,hmmt25,beyondaime,amobench}"
-export EVAL_DATASETS_DIR="${MATH_NEW_EVAL_DATASETS_DIR:-$VERL_ROOT/data/eval_dataset/math}"
+export EVAL_DATASETS_DIR="${MATH_NEW_EVAL_DATASETS_DIR:-data/eval_dataset/math}"
 export PASS_K="${PASS_K:-16}"
 
 # Preserve the current math_new length defaults.
@@ -153,23 +153,25 @@ export RUN_EVAL_AFTER_TRAINING="${RUN_EVAL_AFTER_TRAINING:-true}"
 
 # Keep all persistent outputs and caches under the repository.
 export RUN_DATE="${RUN_DATE:-$(date +%Y%m%d-%H%M%S)}"
-export GEN_RESULTS_ROOT="${MATH_NEW_GEN_RESULTS_ROOT:-$VERL_ROOT/gen_results/opsd/direct_variants/math_new}"
+export GEN_RESULTS_ROOT="${MATH_NEW_GEN_RESULTS_ROOT:-gen_results/opsd/direct_variants/math_new}"
 export GEN_RESULTS_RUN_PREFIX="${GEN_RESULTS_RUN_PREFIX:-math_new_${MODEL_NAME}_${DIRECT_VARIANT}}"
-OUTPUT_ROOT="${MATH_NEW_OUTPUT_ROOT:-$VERL_ROOT/outputs/opsd/direct_variants/math_new}"
-RESULTS_ROOT="${MATH_NEW_RESULTS_ROOT:-$VERL_ROOT/results/opsd/direct_variants/math_new}"
+OUTPUT_ROOT="${MATH_NEW_OUTPUT_ROOT:-outputs/opsd/direct_variants/math_new}"
+RESULTS_ROOT="${MATH_NEW_RESULTS_ROOT:-results/opsd/direct_variants/math_new}"
 export OUTPUT_DIR="$OUTPUT_ROOT/$MODEL_NAME/$DIRECT_VARIANT/$RUN_DATE"
-export MODEL_SAVE_DIR="${MATH_NEW_MODEL_SAVE_DIR:-$VERL_ROOT/model/trained/opsd/direct_variants/math_new}"
-export PIPELINE_ARCHIVE_MODEL_ROOT="${MATH_NEW_ARCHIVE_MODEL_ROOT:-$VERL_ROOT/model/archive/opsd/direct_variants/math_new}"
+export MODEL_SAVE_DIR="${MATH_NEW_MODEL_SAVE_DIR:-model/trained/opsd/direct_variants/math_new}"
+export PIPELINE_ARCHIVE_MODEL_ROOT="${MATH_NEW_ARCHIVE_MODEL_ROOT:-model/archive/opsd/direct_variants/math_new}"
 export PIPELINE_ARCHIVE_MODEL_DIR="${MATH_NEW_ARCHIVE_MODEL_DIR:-}"
 export PIPELINE_TEMP_MODEL_DIR="$OUTPUT_DIR/pipeline_tmp_checkpoints"
 export RESULTS_FILE="$RESULTS_ROOT/$MODEL_NAME/$DIRECT_VARIANT/$RUN_DATE/results.json"
-export HF_HOME="${MATH_NEW_HF_HOME:-$VERL_ROOT/model/cache/huggingface}"
+export OPD_HF_HOME="${MATH_NEW_HF_HOME:-data/download_cache/huggingface}"
+export HF_HOME="$OPD_HF_HOME"
 export HF_DATASETS_CACHE="$HF_HOME/datasets"
 export HF_HUB_CACHE="$HF_HOME/hub"
-export TRANSFORMERS_CACHE="$HF_HOME/transformers"
-export TORCH_HOME="${MATH_NEW_TORCH_HOME:-$VERL_ROOT/model/cache/torch}"
-export TRITON_CACHE_DIR="${MATH_NEW_TRITON_CACHE_DIR:-$VERL_ROOT/model/cache/triton}"
-export WANDB_DIR="${MATH_NEW_WANDB_DIR:-$VERL_ROOT/outputs/wandb}"
+export HUGGINGFACE_HUB_CACHE="$HF_HUB_CACHE"
+unset TRANSFORMERS_CACHE
+export TORCH_HOME="${MATH_NEW_TORCH_HOME:-model/cache/torch}"
+export TRITON_CACHE_DIR="${MATH_NEW_TRITON_CACHE_DIR:-model/cache/triton}"
+export WANDB_DIR="${MATH_NEW_WANDB_DIR:-outputs/wandb}"
 export WANDB_MODE="${WANDB_MODE:-offline}"
 export PIPELINE_RESUME_MODE="${PIPELINE_RESUME_MODE:-resume_matching}"
 export NTFY_ENABLED="${NTFY_ENABLED:-false}"
@@ -243,9 +245,8 @@ mkdir -p \
     "$HF_HOME" \
     "$HF_DATASETS_CACHE" \
     "$HF_HUB_CACHE" \
-    "$TRANSFORMERS_CACHE" \
     "$TORCH_HOME" \
     "$TRITON_CACHE_DIR" \
     "$WANDB_DIR"
 
-exec bash "$VERL_ROOT/recipe/opd/run/run_kl_training.sh" "$@"
+exec bash recipe/opd/run/run_kl_training.sh "$@"
