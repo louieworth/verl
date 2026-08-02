@@ -7,5 +7,6 @@ export MODEL_PATH="${MODEL_PATH:-Qwen/Qwen3-4B-Instruct-2507}"
 export MODEL_NAME="${MODEL_NAME:-Qwen3-4B-Instruct-2507}"
 export STUDENT_MODEL="${STUDENT_MODEL:-Qwen3-4B-Instruct-2507}"
 export DIRECT_VARIANT="forward_kl_y_r"
+export EVAL_RESPONSE_LENGTH="${EVAL_RESPONSE_LENGTH:-16384}"
 
 exec bash "$SCRIPT_DIR/../_run_math_direct_variant.sh" "$@"
