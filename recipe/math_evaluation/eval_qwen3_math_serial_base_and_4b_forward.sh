@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Serial math evaluation:
-#   1. Qwen3-1.7B base on the 5 canonical math datasets with pass@16.
+#   1. Qwen3-1.7B base on the 3 canonical math datasets with pass@16.
 #   2. Qwen3-4B-Instruct-2507 OPD_MATH forward y_o/y_r on Amobench with pass@128.
 #
 # Usage:
@@ -21,10 +21,10 @@ PYTHON_BIN="${PYTHON_BIN:-python3}"
 NGPUS_PER_NODE="${NGPUS_PER_NODE:-8}"
 NNODES="${NNODES:-1}"
 GEN_TP="${GEN_TP:-${NGPUS_PER_NODE}}"
-EVAL_DATASETS_DIR="${EVAL_DATASETS_DIR:-/data/data/jiangli/huggingface/datasets}"
-EVAL_PROMPT_LENGTH="${EVAL_PROMPT_LENGTH:-4096}"
-EVAL_RESPONSE_LENGTH="${EVAL_RESPONSE_LENGTH:-36864}"
-EVAL_MAX_MODEL_LEN="${EVAL_MAX_MODEL_LEN:-40960}"
+EVAL_DATASETS_DIR="${EVAL_DATASETS_DIR:-$VERL_ROOT/data/eval_dataset/math}"
+EVAL_PROMPT_LENGTH="${EVAL_PROMPT_LENGTH:-2048}"
+EVAL_RESPONSE_LENGTH="${EVAL_RESPONSE_LENGTH:-16384}"
+EVAL_MAX_MODEL_LEN="${EVAL_MAX_MODEL_LEN:-18432}"
 
 RUN_ID="${RUN_ID:-$(date +%Y%m%d_%H%M%S)}"
 LOG_DIR="${LOG_DIR:-$VERL_ROOT/outputs/math_evaluation}"
@@ -36,7 +36,7 @@ QWEN3_1_7B_BASE_MODEL_PATH="${QWEN3_1_7B_BASE_MODEL_PATH:-/home/ubuntu/.cache/hu
 QWEN3_4B_FORWARD_Y_O_MODEL_PATH="${QWEN3_4B_FORWARD_Y_O_MODEL_PATH:-/data/data/jiangli/models/OPD_MATH/Qwen3-4B-Instruct-2507/teacherQwen3-8B_y_o_kl_forward_full_vocab_clip0_vanilla_ms1_20260531-163323/epoch1/ms1/batch00001/hf_merged}"
 QWEN3_4B_FORWARD_Y_R_MODEL_PATH="${QWEN3_4B_FORWARD_Y_R_MODEL_PATH:-/data/data/jiangli/models/OPD_MATH/Qwen3-4B-Instruct-2507/teacherQwen3-8B_y_r_kl_forward_full_vocab_clip0_refine_ms1_20260601-001538/epoch1/ms1/batch00001/hf_merged}"
 
-BASE_DATASETS="${BASE_DATASETS:-aime24 aime25 hmmt25 beyondaime amobench}"
+BASE_DATASETS="${BASE_DATASETS:-aime25 aime26 hmmt26 amobench}"
 AMOBENCH_DATASETS="${AMOBENCH_DATASETS:-amobench}"
 
 BASE_RESULTS_FILE="${BASE_RESULTS_FILE:-$VERL_ROOT/results/base/math/Qwen3-1.7B_pass16.json}"
@@ -116,7 +116,7 @@ main() {
     log "Serial order: Qwen3-1.7B base pass@16 -> Qwen3-4B-Instruct y_o amobench pass@128 -> y_r amobench pass@128"
 
     run_eval \
-        "qwen3_1_7b_base_5_math_pass16" \
+        "qwen3_1_7b_base_3_math_pass16" \
         "$QWEN3_1_7B_BASE_MODEL_PATH" \
         "Qwen3-1.7B_base_pass16" \
         "Qwen3-1.7B" \

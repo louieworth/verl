@@ -8,11 +8,51 @@ Two distillation modes share the same trainer and loss math:
 
 | Mode | Teacher | y_r prompt sees | When to use |
 | --- | --- | --- | --- |
-| **OPSD** (default) | = student | problem + initial response + **expert solution y\*** | On-policy *self*-distillation — same model used as both student and teacher reference, leaning on the ground-truth solution as anchor. |
-| **OPD** | ≠ student (must set `TEACHER_MODEL_PATH`) | problem + initial response only (no y\*) | Distilling from a larger / stronger teacher model. Teacher rewrites the student's attempt with no expert hint. |
+| **OPSD** (default) | The student's frozen step-0 Base checkpoint | problem + initial response + **expert solution y\*** | Privileged self-distillation anchored by the reference solution. |
+| **OPD** | External `Qwen/Qwen3-14B` (non-Base) | problem + initial response only (no y\*) | Teacher rewrites the student's attempt with no expert hint. |
 
 Mode is selected by `DISTILL_MODE=opsd|opd` env var (or `--distill_mode`
 CLI flag).
+
+The authoritative experiment entrypoints are the matrices in `recipe/opd/scripts_math/` and
+`recipe/opd/script_code/`; see `recipe/opd/scripts_math/README_OPD_OPSD.md`. They pin Base checkpoints,
+OpenThoughts/TACO data, 2048/16384 prompt-response budgets, micro-batch 1,
+top-K 32, four fractional evaluation milestones, and one resumable W&B run.
+The canonical OPD matrix has 1.7B/4B/8B Base students with external
+`Qwen/Qwen3-14B`; OPSD has 1.7B/4B/8B Base models and self-distills from each
+model's frozen step-0 checkpoint.
+Older direct wrappers described below remain available for reproducing legacy
+experiments and may have different defaults.
+
+The canonical OpenThoughts Math training parquets are stored directly in Git,
+so Math launchers work on a fresh clone without a preparation step. Canonical
+TACO is stored in Git as <=40 MB byte chunks under
+`recipe/opd/train_data_bundle/taco_canonical/`. On a fresh worker, run
+`bash recipe/opd/script_code/prepare_code.sh all`; it hash-verifies and
+atomically restores all three canonical TACO parquets, then prepares the
+machine-local EvalPlus/LiveCodeBench runtime and datasets. Every real code
+training launcher also performs this restoration check automatically. The
+single fresh-worker bootstrap command is:
+
+```bash
+bash recipe/opd/script_code/prepare_code.sh all
+```
+
+It restores and verifies GRPO/SFT/distillation train data, installs the pinned
+EvalPlus 0.3.1 and vLLM 0.12.0 Code Eval runtime, downloads
+HumanEval+/MBPP+/LiveCodeBench v6, writes the local
+runtime environment, and runs a CPU-only correct/incorrect code execution test.
+Missing Python data/evaluation packages are installed by default; the base
+Docker image still supplies Python, pip, CUDA/driver compatibility and the
+normal verl training environment.
+
+Every real launcher in `scripts_math/` and `script_code/` resolves W&B auth in
+the shared launcher. Export `WANDB_API_KEY` in the calling environment before
+an online run; credentials are never stored in Git. Every real
+`script_code/` leaf runs `prepare_code.sh all` before dispatching; dry-runs
+remain side-effect free.
+The code GRPO artifact follows a DeepCoder-style contract: at most 15
+longest-input tests per TACO problem and binary all-selected-tests-pass reward.
 
 ## Layout
 
@@ -26,7 +66,7 @@ recipe/opd/
 ├── run/
 │   ├── run_kl_training.sh          — shared base: infra defaults, multi-epoch loop;
 │   │                                 hands off to recipe/math_evaluation/benchmark_kl_model.sh after training
-│   ├── opsd/                       — 4 canonical wrappers for OPSD (teacher = student, with y*)
+│   ├── opsd/                       — legacy direct wrappers for OPSD (with y*)
 │   ├── opd/                        — 4 canonical wrappers for OPD  (teacher ≠ student, no y*)
 │   └── ablation/                   — MC / 4B / reward-filtered / OPSD-JSD / queue runners
 ├── anlysis/                        — figure scripts
@@ -55,7 +95,7 @@ exec the OPSD wrapper for shared config.
 bash recipe/opd/run/opsd/reverse_topk_y_o.sh
 
 # OPD — teacher ≠ student
-TEACHER_MODEL_PATH=Qwen/Qwen3-32B bash recipe/opd/run/opd/reverse_topk_y_o.sh
+TEACHER_MODEL_PATH=Qwen/Qwen3-14B bash recipe/opd/run/opd/reverse_topk_y_o.sh
 ```
 
 ## Exposed parameters (env overrides)
@@ -63,7 +103,7 @@ TEACHER_MODEL_PATH=Qwen/Qwen3-32B bash recipe/opd/run/opd/reverse_topk_y_o.sh
 | Env var | Applies to | Default | Notes |
 | --- | --- | --- | --- |
 | `DISTILL_MODE` | all | `opsd` | `opsd` \| `opd`. OPD requires `TEACHER_MODEL_PATH`. |
-| `TEACHER_MODEL_PATH` | OPD only | empty (= student) | Path/HF id of teacher model. Must be set for OPD. |
+| `TEACHER_MODEL_PATH` | all | mode-dependent | OPD uses `Qwen/Qwen3-14B`; OPSD must equal the frozen step-0 `MODEL_PATH`. |
 | `Y_MODE` | all | per-script | `y_o` (stage1 student rollout) or `y_r` (stage2 teacher rewrite). |
 | `BASE_PROMPT_LENGTH` | all | `1024` | Student problem prompt budget; used for y_o rollout and student-side KL prompt. |
 | `MAX_RESPONSE_LENGTH` | all | `16384` | Fixed response budget for y_o, y_r, and KL target responses. |
@@ -72,7 +112,7 @@ TEACHER_MODEL_PATH=Qwen/Qwen3-32B bash recipe/opd/run/opd/reverse_topk_y_o.sh
 | `TEMPERATURE` | all | `1.0` | Distillation softmax temperature. |
 | `LEARNING_RATE` | all | per-script (2e-6 or 5e-6) | |
 | `TOTAL_EPOCHS` | all | `1` | Outer pipeline epochs (multi-epoch resumes from previous merged ckpt). |
-| `MULTI_STEP` | all | `0` | `0` keeps the historical one-step path over all samples. `>0` runs exactly this many offline policy updates; chunk size is computed as `floor(num_train_rows / MULTI_STEP)` and tail rows are dropped. Adds an `msN` tag to run/model/result names. |
+| `MULTI_STEP` | all | `0` | `0` uses the default 512 prompts per policy optimizer step and derives the step count. `>0` means exactly that many policy optimizer steps; the full dataset is balanced across those steps and gradient accumulation is derived so each partition produces one step. No rows are dropped. Adds an `msN` tag to run/model/result names. |
 | `PIPELINE_AUTO_RESUME` | multi-step | `true` | When rerunning the same command, skip steps with a done marker or final `hf_merged/config.json`. Set `false` to fail fast if existing completed output is found. |
 | `KL_TOKEN_CLIP` | **forward only** | `0.06` in `forward_clip_y_o.sh`, `0` elsewhere | Per-token KL clamp. |
 | `TOP_K` | **reverse only** | `32` in `reverse_topk_y_o.sh`, `0` elsewhere | Teacher top-K local support. |
@@ -108,16 +148,17 @@ Generation is auto-invoked from `run_kl_training.sh` (stage1 student rollout
 `generation/README.md` for the file-by-file breakdown.
 
 For offline multi-step on-policy optimization, set only `MULTI_STEP`, for
-example `MULTI_STEP=39`. The script computes the chunk size from the loaded train
-rows; with 40,000 rows and `MULTI_STEP=39`, each update uses 1,025 rows and drops
-the final 25 rows. Each step runs `y_o -> optional y_r -> KL train`, then chunk
+example `MULTI_STEP=39`. A positive value is the exact number of policy
+optimizer steps. The script balances every loaded row across those steps and
+derives gradient accumulation so each partition produces one optimizer update;
+with 40,000 rows and `MULTI_STEP=39`, 25 partitions use 1,026 rows and 14 use
+1,025 rows. Each step runs `y_o -> optional y_r -> KL train`, then chunk
 `N+1` loads chunk `N`'s `hf_merged` policy before generating its own `y_o`.
 Temporary per-chunk parquet files live under
 `gen_results/<model>/epoch1/ms39/batchXXXXX/` and are deleted after training by
-default. The reusable prompt cache is kept at
-`gen_results/<model>/deepscaleR_stage1_prompts.parquet`. Sparse model retention
-defaults to step 0 plus every `ceil(MULTI_STEP / 5)` updates and the final step,
-so `MULTI_STEP=39` keeps 0, 8, 16, 24, 32, and 39. With the default
+default. Sparse model retention and evaluation use
+`EVAL_FRACTIONS=0.25,0.5,0.75,1.0`; for `MULTI_STEP=39` these are steps
+10, 20, 30, and 39. With the default
 `PIPELINE_AUTO_RESUME=true`, rerunning the same command skips completed steps and
 continues from the latest available policy checkpoint.
 

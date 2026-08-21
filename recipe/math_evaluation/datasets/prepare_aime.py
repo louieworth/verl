@@ -1,115 +1,123 @@
-# Copyright 2025 Bytedance Ltd. and/or its affiliates
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+#!/usr/bin/env python3
+"""Prepare AIME evaluation sets in the parquet format used by verl.
 
-# prepare eval dataset including AIME'24, AIME'25
+The canonical default contains the 30-problem 2025 and 2026 sets. AIME24
+remains selectable for backward-compatible experiments.
+"""
 
-# hf download math-ai/aime24 --repo-type dataset --local-dir /opt/tiger/datasets/math-ai/aime24
-# hf download math-ai/aime25 --repo-type dataset --local-dir /opt/tiger/datasets/math-ai/aime25
+from __future__ import annotations
 
+import argparse
 import os
+import sys
 
 import datasets
 
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(SCRIPT_DIR)))
+sys.path.insert(0, REPO_ROOT)
+
 from verl.utils.reward_score.math_reward import remove_boxed
 
-instruction_following = "Please reason step by step, and put your final answer within \\boxed{}."
+
+INSTRUCTION = "Please reason step by step, and put your final answer within \\boxed{}."
+AIME_CONFIGS = {
+    "aime26": {
+        "hf_name": "math-ai/aime26",
+        "revision": "79037aebdb6580008fb960d17cb21fd3099083e3",
+        "split": "test",
+        "expected_rows": 30,
+    },
+    "aime25": {
+        "hf_name": "math-ai/aime25",
+        "revision": "563bb8404243c5f09de6ec262f2db674fe5bce9b",
+        "split": "test",
+        "expected_rows": 30,
+    },
+    "aime24": {"hf_name": "math-ai/aime24", "split": "test"},
+}
 
 
-def make_map_fn(data_source):
-    def process_fn(example, idx):
-        question_raw = example.pop("problem")
-
-        question = question_raw + " " + instruction_following
-
-        if "solution" not in example:
-            example["solution"] = example["answer"]
-
-        answer_raw = example.pop("solution")
-
-        example.clear()
-
+def normalize_answer(answer_raw) -> str:
+    answer = str(answer_raw).strip()
+    if "\\boxed" in answer:
         try:
-            solution = remove_boxed(answer_raw)
+            return str(remove_boxed(answer)).strip()
         except Exception:
-            solution = answer_raw
+            pass
+    return answer
 
-        data = {
+
+def make_map_fn(data_source: str):
+    def process_fn(example, idx):
+        problem = str(example["problem"]).strip()
+        answer_raw = example.get("solution", example.get("answer"))
+        if answer_raw is None:
+            raise ValueError(f"{data_source} row {idx} has no solution/answer field")
+        return {
             "data_source": data_source,
-            "prompt": [
-                {
-                    "role": "user",
-                    "content": question,
-                }
-            ],
+            "prompt": [{"role": "user", "content": f"{problem}\n{INSTRUCTION}"}],
             "ability": "math",
-            "reward_model": {"style": "rule", "ground_truth": solution},
+            "reward_model": {"style": "rule", "ground_truth": normalize_answer(answer_raw)},
             "extra_info": {
                 "index": idx,
-                "answer": answer_raw,
-                "question": question_raw,
+                "id": str(example.get("id", idx)),
+                "answer": str(answer_raw),
+                "question": problem,
             },
         }
-        return data
 
     return process_fn
 
 
-if __name__ == "__main__":
-    import argparse
+def resolve_dataset_id(hf_name: str, local_dataset_path: str | None) -> str:
+    return hf_name if local_dataset_path is None else os.path.join(os.path.expanduser(local_dataset_path), hf_name)
 
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--local_dataset_path", default=None, help="The local path to the raw dataset, if it exists.")
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Prepare AIME datasets for verl evaluation")
     parser.add_argument(
-        "--local_save_dir", default="~/data/math-ai", help="The save directory for the preprocessed dataset."
+        "--datasets",
+        default="aime25,aime26",
+        help="Comma-separated names. Canonical default: aime25,aime26; also supports aime24.",
     )
+    parser.add_argument("--local_dataset_path", default=None, help="Optional root containing raw HF repositories")
+    parser.add_argument("--local_save_dir", default="data/eval_dataset/math")
+    parser.add_argument("--overwrite", action="store_true")
+    return parser.parse_args()
 
-    args = parser.parse_args()
 
-    if args.local_dataset_path is not None:
-        aime24_dataset_path = os.path.join(args.local_dataset_path, "math-ai/aime24")
-        aime25_dataset_path = os.path.join(args.local_dataset_path, "math-ai/aime25")
-    else:
-        aime24_dataset_path = "math-ai/aime24"
-        aime25_dataset_path = "math-ai/aime25"
+def main() -> None:
+    args = parse_args()
+    selected = [name.strip().lower() for name in args.datasets.split(",") if name.strip()]
+    unknown = sorted(set(selected) - set(AIME_CONFIGS))
+    if unknown:
+        raise ValueError(f"Unsupported AIME datasets: {unknown}")
 
-    aime24_dataset = datasets.load_dataset(aime24_dataset_path, split="test")
-    aime25_dataset = datasets.load_dataset(aime25_dataset_path, split="test")
+    for dataset_name in selected:
+        config = AIME_CONFIGS[dataset_name]
+        output_dir = os.path.join(os.path.expanduser(args.local_save_dir), dataset_name)
+        output_path = os.path.join(output_dir, f"{dataset_name}_test.parquet")
+        if os.path.exists(output_path) and not args.overwrite:
+            print(f"Dataset {dataset_name} already exists at {output_path}, skipping...")
+            continue
 
-    aime24_dataset = aime24_dataset.map(function=make_map_fn("aime24"), with_indices=True)
-    aime25_dataset = aime25_dataset.map(function=make_map_fn("aime25"), with_indices=True)
+        dataset_id = resolve_dataset_id(config["hf_name"], args.local_dataset_path)
+        print(f"Loading {dataset_id} ({config['split']})...")
+        load_kwargs = {"split": config["split"]}
+        if config.get("revision") and args.local_dataset_path is None:
+            load_kwargs["revision"] = config["revision"]
+        dataset = datasets.load_dataset(dataset_id, **load_kwargs)
+        if config.get("expected_rows") is not None and len(dataset) != config["expected_rows"]:
+            raise ValueError(
+                f"Expected {config['expected_rows']} {dataset_name} problems, found {len(dataset)}; "
+                "audit the upstream dataset before evaluating."
+            )
+        dataset = dataset.map(make_map_fn(dataset_name), with_indices=True, remove_columns=dataset.column_names)
+        os.makedirs(output_dir, exist_ok=True)
+        dataset.to_parquet(output_path)
+        print(f"Saved {len(dataset)} {dataset_name} problems to {output_path}")
 
-    base_save_dir = os.path.expanduser(args.local_save_dir)
 
-    # 2. 为 aime24 创建并指定单独的保存路径
-    aime24_save_dir = os.path.join(base_save_dir, "aime24")
-    os.makedirs(aime24_save_dir, exist_ok=True)
-    aime24_output_file = os.path.join(aime24_save_dir, "aime24_test.parquet")
-
-    if os.path.exists(aime24_output_file):
-        print(f"AIME24 dataset already exists at {aime24_output_file}, skipping...")
-    else:
-        aime24_dataset.to_parquet(aime24_output_file)
-        print(f"AIME24 dataset saved to {aime24_output_file}")
-
-    # 3. 为 aime25 创建并指定单独的保存路径
-    aime25_save_dir = os.path.join(base_save_dir, "aime25")
-    os.makedirs(aime25_save_dir, exist_ok=True)
-    aime25_output_file = os.path.join(aime25_save_dir, "aime25_test.parquet")
-
-    if os.path.exists(aime25_output_file):
-        print(f"AIME25 dataset already exists at {aime25_output_file}, skipping...")
-    else:
-        aime25_dataset.to_parquet(aime25_output_file)
-        print(f"AIME25 dataset saved to {aime25_output_file}")
-    # --- 修改结束 ---
+if __name__ == "__main__":
+    main()

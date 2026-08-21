@@ -36,6 +36,13 @@ from verl.workers.engine_workers import TrainingWorker
 
 from .config import KLTrainingConfig
 from .dataset.data_utils import create_kl_dataloader
+from .experiment_tracking import (
+    compute_eval_milestones,
+    default_wandb_run_state_path,
+    initialize_wandb_run,
+    log_eval_metrics,
+    log_wandb_metrics,
+)
 from recipe.math_evaluation.eval_utils import run_evaluation_suite
 from .kl_utils import compute_kl_divergence
 from .rollout_sync import sync_student_engine_to_resident_rollout
@@ -52,6 +59,16 @@ def build_eval_tag(config: KLTrainingConfig) -> str:
 def build_eval_model_name(config: KLTrainingConfig) -> str:
     base_model_name = config.base_model_name or config.student_model_path.split("/")[-1]
     return f"{base_model_name}_{build_eval_tag(config)}_epoch{config.epoch_index}"
+
+
+def token_entropy_from_logits(logits: torch.Tensor) -> torch.Tensor:
+    """Return full-vocabulary categorical entropy per token, in nats."""
+    with torch.no_grad():
+        float_logits = logits.detach().float()
+        log_z = torch.logsumexp(float_logits, dim=-1)
+        probs = torch.softmax(float_logits, dim=-1)
+        entropy = log_z - torch.einsum("lv,lv->l", probs, float_logits)
+        return entropy
 
 
 class KLTrainer:
@@ -78,6 +95,13 @@ class KLTrainer:
                 math.ceil(len(self.train_dataloader) / self.config.gradient_accumulation_steps)
                 * self.config.total_epochs
             )
+        self.experiment_total_training_steps = (
+            self.config.wandb_total_training_steps or self.total_training_steps
+        )
+        self.eval_milestones = compute_eval_milestones(
+            self.experiment_total_training_steps,
+            self.config.eval_fractions,
+        )
 
         self.student_worker = self._build_student_worker()
         self.student_engine = self.student_worker.engine
@@ -121,10 +145,17 @@ class KLTrainer:
 
     def _init_wandb(self):
         effective_teacher_path = self.config.teacher_model_path or self.config.student_model_path
-        wandb.init(
+        state_path = self.config.wandb_run_id_file or default_wandb_run_state_path(
+            self.config.output_dir
+        )
+        self.wandb_run_state = initialize_wandb_run(
+            wandb,
             project=self.config.wandb_project,
-            name=self.config.wandb_run_name,
-            mode=os.environ.get("WANDB_MODE", "offline"),
+            run_name=self.config.wandb_run_name,
+            run_identity=self.config.wandb_run_identity,
+            state_path=state_path,
+            explicit_run_id=self.config.wandb_run_id,
+            mode=os.environ.get("WANDB_MODE", "online"),
             config={
                 "distill_mode": self.config.distill_mode,
                 "task": self.config.task,
@@ -144,13 +175,28 @@ class KLTrainer:
                 "train_batch_size_per_gpu": self.config.train_batch_size,
                 "gradient_accumulation_steps": self.config.gradient_accumulation_steps,
                 "total_epochs": self.config.total_epochs,
+                "total_training_steps": self.experiment_total_training_steps,
+                "segment_training_steps": self.total_training_steps,
                 "max_length": self.config.max_length,
                 "max_token_len_per_gpu": self.config.max_token_len_per_gpu,
+                "use_dynamic_bsz": self.config.use_dynamic_bsz,
+                "micro_batch_size_per_gpu": self.config.micro_batch_size_per_gpu,
                 "fsdp_strategy": self.config.fsdp_strategy,
                 "fsdp_size": self.config.fsdp_size,
+                "eval_fractions": list(self.config.eval_fractions),
+                "eval_milestone_steps": list(self.eval_milestones),
+                "wandb_global_step_offset": self.config.wandb_global_step_offset,
             },
         )
-        logger.info("Wandb initialized: %s", wandb.run.url)
+        logger.info(
+            "Wandb initialized: id=%s state=%s url=%s",
+            self.wandb_run_state.run_id,
+            self.wandb_run_state.state_path,
+            wandb.run.url,
+        )
+
+    def _wandb_global_step(self) -> int:
+        return self.config.wandb_global_step_offset + self.global_step
 
     def _load_tokenizer(self) -> AutoTokenizer:
         tokenizer = AutoTokenizer.from_pretrained(self.config.student_model_path, trust_remote_code=True)
@@ -215,11 +261,11 @@ class KLTrainer:
             ulysses_sequence_parallel_size=self.config.ulysses_sequence_parallel_size,
             wrap_policy=self._build_wrap_policy(model_path),
             forward_only=forward_only,
-            use_dynamic_bsz=True,
+            use_dynamic_bsz=self.config.use_dynamic_bsz,
             max_token_len_per_gpu=self.config.max_token_len_per_gpu,
             infer_max_token_len_per_gpu=self.config.max_token_len_per_gpu,
-            micro_batch_size_per_gpu=None,
-            infer_micro_batch_size_per_gpu=None,
+            micro_batch_size_per_gpu=self.config.micro_batch_size_per_gpu,
+            infer_micro_batch_size_per_gpu=self.config.micro_batch_size_per_gpu,
             use_remove_padding=self.config.use_remove_padding,
             use_torch_compile=self.config.use_torch_compile,
             param_offload=self.config.param_offload,
@@ -232,7 +278,10 @@ class KLTrainer:
         return FSDPOptimizerConfig(
             lr=self.config.learning_rate,
             lr_warmup_steps_ratio=self.config.warmup_steps_ratio,
-            total_training_steps=self.total_training_steps,
+            # Segmented on-policy training launches one trainer process per
+            # rollout chunk.  Keep one experiment-wide scheduler horizon; the
+            # optimizer/scheduler state is restored from the previous chunk.
+            total_training_steps=self.experiment_total_training_steps,
             weight_decay=self.config.weight_decay,
             betas=(0.9, 0.95),
             clip_grad=self.config.max_grad_norm,
@@ -357,9 +406,9 @@ class KLTrainer:
             "pad_mode": DatasetPadMode.NO_PADDING,
             "pad_token_id": self.tokenizer.pad_token_id,
             "use_remove_padding": self.config.use_remove_padding,
-            "use_dynamic_bsz": True,
+            "use_dynamic_bsz": self.config.use_dynamic_bsz,
             "max_token_len_per_gpu": self.config.max_token_len_per_gpu,
-            "micro_batch_size_per_gpu": None,
+            "micro_batch_size_per_gpu": self.config.micro_batch_size_per_gpu,
             "calculate_entropy": False,
             "return_logits": return_logits,
         }
@@ -462,6 +511,8 @@ class KLTrainer:
                 "kl_num": 0.0,
                 "student_nll_num": 0.0,
                 "teacher_nll_num": 0.0,
+                "student_entropy_num": 0.0,
+                "student_entropy_den": 0.0,
                 "response_tokens": 0.0,
             }
             return zero_loss, metrics
@@ -480,6 +531,8 @@ class KLTrainer:
         )
         correction_mass_num = 0.0
         correction_mass_den = 0.0
+        student_entropy_sum = None
+        student_entropy_den = 0.0
 
         if self._needs_logits():
             from .kl_utils import (
@@ -553,6 +606,17 @@ class KLTrainer:
                     end = min(start + chunk_size, common)
                     s_slice = s_logits.index_select(0, s_idx[start:end])
                     t_slice = t_logits.index_select(0, t_idx[start:end])
+                    # Policy entropy is a training diagnostic, not part of the
+                    # KL objective. Compute it on the unscaled student policy
+                    # in the same bounded sequence chunks used by full-vocab
+                    # KL so 16K responses do not materialize [T,V] globally.
+                    entropy_sum = token_entropy_from_logits(s_slice).sum()
+                    student_entropy_sum = (
+                        entropy_sum
+                        if student_entropy_sum is None
+                        else student_entropy_sum + entropy_sum
+                    )
+                    student_entropy_den += float(end - start)
                     if T != 1.0:
                         s_slice = s_slice / T
                         t_slice = t_slice / T
@@ -625,6 +689,12 @@ class KLTrainer:
         student_nll_num = (-student_log_probs * mask).sum()
         teacher_nll_num = (-teacher_log_probs * mask).sum()
         response_tokens = mask.sum()
+        # The canonical OPD/OPSD launchers use full-vocabulary KL, giving the
+        # exact categorical entropy above. Retain a sampled surprisal estimate
+        # for legacy Monte-Carlo configurations that do not expose logits.
+        if student_entropy_sum is None:
+            student_entropy_sum = student_nll_num.detach()
+            student_entropy_den = float(response_tokens.detach().item())
 
         batch_num_tokens = float(data["batch_num_tokens"])
         dp_size = float(data["dp_size"])
@@ -672,6 +742,8 @@ class KLTrainer:
             "kl_num": kl_num.detach().float().item(),
             "student_nll_num": student_nll_num.detach().float().item(),
             "teacher_nll_num": teacher_nll_num.detach().float().item(),
+            "student_entropy_num": student_entropy_sum.detach().float().item(),
+            "student_entropy_den": student_entropy_den,
             "response_tokens": response_tokens.detach().float().item(),
             "clip_num": clip_num.detach().float().item(),
             "kl_p50": kl_p50.float().item(),
@@ -699,6 +771,8 @@ class KLTrainer:
         kl_num = float(sum(metrics.get("kl_num", [])))
         student_nll_num = float(sum(metrics.get("student_nll_num", [])))
         teacher_nll_num = float(sum(metrics.get("teacher_nll_num", [])))
+        student_entropy_num = float(sum(metrics.get("student_entropy_num", [])))
+        student_entropy_den = float(sum(metrics.get("student_entropy_den", [])))
         response_tokens = float(sum(metrics.get("response_tokens", [])))
         response_tokens = max(response_tokens, 1.0)
         clip_num = float(sum(metrics.get("clip_num", [])))
@@ -726,6 +800,11 @@ class KLTrainer:
             "kl_loss": kl_num / response_tokens,
             "student_perplexity": math.exp(student_nll_num / response_tokens),
             "teacher_perplexity": math.exp(teacher_nll_num / response_tokens),
+            "student_entropy": (
+                student_entropy_num / student_entropy_den
+                if student_entropy_den > 0
+                else 0.0
+            ),
             "response_tokens": response_tokens,
             "clip_frac": clip_num / response_tokens,
             "kl_p50": _mean("kl_p50"),
@@ -745,6 +824,9 @@ class KLTrainer:
         }
 
     def _save_checkpoint(self):
+        if getattr(self, "_last_saved_checkpoint_step", None) == self.global_step:
+            logger.info("Checkpoint for global step %s is already complete; skipping duplicate save", self.global_step)
+            return
         ckpt_dir = os.path.join(self.config.model_save_dir, f"global_step_{self.global_step}")
         max_keep = self.config.max_ckpt_to_keep if self.config.max_ckpt_to_keep > 0 else None
         self.student_engine.save_checkpoint(
@@ -763,7 +845,18 @@ class KLTrainer:
             with open(lora_meta_path, "w", encoding="utf-8") as f:
                 json.dump(lora_meta, f, ensure_ascii=False, indent=4)
             logger.info("Saved LoRA rank/alpha metadata to %s", lora_meta_path)
+        self._last_saved_checkpoint_step = self.global_step
         logger.info("Checkpoint saved to %s", ckpt_dir)
+
+    def _should_save_checkpoint_after_step(self) -> tuple[bool, bool]:
+        """Return (should_save, is_eval_milestone) for the current step."""
+        wandb_global_step = self._wandb_global_step()
+        is_eval_milestone = wandb_global_step in self.eval_milestones
+        is_periodic_save = (
+            self.config.save_steps > 0
+            and self.global_step % self.config.save_steps == 0
+        )
+        return is_periodic_save or is_eval_milestone, is_eval_milestone
 
     def _find_latest_checkpoint(self) -> str:
         ckpt_dirs = glob.glob(os.path.join(self.config.model_save_dir, "global_step_*"))
@@ -840,16 +933,17 @@ class KLTrainer:
                 cmd = [
                     sys.executable,
                     "-m",
-                    "verl.model_merger",
-                    "merge",
-                    "--backend",
-                    "fsdp",
-                    "--local_dir",
+                    "recipe.opd.export_checkpoint",
+                    "--local-dir",
                     latest_ckpt,
-                    "--hf_model_config_path",
+                    "--base-model",
                     hf_assets_source,
-                    "--target_dir",
+                    "--target-dir",
                     merged_dir,
+                    "--lora-rank",
+                    str(self.config.lora_rank if self.config.use_lora else 0),
+                    "--lora-alpha",
+                    str(self.config.lora_alpha if self.config.use_lora else 0),
                 ]
                 if hf_assets_source:
                     logger.info("Using HF assets from %s for merged export", hf_assets_source)
@@ -878,16 +972,17 @@ class KLTrainer:
                 cmd = [
                     sys.executable,
                     "-m",
-                    "verl.model_merger",
-                    "merge",
-                    "--backend",
-                    "fsdp",
-                    "--local_dir",
+                    "recipe.opd.export_checkpoint",
+                    "--local-dir",
                     latest_ckpt,
-                    "--hf_model_config_path",
+                    "--base-model",
                     hf_assets_source,
-                    "--target_dir",
+                    "--target-dir",
                     merged_dir,
+                    "--lora-rank",
+                    str(self.config.lora_rank if self.config.use_lora else 0),
+                    "--lora-alpha",
+                    str(self.config.lora_alpha if self.config.use_lora else 0),
                     "--trust-remote-code",
                 ]
                 logger.info("Launching async HF export %s -> %s (log=%s)", latest_ckpt, merged_dir, log_path)
@@ -941,6 +1036,7 @@ class KLTrainer:
         running_kl = 0.0
         running_student_ppl = 0.0
         running_teacher_ppl = 0.0
+        running_student_entropy = 0.0
         num_batches = 0
 
         progress_bar = tqdm(
@@ -979,6 +1075,7 @@ class KLTrainer:
                 running_kl += step_metrics["kl_loss"]
                 running_student_ppl += step_metrics["student_perplexity"]
                 running_teacher_ppl += step_metrics["teacher_perplexity"]
+                running_student_entropy += step_metrics["student_entropy"]
                 num_batches += 1
 
                 should_step = (
@@ -1005,16 +1102,23 @@ class KLTrainer:
 
                     if self.is_logging and HAS_WANDB:
                         log_payload = {
+                            "train/loss": step_metrics["kl_loss"],
                             "train/kl_loss": step_metrics["kl_loss"],
                             "train/kl_loss_per_traj": step_metrics["kl_loss_per_traj"],
                             "train/student_perplexity": step_metrics["student_perplexity"],
                             "train/teacher_perplexity": step_metrics["teacher_perplexity"],
+                            "train/entropy": step_metrics["student_entropy"],
                             "train/response_tokens": step_metrics["response_tokens"],
                             "train/grad_norm": grad_norm,
                             "train/learning_rate": lr,
+                            "train/lr": lr,
                             "train/step_time_sec": step_time,
                             "train/epoch": self.epoch,
-                            "train/global_step": self.global_step,
+                            "train/global_step": self._wandb_global_step(),
+                            "train/progress": min(
+                                1.0,
+                                self._wandb_global_step() / self.experiment_total_training_steps,
+                            ),
                             "train/kl_p50": step_metrics["kl_p50"],
                             "train/kl_p95": step_metrics["kl_p95"],
                             "train/kl_p99": step_metrics["kl_p99"],
@@ -1040,7 +1144,11 @@ class KLTrainer:
                             log_payload["train/response_tokens_hard"] = step_metrics[
                                 "response_tokens_hard"
                             ]
-                        wandb.log(log_payload)
+                        log_wandb_metrics(
+                            wandb,
+                            log_payload,
+                            global_step=self._wandb_global_step(),
+                        )
 
                     if self.global_step % self.config.logging_steps == 0 and self.is_logging:
                         logger.info(
@@ -1053,7 +1161,15 @@ class KLTrainer:
                             lr,
                         )
 
-                    if self.config.save_steps > 0 and self.global_step % self.config.save_steps == 0:
+                    should_save_checkpoint, is_eval_milestone = (
+                        self._should_save_checkpoint_after_step()
+                    )
+                    if should_save_checkpoint:
+                        if is_eval_milestone:
+                            logger.info(
+                                "Saving optimizer-step evaluation milestone %s",
+                                self._wandb_global_step(),
+                            )
                         self._save_checkpoint()
 
                 progress_bar.set_postfix(
@@ -1061,6 +1177,7 @@ class KLTrainer:
                         "kl": f"{running_kl / num_batches:.4f}",
                         "student_ppl": f"{running_student_ppl / num_batches:.2f}",
                         "teacher_ppl": f"{running_teacher_ppl / num_batches:.2f}",
+                        "entropy": f"{running_student_entropy / num_batches:.3f}",
                     }
                 )
 
@@ -1071,6 +1188,7 @@ class KLTrainer:
             "kl_loss": running_kl / max(num_batches, 1),
             "student_perplexity": running_student_ppl / max(num_batches, 1),
             "teacher_perplexity": running_teacher_ppl / max(num_batches, 1),
+            "student_entropy": running_student_entropy / max(num_batches, 1),
         }
 
     def train(self):
@@ -1100,13 +1218,16 @@ class KLTrainer:
             if self.is_logging:
                 logger.info("Epoch %s metrics: %s", epoch + 1, epoch_metrics)
                 if HAS_WANDB:
-                    wandb.log(
+                    log_wandb_metrics(
+                        wandb,
                         {
                             "epoch/kl_loss": epoch_metrics["kl_loss"],
                             "epoch/student_perplexity": epoch_metrics["student_perplexity"],
                             "epoch/teacher_perplexity": epoch_metrics["teacher_perplexity"],
+                            "epoch/student_entropy": epoch_metrics["student_entropy"],
                             "epoch/index": epoch + 1,
-                        }
+                        },
+                        global_step=self._wandb_global_step(),
                     )
 
         if self.global_step == 0:
@@ -1174,4 +1295,9 @@ class KLTrainer:
             )
 
         if HAS_WANDB and eval_results:
-            wandb.log({f"eval/{dataset}": acc for dataset, acc in eval_results.items()})
+            log_eval_metrics(
+                wandb,
+                eval_results,
+                task=self.config.task,
+                global_step=self._wandb_global_step(),
+            )

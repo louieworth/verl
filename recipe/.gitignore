@@ -29,6 +29,9 @@ downloads/
 eggs/
 .eggs/
 lib/
+!opd/scripts_math/lib/
+!opd/scripts_math/lib/*.sh
+opd/script_code/runtime.env
 lib64/
 parts/
 sdist/

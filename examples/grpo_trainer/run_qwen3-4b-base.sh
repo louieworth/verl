@@ -1,8 +1,8 @@
 # Tested successfully on the hiyouga/verl:ngc-th2.6.0-cu126-vllm0.8.4-flashinfer0.2.2-cxx11abi0 image.
 # It outperforms the Qwen2 7B base model by two percentage points on the test set of GSM8K.
 
+: "${WANDB_API_KEY:?Set WANDB_API_KEY in the runtime environment}"
 set -x
-export WANDB_API_KEY=9d45bb78a65fb0f3b0402a9eae36ed832ae8cbdc
 
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \

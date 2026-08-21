@@ -6,7 +6,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../../../../.." && pwd)"
 cd "$REPO_ROOT"
 
 export HF_HOME="${HF_HOME:-data/download_cache/huggingface}"
-mkdir -p model/base model/trained "$HF_HOME"
+mkdir -p model/base model/teacher model/trained "$HF_HOME"
 
 download_model() {
     local repo_id="$1"
@@ -32,7 +32,9 @@ PY
     }
 }
 
-download_model "Qwen/Qwen3-4B-Instruct-2507" "model/base/Qwen3-4B-Instruct-2507"
-download_model "Qwen/Qwen3-8B" "model/base/Qwen3-8B"
+download_model "Qwen/Qwen3-1.7B-Base" "model/base/Qwen3-1.7B-Base"
+download_model "Qwen/Qwen3-4B-Base" "model/base/Qwen3-4B-Base"
+download_model "Qwen/Qwen3-8B-Base" "model/base/Qwen3-8B-Base"
+download_model "Qwen/Qwen3-14B" "model/teacher/Qwen3-14B"
 
-echo "Base models are ready under model/base/"
+echo "Base students are ready under model/base/; OPD teacher is under model/teacher/"

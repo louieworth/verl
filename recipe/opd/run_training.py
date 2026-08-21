@@ -23,20 +23,20 @@ def parse_args():
     # Distillation Mode
     parser.add_argument(
         "--task", type=str, default="math", choices=["math", "code"],
-        help="Training/evaluation task adapter: math uses DeepScaleR-style prompts; code uses TACO/code prompts.",
+        help="Training/evaluation task adapter: math uses OpenThoughts prompts; code uses TACO prompts.",
     )
 
     parser.add_argument(
         "--distill_mode", type=str, default="opsd", choices=["opsd", "opd"],
-        help="opsd: teacher = student, teacher prompt embeds expert solution. "
-             "opd: teacher != student, teacher prompt has no expert reference.",
+        help="opsd: teacher prompt embeds the expert solution; opd: it has no expert reference. "
+             "Canonical OPD uses external Qwen3-14B; OPSD uses the frozen step-0 Base model.",
     )
 
     # KL Settings
     parser.add_argument("--kl_type", type=str, default="reverse", choices=["reverse", "forward", "jsd"])
-    parser.add_argument("--kl_method", type=str, default="monte_carlo", choices=["monte_carlo", "full_vocab"])
-    parser.add_argument("--temperature", type=float, default=0.7)
-    parser.add_argument("--kl_token_clip", type=float, default=0.1,
+    parser.add_argument("--kl_method", type=str, default="full_vocab", choices=["monte_carlo", "full_vocab"])
+    parser.add_argument("--temperature", type=float, default=1.0)
+    parser.add_argument("--kl_token_clip", type=float, default=0.0,
                         help="Per-token KL clip (OPSD jsd_token_clip). 0 disables.")
     parser.add_argument("--beta", type=float, default=0.0,
                         help="Mixture coefficient for generalized JSD (only used when kl_type=jsd). "
@@ -51,11 +51,11 @@ def parse_args():
     parser.add_argument("--lora_alpha", type=int, default=128)
 
     # Training Settings
-    parser.add_argument("--learning_rate", type=float, default=2e-5)
+    parser.add_argument("--learning_rate", type=float, default=1e-6)
     parser.add_argument("--train_batch_size", type=int, default=1)
-    parser.add_argument("--gradient_accumulation_steps", type=int, default=4)
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=64)
     parser.add_argument("--total_epochs", type=int, default=1)
-    parser.add_argument("--max_length", type=int, default=20480)
+    parser.add_argument("--max_length", type=int, default=18432)
     parser.add_argument("--warmup_steps_ratio", type=float, default=0.1)
     parser.add_argument("--weight_decay", type=float, default=0.01)
     parser.add_argument("--min_lr_ratio", type=float, default=0.1)
@@ -83,6 +83,8 @@ def parse_args():
     parser.add_argument("--fsdp_size", type=int, default=-1)
     parser.add_argument("--ulysses_sequence_parallel_size", type=int, default=1)
     parser.add_argument("--max_token_len_per_gpu", type=int, default=None)
+    parser.add_argument("--use_dynamic_bsz", type=lambda x: x.lower() == "true", default=False)
+    parser.add_argument("--micro_batch_size_per_gpu", type=int, default=1)
     parser.add_argument("--use_remove_padding", type=lambda x: x.lower() == "true", default=True)
     parser.add_argument("--use_torch_compile", type=lambda x: x.lower() == "true", default=True)
     parser.add_argument("--param_offload", type=lambda x: x.lower() == "true", default=False)
@@ -105,8 +107,19 @@ def parse_args():
     parser.add_argument("--output_dir", type=str, required=True)
     parser.add_argument("--model_save_dir", type=str, default="/data/data/jiangli/models")
     parser.add_argument("--gen_results_dir", type=str, default="")
-    parser.add_argument("--wandb_project", type=str, default="verl-kl-training")
-    parser.add_argument("--wandb_run_name", type=str, default="")
+    parser.add_argument("--wandb_project", type=str, default=os.environ.get("WANDB_PROJECT", "trd"))
+    parser.add_argument("--wandb_run_name", type=str, default=os.environ.get("WANDB_RUN_NAME", ""))
+    parser.add_argument("--wandb_run_id", type=str, default="",
+                        help="Optional explicit W&B run id. Persisted state must agree when it already exists.")
+    parser.add_argument("--wandb_run_id_file", type=str, default=os.environ.get("WANDB_RUN_ID_FILE", ""),
+                        help="Shared JSON state file used by every train/eval segment of one experiment.")
+    parser.add_argument("--wandb_run_identity", type=str, default=os.environ.get("WANDB_RUN_IDENTITY", ""),
+                        help="Stable experiment identity used to derive a deterministic W&B run id.")
+    parser.add_argument("--wandb_global_step_offset", type=int,
+                        default=int(os.environ.get("WANDB_GLOBAL_STEP_OFFSET", "0")),
+                        help="Optimizer-step offset for segmented training on one W&B timeline.")
+    parser.add_argument("--wandb_total_training_steps", type=int, default=None,
+                        help="Full experiment optimizer-step count when this process trains only one segment.")
     parser.add_argument("--save_merged_model", type=lambda x: x.lower() == "true", default=True)
     parser.add_argument("--save_steps", type=int, default=100,
                         help="Save FSDP checkpoint every N optimizer steps; <=0 disables periodic saves. Final checkpoint is always saved.")
@@ -127,8 +140,11 @@ def parse_args():
 
     # Evaluation Settings
     parser.add_argument("--run_eval_after_training", type=lambda x: x.lower() == "true", default=False)
-    parser.add_argument("--eval_datasets", type=str, default="aime24,aime25,math500")
-    parser.add_argument("--eval_datasets_dir", type=str, default="/data/data/jiangli/huggingface/datasets")
+    parser.add_argument("--eval_datasets", type=str, default="aime25,aime26,hmmt26,amobench")
+    parser.add_argument("--eval_datasets_dir", type=str, default="data/eval_dataset/math")
+    parser.add_argument("--eval_fractions", type=str,
+                        default=os.environ.get("EVAL_FRACTIONS", "0.25,0.5,0.75,1"),
+                        help="Comma-separated fractions mapped to ceil(total_optimizer_steps * fraction).")
 
     # Diagnostic metrics (T1–T4 from y vs y' study)
     parser.add_argument("--grad_cosine_interval", type=int, default=0,
@@ -208,6 +224,8 @@ def main():
         fsdp_size=args.fsdp_size,
         ulysses_sequence_parallel_size=args.ulysses_sequence_parallel_size,
         max_token_len_per_gpu=args.max_token_len_per_gpu,
+        use_dynamic_bsz=args.use_dynamic_bsz,
+        micro_batch_size_per_gpu=args.micro_batch_size_per_gpu,
         use_remove_padding=args.use_remove_padding,
         use_torch_compile=args.use_torch_compile,
         param_offload=args.param_offload,
@@ -224,6 +242,11 @@ def main():
         gen_results_dir=args.gen_results_dir if args.gen_results_dir else args.output_dir,
         wandb_project=args.wandb_project,
         wandb_run_name=args.wandb_run_name,
+        wandb_run_id=args.wandb_run_id,
+        wandb_run_id_file=args.wandb_run_id_file,
+        wandb_run_identity=args.wandb_run_identity,
+        wandb_global_step_offset=args.wandb_global_step_offset,
+        wandb_total_training_steps=args.wandb_total_training_steps,
         save_merged_model=args.save_merged_model,
         save_steps=args.save_steps,
         max_ckpt_to_keep=args.max_ckpt_to_keep,
@@ -236,6 +259,7 @@ def main():
         run_eval_after_training=args.run_eval_after_training,
         eval_datasets=args.eval_datasets.split(",") if args.eval_datasets else [],
         eval_datasets_dir=args.eval_datasets_dir,
+        eval_fractions=args.eval_fractions,
         # Diagnostic metrics
         grad_cosine_interval=args.grad_cosine_interval,
         correction_token_phrases=args.correction_token_phrases,

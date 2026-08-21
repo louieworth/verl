@@ -15,6 +15,7 @@
 
 import os
 from functools import partial
+from numbers import Integral
 
 from tensordict.tensorclass import NonTensorData
 
@@ -45,6 +46,27 @@ from verl.workers.engine_workers import TrainingWorker
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_SFT_LOGGING_LEVEL", "WARN"))
+
+
+def _validate_stop_at_step(stop_at_step, resumed_global_step: int, total_training_steps: int) -> int | None:
+    """Validate and normalize an optional inclusive segment endpoint."""
+    if stop_at_step is None:
+        return None
+
+    if isinstance(stop_at_step, bool) or not isinstance(stop_at_step, Integral):
+        raise ValueError("trainer.stop_at_step must be an integer step")
+    normalized_stop = int(stop_at_step)
+    if normalized_stop <= 0:
+        raise ValueError("trainer.stop_at_step must be positive")
+    if normalized_stop > total_training_steps:
+        raise ValueError(
+            f"trainer.stop_at_step ({normalized_stop}) exceeds total_training_steps ({total_training_steps})"
+        )
+    if resumed_global_step > normalized_stop:
+        raise ValueError(
+            f"trainer.stop_at_step ({normalized_stop}) is behind resumed global step ({resumed_global_step})"
+        )
+    return normalized_stop
 
 
 class SFTTrainer:
@@ -314,6 +336,21 @@ class SFTTrainer:
         global_step = self.resume_global_step  # Start from resumed step
         last_valid_metric = None
 
+        stop_at_step = _validate_stop_at_step(
+            self.config.trainer.get("stop_at_step", None),
+            resumed_global_step=global_step,
+            total_training_steps=self.total_training_steps,
+        )
+        if global_step >= self.total_training_steps or global_step == stop_at_step:
+            log_with_rank(
+                f"Training already reached step {global_step}; "
+                f"configured endpoint is {stop_at_step or self.total_training_steps}. Nothing to do.",
+                logger=logger,
+                rank=0,
+                log_only_rank_0=True,
+            )
+            return
+
         log_with_rank(
             f"Total training steps: {self.total_training_steps},",
             logger=logger,
@@ -394,17 +431,22 @@ class SFTTrainer:
                         torch.tensor(batch_seqlens, device=self.device_name)
                     ).item()
                     total_tokens += metrics["train/global_tokens"]
-                    metrics["train/total_tokens(B)"] = total_tokens / 1e9
+                    # Segmented canonical runs resume the optimizer/global step
+                    # in a fresh process, so this counter intentionally covers
+                    # only the current process segment.
+                    metrics["train/segment_total_tokens(B)"] = total_tokens / 1e9
 
                     if self.engine.get_data_parallel_rank() == 0:
                         tracking.log(data=metrics, step=global_step)
 
                 is_last_step = global_step >= self.total_training_steps
-                is_valid_step = global_step % self.test_freq == 0
-                is_save_step = global_step % self.save_freq == 0
+                is_segment_end = stop_at_step is not None and global_step >= stop_at_step
+                is_terminal_step = is_last_step or is_segment_end
+                is_valid_step = self.test_freq > 0 and global_step % self.test_freq == 0
+                is_save_step = self.save_freq > 0 and global_step % self.save_freq == 0
 
                 # early exit or validation step
-                if is_last_step and self.val_dataloader is not None or (self.test_freq > 0 and is_valid_step):
+                if (is_terminal_step and self.val_dataloader is not None) or is_valid_step:
                     # Perform validation
                     val_losses = []
                     for val_data in self.val_dataloader:
@@ -428,11 +470,11 @@ class SFTTrainer:
                         last_valid_metric = metric
                     torch.distributed.barrier()
 
-                if is_last_step or (self.save_freq > 0 and is_save_step):
+                if is_terminal_step or is_save_step:
                     aggressive_empty_cache(force_sync=True)
                     self.ckpt_handler.save_checkpoint(step=global_step)
 
-                if is_last_step:
+                if is_terminal_step:
                     if is_logging:
                         print(f"Total time for train steps: {train_time:.2f}s")
                         print(f"Final validation metrics: {last_valid_metric}")

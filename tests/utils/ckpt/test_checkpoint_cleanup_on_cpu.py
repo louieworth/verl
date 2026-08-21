@@ -112,6 +112,27 @@ class TestCheckpointCleanupLogic:
         assert os.path.exists(ckpt_300)
         assert len(manager.previous_saved_paths) == 3
 
+    def test_registering_same_checkpoint_twice_is_idempotent(self, manager):
+        """A periodic save followed by the terminal save must not self-delete."""
+        ckpt_100 = self._create_checkpoint_dir(100)
+
+        manager.register_checkpoint(ckpt_100, max_ckpt_to_keep=1)
+        manager.register_checkpoint(ckpt_100, max_ckpt_to_keep=1)
+
+        assert os.path.exists(ckpt_100)
+        assert manager.previous_saved_paths == [ckpt_100]
+
+    def test_registering_symlink_alias_of_same_checkpoint_is_idempotent(self, manager):
+        ckpt_100 = self._create_checkpoint_dir(100)
+        alias = os.path.join(self.test_dir, "checkpoint_alias")
+        os.symlink(ckpt_100, alias, target_is_directory=True)
+
+        manager.register_checkpoint(ckpt_100, max_ckpt_to_keep=1)
+        manager.register_checkpoint(alias, max_ckpt_to_keep=1)
+
+        assert os.path.isdir(ckpt_100)
+        assert manager.previous_saved_paths == [alias]
+
     def test_full_save_cycle_max_ckpt_1(self, manager):
         """Simulate multiple save cycles with max_ckpt_to_keep=1."""
         # First save

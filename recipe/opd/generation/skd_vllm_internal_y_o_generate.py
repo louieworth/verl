@@ -254,6 +254,7 @@ def main() -> None:
         llm = LLM(**llm_kwargs)
         sampling_params = SamplingParams(
             max_tokens=args.max_tokens,
+            min_tokens=1,
             temperature=args.teacher_temperature,
             top_p=args.teacher_top_p,
             detokenize=False,

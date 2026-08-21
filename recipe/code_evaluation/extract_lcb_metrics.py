@@ -39,7 +39,7 @@ def load_rows(root: Path, aggregate_all: bool) -> tuple[list[dict], list[Path]]:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", required=True)
-    parser.add_argument("--pass_k", type=int, default=4)
+    parser.add_argument("--pass_k", type=int, default=16)
     parser.add_argument(
         "--aggregate_all",
         action="store_true",
@@ -52,6 +52,8 @@ def main() -> None:
         help="Fail unless this many unique question_id rows are present.",
     )
     args = parser.parse_args()
+    if args.pass_k <= 0:
+        raise SystemExit("--pass_k must be positive")
     root = Path(args.root)
     rows, paths = load_rows(root, args.aggregate_all)
     if args.expected_tasks is not None and len(rows) != args.expected_tasks:
@@ -64,7 +66,12 @@ def main() -> None:
     for row in rows:
         graded = row.get("graded_list") or []
         if not graded:
-            continue
+            raise SystemExit(f"LiveCodeBench task {row.get('question_id')} has no graded samples")
+        if len(graded) < args.pass_k:
+            raise SystemExit(
+                f"LiveCodeBench task {row.get('question_id')} has {len(graded)} samples; "
+                f"Avg@{args.pass_k}/Pass@{args.pass_k} requires at least {args.pass_k}"
+            )
         limited = graded[: args.pass_k]
         correct = sum(1 for value in limited if bool(value))
         avg_values.append(correct / len(limited))
@@ -73,6 +80,7 @@ def main() -> None:
         raise SystemExit(f"No LiveCodeBench graded_list entries found under {root}")
     print(f"avg={sum(avg_values) / len(avg_values)}")
     print(f"pass={sum(pass_values) / len(pass_values)}")
+    print(f"num_problems={len(avg_values)}")
 
 
 if __name__ == "__main__":

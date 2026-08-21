@@ -1,134 +1,113 @@
-# Copyright 2024 Bytedance Ltd. and/or its affiliates
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-"""
-Prepare HMMT (Harvard-MIT Mathematics Tournament) datasets for evaluation.
+#!/usr/bin/env python3
+"""Prepare HMMT February datasets for verl math evaluation."""
 
-Downloads HMMT 2023, 2024, and 2025 datasets from HuggingFace and converts them
-to the standard parquet format used in the evaluation pipeline.
-"""
+from __future__ import annotations
 
 import argparse
 import os
+import re
+import sys
+
 from datasets import load_dataset
-import pandas as pd
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(SCRIPT_DIR)))
+sys.path.insert(0, REPO_ROOT)
 
 
-def create_prompt(problem):
-    """Create a prompt from the problem statement."""
-    instruction = "Please reason step by step, and put your final answer within \\boxed{}."
-    return [
-        {"role": "user", "content": f"{problem}\n{instruction}"}
-    ]
+INSTRUCTION = "Please reason step by step, and put your final answer within \\boxed{}."
+HMMT_CONFIGS = {
+    "hmmt26": {
+        "hf_name": "MathArena/hmmt_feb_2026",
+        "revision": "02fba4f74d8e68e73e66a02d540fd979c05c274c",
+        "split": "train",
+        "expected_rows": 33,
+    },
+    "hmmt25": {"hf_name": "PraMamba/HMMT-202502", "split": "train"},
+    "hmmt24": {"hf_name": "MathArena/hmmt_feb_2024", "split": "train"},
+    "hmmt23": {"hf_name": "MathArena/hmmt_feb_2023", "split": "train"},
+}
 
 
-def process_hmmt_dataset(dataset_name, year, local_dataset_path):
-    """Process HMMT dataset and convert to parquet format."""
-    print(f"\nProcessing HMMT {year} from {dataset_name}...")
+def normalize_answer(answer_raw) -> str:
+    answer = str(answer_raw).strip()
+    match = re.fullmatch(r"\\boxed\{(.*)\}", answer, flags=re.DOTALL)
+    return match.group(1).strip() if match else answer
 
-    # Load dataset
-    try:
-        dataset = load_dataset(dataset_name, split="train")
-        print(f"  Loaded {len(dataset)} problems")
-    except Exception as e:
-        print(f"  Error loading dataset: {e}")
-        return None
 
-    # Process each example
-    data = []
-    for example in dataset:
-        # Extract problem and answer
-        problem = example.get("problem", "")
-        answer = example.get("answer", "")
-
-        # Skip if missing critical fields
-        if not problem or not answer:
-            continue
-
-        # Clean answer (extract numeric value if needed)
-        answer_str = str(answer).strip()
-        if "\\boxed" in answer_str:
-            # Extract from \boxed{...}
-            import re
-            match = re.search(r'\\boxed\{([^}]*)\}', answer_str)
-            if match:
-                answer_str = match.group(1)
-
-        # Create prompt
-        prompt = create_prompt(problem)
-
-        data.append({
-            "data_source": f"hmmt{year}",
-            "prompt": prompt,
+def make_map_fn(data_source: str):
+    def process_fn(example, idx):
+        problem = str(example.get("problem", "")).strip()
+        answer_raw = example.get("answer")
+        if not problem or answer_raw is None or not str(answer_raw).strip():
+            raise ValueError(f"{data_source} row {idx} is missing problem or answer")
+        return {
+            "data_source": data_source,
+            "prompt": [{"role": "user", "content": f"{problem}\n{INSTRUCTION}"}],
             "ability": "math",
-            "reward_model": {
-                "type": "rule",
-                "ground_truth": answer_str
-            },
+            "reward_model": {"style": "rule", "ground_truth": normalize_answer(answer_raw)},
             "extra_info": {
+                "index": idx,
+                "problem_idx": str(example.get("problem_idx", idx)),
                 "problem": problem,
-                "year": year
-            }
-        })
+                "answer": str(answer_raw),
+            },
+        }
 
-    # Convert to DataFrame and save as parquet
-    if data:
-        df = pd.DataFrame(data)
-        output_file = os.path.join(local_dataset_path, f"hmmt{year}/hmmt{year}_test.parquet")
-        os.makedirs(os.path.dirname(output_file), exist_ok=True)
-
-        # Check if file already exists
-        if os.path.exists(output_file):
-            print(f"  ✓ HMMT{year} dataset already exists at {output_file}, skipping...")
-            return output_file
-        else:
-            df.to_parquet(output_file)
-            print(f"  ✓ Saved {len(data)} problems to {output_file}")
-            return output_file
-    else:
-        print(f"  ✗ No valid problems found")
-        return None
+    return process_fn
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Prepare HMMT datasets for evaluation")
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Prepare HMMT datasets for verl evaluation")
+    parser.add_argument(
+        "--datasets",
+        default="hmmt26",
+        help="Comma-separated names. Canonical default: hmmt26; also supports hmmt23,hmmt24,hmmt25.",
+    )
+    parser.add_argument("--raw_dataset_root", default=None, help="Optional root containing raw HF repositories")
+    parser.add_argument("--local_save_dir", default="data/eval_dataset/math")
     parser.add_argument(
         "--local_dataset_path",
-        type=str,
-        default="/data/data/jiangli/huggingface/datasets",
-        help="Local path to save datasets"
+        default=None,
+        help="Deprecated output-root alias retained for existing scripts; prefer --local_save_dir.",
     )
+    parser.add_argument("--overwrite", action="store_true")
+    return parser.parse_args()
 
-    args = parser.parse_args()
 
-    print("=" * 60)
-    print("HMMT Dataset Preparation")
-    print("=" * 60)
-    print(f"Output directory: {args.local_dataset_path}")
+def main() -> None:
+    args = parse_args()
+    output_root = os.path.expanduser(args.local_dataset_path or args.local_save_dir)
+    selected = [name.strip().lower() for name in args.datasets.split(",") if name.strip()]
+    unknown = sorted(set(selected) - set(HMMT_CONFIGS))
+    if unknown:
+        raise ValueError(f"Unsupported HMMT datasets: {unknown}")
 
-    # Process HMMT datasets for different years
-    hmmt_datasets = [
-        ("PraMamba/HMMT-202502", "25"),  # HMMT February 2025
-        ("MathArena/hmmt_feb_2024", "24"),  # HMMT February 2024
-        ("MathArena/hmmt_feb_2023", "23"),  # HMMT February 2023
-    ]
+    for dataset_name in selected:
+        config = HMMT_CONFIGS[dataset_name]
+        output_dir = os.path.join(output_root, dataset_name)
+        output_path = os.path.join(output_dir, f"{dataset_name}_test.parquet")
+        if os.path.exists(output_path) and not args.overwrite:
+            print(f"Dataset {dataset_name} already exists at {output_path}, skipping...")
+            continue
 
-    for dataset_name, year in hmmt_datasets:
-        process_hmmt_dataset(dataset_name, year, args.local_dataset_path)
-
-    print("\n" + "=" * 60)
-    print("HMMT dataset preparation complete!")
-    print("=" * 60)
+        dataset_id = config["hf_name"]
+        if args.raw_dataset_root:
+            dataset_id = os.path.join(os.path.expanduser(args.raw_dataset_root), dataset_id)
+        print(f"Loading {dataset_id} ({config['split']})...")
+        load_kwargs = {"split": config["split"]}
+        if config.get("revision") and not args.raw_dataset_root:
+            load_kwargs["revision"] = config["revision"]
+        dataset = load_dataset(dataset_id, **load_kwargs)
+        if config.get("expected_rows") is not None and len(dataset) != config["expected_rows"]:
+            raise ValueError(
+                f"Expected {config['expected_rows']} {dataset_name} problems, found {len(dataset)}; "
+                "audit the upstream dataset before evaluating."
+            )
+        dataset = dataset.map(make_map_fn(dataset_name), with_indices=True, remove_columns=dataset.column_names)
+        os.makedirs(output_dir, exist_ok=True)
+        dataset.to_parquet(output_path)
+        print(f"Saved {len(dataset)} {dataset_name} problems to {output_path}")
 
 
 if __name__ == "__main__":

@@ -46,8 +46,8 @@ DRY_RUN_FLAG=""
 
 # Default Qwen3 math evaluation context allocation.
 export EVAL_PROMPT_LENGTH="${EVAL_PROMPT_LENGTH:-2048}"
-export EVAL_RESPONSE_LENGTH="${EVAL_RESPONSE_LENGTH:-38912}"
-export EVAL_MAX_MODEL_LEN="${EVAL_MAX_MODEL_LEN:-40960}"
+export EVAL_RESPONSE_LENGTH="${EVAL_RESPONSE_LENGTH:-16384}"
+export EVAL_MAX_MODEL_LEN="${EVAL_MAX_MODEL_LEN:-$((EVAL_PROMPT_LENGTH + EVAL_RESPONSE_LENGTH))}"
 
 if [ "${1:-}" = "--dry-run" ]; then
     DRY_RUN_FLAG="--dry_run"
@@ -81,16 +81,20 @@ if [ ${#MODEL_PATHS[@]} -eq 0 ]; then
     exit 1
 fi
 
+is_hf_repo_id() {
+    [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$ ]]
+}
+
 for mp in "${MODEL_PATHS[@]}"; do
-    if [ ! -d "${mp}" ]; then
-        echo "ERROR: Model not found at ${mp}"
+    if [ ! -d "${mp}" ] && ! is_hf_repo_id "${mp}"; then
+        echo "ERROR: Model must be an existing local directory or a Hugging Face repo ID: ${mp}"
         exit 1
     fi
 done
 
 TOKENIZER_PATH=${TOKENIZER_PATH:-""}
-if [ -n "${TOKENIZER_PATH}" ] && [ ! -d "${TOKENIZER_PATH}" ]; then
-    echo "ERROR: Tokenizer path not found at ${TOKENIZER_PATH}"
+if [ -n "${TOKENIZER_PATH}" ] && [ ! -d "${TOKENIZER_PATH}" ] && ! is_hf_repo_id "${TOKENIZER_PATH}"; then
+    echo "ERROR: Tokenizer must be an existing local directory or a Hugging Face repo ID: ${TOKENIZER_PATH}"
     exit 1
 fi
 
@@ -111,16 +115,21 @@ if [ "$GEN_TP" -gt "$TOTAL_GPUS" ] || [ $((TOTAL_GPUS % GEN_TP)) -ne 0 ]; then
 fi
 
 # Eval datasets
-EVAL_DATASETS_DIR=${EVAL_DATASETS_DIR:-/data/data/jiangli/huggingface/datasets}
+EVAL_DATASETS_DIR=${EVAL_DATASETS_DIR:-data/eval_dataset/math}
 
 # Datasets to test
-# DEFAULT_DATASETS="math500 hmmt25 beyondaime amobench gsm8k"
-DEFAULT_DATASETS="aime24 aime25 hmmt25 beyondaime amobench"
+DEFAULT_DATASETS="aime25 aime26 hmmt26 amobench"
 DATASETS_TO_TEST=${DATASETS:-"${DEFAULT_DATASETS}"}
 DATASETS_TO_TEST_CSV=$(echo "${DATASETS_TO_TEST}" | tr ' ' ',')
+METRICS_DATASETS=${EVAL_ALL_DATASETS:-${EVAL_DATASETS:-${DATASETS_TO_TEST}}}
+METRICS_DATASETS_CSV=$(echo "${METRICS_DATASETS}" | tr ' ' ',')
 
 # Pass@k
 PASS_K=${PASS_K:-16}
+EVAL_TEMPERATURE=${EVAL_TEMPERATURE:-1.0}
+EVAL_TOP_P=${EVAL_TOP_P:-0.7}
+EVAL_SEED=${EVAL_SEED:-42}
+EVAL_SIGNATURE="n${PASS_K}_t${EVAL_TEMPERATURE}_p${EVAL_TOP_P}_prompt${EVAL_PROMPT_LENGTH}_response${EVAL_RESPONSE_LENGTH}_seed${EVAL_SEED}_base"
 GEN_OUTPUT_BASE_DIR=${GEN_OUTPUT_BASE_DIR:-gen_results/eval}
 RESULTS_BASE_DIR=${RESULTS_BASE_DIR:-results}
 WRITE_PASS16_AGGREGATES=${WRITE_PASS16_AGGREGATES:-true}
@@ -138,8 +147,13 @@ evaluate_one_model() {
     #   /.../<base>_kl_<type>_<sample>/hf_merged
     #   /.../<base>_kl_<type>_<sample>/epochN/hf_merged
     local FULL_MODEL_DIR FULL_MODEL_NAME EPOCH_SUFFIX BASE_MODEL_NAME MODEL_NAME
-    FULL_MODEL_DIR=$(dirname "${MODEL_PATH}")
-    FULL_MODEL_NAME=$(basename "${FULL_MODEL_DIR}")
+    if [ "$(basename "${MODEL_PATH}")" = "hf_merged" ]; then
+        FULL_MODEL_DIR=$(dirname "${MODEL_PATH}")
+        FULL_MODEL_NAME=$(basename "${FULL_MODEL_DIR}")
+    else
+        FULL_MODEL_DIR="${MODEL_PATH}"
+        FULL_MODEL_NAME=$(basename "${MODEL_PATH}")
+    fi
 
     if [[ "${FULL_MODEL_NAME}" =~ ^epoch([0-9]+)$ ]]; then
         EPOCH_SUFFIX="_${FULL_MODEL_NAME}"
@@ -152,7 +166,7 @@ evaluate_one_model() {
     BASE_MODEL_NAME="${EVAL_BASE_MODEL_NAME:-$(echo "${FULL_MODEL_NAME}" | sed -E 's/_kl_.*$//')}"
     MODEL_NAME="${EVAL_MODEL_NAME:-${FULL_MODEL_NAME}${EPOCH_SUFFIX}}"
 
-    local GEN_OUTPUT_DIR="${EVAL_OUTPUT_DIR:-${GEN_OUTPUT_BASE_DIR}/${FULL_MODEL_NAME}}"
+    local GEN_OUTPUT_DIR="${EVAL_OUTPUT_DIR:-${GEN_OUTPUT_BASE_DIR}/${FULL_MODEL_NAME}/${EVAL_SIGNATURE}}"
     mkdir -p "${GEN_OUTPUT_DIR}"
 
     local RESULTS_FILE="${EVAL_RESULTS_FILE:-${RESULTS_BASE_DIR}/${BASE_MODEL_NAME}/results.json}"
@@ -183,8 +197,13 @@ evaluate_one_model() {
         --datasets "${DATASETS_TO_TEST_CSV}"
         --datasets_dir "${EVAL_DATASETS_DIR}"
         --pass_k "${PASS_K}"
-        --temperature 0.6
-        --top_p 0.95
+        --temperature "${EVAL_TEMPERATURE}"
+        --top_p "${EVAL_TOP_P}"
+        --seed "${EVAL_SEED}"
+        --prompt_length "${EVAL_PROMPT_LENGTH}"
+        --response_length "${EVAL_RESPONSE_LENGTH}"
+        --max_model_len "${EVAL_MAX_MODEL_LEN}"
+        --force_base_prompt
         --nnodes "${NNODES}"
         --n_gpus_per_node "${NGPUS_PER_NODE}"
         --gen_tp "${GEN_TP}"
@@ -198,12 +217,41 @@ evaluate_one_model() {
     if [ "${PASS_K}" = "16" ] && [ "${WRITE_PASS16_AGGREGATES}" = "true" ] && [ -f "${RESULTS_FILE}" ]; then
         echo ""
         echo "Computing avg@16/pass@16 aggregates from generated responses..."
-        "${PYTHON_BIN}" "$SCRIPT_DIR/compute_pass_at_k_from_gen.py" \
-            --gen_dir "${GEN_OUTPUT_DIR}" \
-            --results_file "${RESULTS_FILE}" \
-            --model_name "${MODEL_NAME}" \
-            --model_path "${MODEL_PATH}" \
-            --datasets "${DATASETS_TO_TEST_CSV}"
+        local METRICS_FILE="${EVAL_METRICS_FILE:-${GEN_OUTPUT_DIR}/metrics.json}"
+        local METRICS_CMD=(
+            "${PYTHON_BIN}" "$SCRIPT_DIR/compute_pass_at_k_from_gen.py"
+            --gen_dir "${GEN_OUTPUT_DIR}"
+            --results_file "${RESULTS_FILE}"
+            --metrics_file "${METRICS_FILE}"
+            --model_name "${MODEL_NAME}"
+            --model_path "${MODEL_PATH}"
+            --datasets "${METRICS_DATASETS_CSV}"
+            --n_samples "${PASS_K}"
+            --prompt_length "${EVAL_PROMPT_LENGTH}"
+            --response_length "${EVAL_RESPONSE_LENGTH}"
+            --temperature "${EVAL_TEMPERATURE}"
+            --top_p "${EVAL_TOP_P}"
+            --seed "${EVAL_SEED}"
+        )
+        if [ -n "${EVAL_STEP:-${WANDB_GLOBAL_STEP:-}}" ]; then
+            METRICS_CMD+=(--step "${EVAL_STEP:-${WANDB_GLOBAL_STEP}}")
+        fi
+        if [ -n "${EVAL_MILESTONE_FRACTION:-}" ]; then
+            METRICS_CMD+=(--milestone_fraction "${EVAL_MILESTONE_FRACTION}")
+        fi
+        "${METRICS_CMD[@]}"
+
+        if [ -n "${WANDB_RUN_ID:-}" ]; then
+            if [ -z "${WANDB_PROJECT:-}" ] || [ -z "${WANDB_GLOBAL_STEP:-}" ]; then
+                echo "ERROR: WANDB_RUN_ID requires WANDB_PROJECT and WANDB_GLOBAL_STEP" >&2
+                exit 1
+            fi
+            if [ "${EVAL_KIND:-milestone}" != "base" ] && [ -z "${EVAL_MILESTONE_FRACTION:-}" ]; then
+                echo "ERROR: milestone W&B eval logging requires EVAL_MILESTONE_FRACTION" >&2
+                exit 1
+            fi
+            "${PYTHON_BIN}" "$SCRIPT_DIR/log_metrics_wandb.py" --metrics_file "${METRICS_FILE}"
+        fi
     fi
 
     if [ -n "${EVAL_METADATA_FILE:-}" ] && [ -f "${EVAL_METADATA_FILE}" ] && [ -f "${RESULTS_FILE}" ]; then
@@ -282,7 +330,7 @@ echo ""
 
 if [ -n "$DRY_RUN_FLAG" ]; then
     echo "Datasets: $DATASETS_TO_TEST"
-    echo "Sampling: pass_k=$PASS_K temperature=0.6 top_p=0.95"
+    echo "Sampling: pass_k=$PASS_K temperature=$EVAL_TEMPERATURE top_p=$EVAL_TOP_P seed=$EVAL_SEED prompt_format=base_completion"
     echo "Lengths: prompt=$EVAL_PROMPT_LENGTH response=$EVAL_RESPONSE_LENGTH max_model=$EVAL_MAX_MODEL_LEN"
     echo "Dry run: configuration validated; no model was loaded."
     exit 0

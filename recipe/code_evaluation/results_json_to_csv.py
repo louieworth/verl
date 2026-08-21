@@ -14,7 +14,12 @@ DATASETS = ["humaneval_plus", "mbpp_plus", "livecodebench_v6"]
 
 
 def fieldnames(pass_k: int) -> list[str]:
-    return META_COLUMNS + [f"{d}_Avg@{pass_k}" for d in DATASETS] + [f"{d}_Pass@{pass_k}" for d in DATASETS]
+    return (
+        META_COLUMNS
+        + [f"{d}_Avg@{pass_k}" for d in DATASETS]
+        + [f"{d}_Pass@{pass_k}" for d in DATASETS]
+        + [f"macro_Avg@{pass_k}", f"macro_Pass@{pass_k}"]
+    )
 
 
 def parse_meta(key: str) -> dict[str, str]:
@@ -50,7 +55,7 @@ def fmt(v: Any) -> Any:
     return f"{v:.10g}" if isinstance(v, float) else v
 
 
-def build_rows(results: dict[str, dict[str, Any]], pass_k: int = 4) -> list[dict[str, Any]]:
+def build_rows(results: dict[str, dict[str, Any]], pass_k: int = 16) -> list[dict[str, Any]]:
     rows = []
     for key, entry in results.items():
         row = parse_meta(key)
@@ -62,6 +67,8 @@ def build_rows(results: dict[str, dict[str, Any]], pass_k: int = 4) -> list[dict
             row[f"{d}_Pass@{pass_k}"] = fmt(
                 entry.get(f"{d}_pass{pass_k}", entry.get(f"{d}_Pass@{pass_k}", ""))
             )
+        row[f"macro_Avg@{pass_k}"] = fmt(entry.get(f"macro_avg{pass_k}", ""))
+        row[f"macro_Pass@{pass_k}"] = fmt(entry.get(f"macro_pass{pass_k}", ""))
         rows.append(row)
     return rows
 
@@ -71,7 +78,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--results_file", required=True)
     parser.add_argument("--output_file", default="")
-    parser.add_argument("--pass_k", type=int, default=int(os.environ.get("PASS_K", "4")))
+    parser.add_argument("--pass_k", type=int, default=int(os.environ.get("PASS_K", "16")))
     args = parser.parse_args()
     if args.pass_k <= 0:
         parser.error("--pass_k must be positive")

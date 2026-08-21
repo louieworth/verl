@@ -163,6 +163,17 @@ class BaseCheckpointManager:
         Adds the new checkpoint path to tracking and removes excess old
         checkpoints beyond max_ckpt_to_keep.
         """
+        # A terminal training step may be saved once by the periodic cadence
+        # and again by the end-of-run safeguard. Treat repeated registration
+        # of the same directory as an idempotent refresh. Otherwise with
+        # max_ckpt_to_keep=1 the first list entry and ``new_path`` refer to the
+        # same directory, and retention deletes the checkpoint just saved.
+        normalized_new_path = os.path.realpath(os.path.abspath(new_path))
+        self.previous_saved_paths = [
+            saved_path
+            for saved_path in self.previous_saved_paths
+            if os.path.realpath(os.path.abspath(saved_path)) != normalized_new_path
+        ]
         self.previous_saved_paths.append(new_path)
         if not (max_ckpt_to_keep and isinstance(max_ckpt_to_keep, int) and max_ckpt_to_keep > 0):
             return

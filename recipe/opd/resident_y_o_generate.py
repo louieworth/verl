@@ -52,7 +52,13 @@ def main() -> None:
         generate(server_addresses, model_path, args.n_samples, sampling_params, chat_numpy)
     )
     results = list(itertools.chain.from_iterable(gen_results))
-    results = np.array([result.choices[0].message.content for result in results])
+    results = np.array(
+        [
+            (result.choices[0].text if hasattr(result.choices[0], "text") else result.choices[0].message.content)
+            or ""
+            for result in results
+        ]
+    )
     results = np.reshape(results, (-1, args.n_samples))
     if results.shape != (len(chat_lst), args.n_samples):
         raise RuntimeError(f"unexpected result shape {results.shape}; expected {(len(chat_lst), args.n_samples)}")

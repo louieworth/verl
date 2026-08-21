@@ -63,7 +63,13 @@ def test_eval_name_includes_prompt_mode_suffix():
         use_initial_response=True,
     )
 
-    assert build_eval_tag(rewrite_config) == "kl_forward_monte_carlo_rewrite"
-    assert build_eval_model_name(rewrite_config) == "Qwen3-4B-Instruct-2507_kl_forward_monte_carlo_rewrite_epoch2"
-    assert build_eval_tag(correction_config) == "kl_reverse_monte_carlo_correction"
-    assert build_eval_model_name(correction_config) == "Qwen3-4B-Instruct-2507_kl_reverse_monte_carlo_correction_epoch2"
+    assert build_eval_tag(rewrite_config) == "kl_forward_monte_carlo_rewrite_clip00"
+    assert (
+        build_eval_model_name(rewrite_config)
+        == "Qwen3-4B-Instruct-2507_kl_forward_monte_carlo_rewrite_clip00_epoch2"
+    )
+    assert build_eval_tag(correction_config) == "kl_reverse_monte_carlo_correction_clip00"
+    assert (
+        build_eval_model_name(correction_config)
+        == "Qwen3-4B-Instruct-2507_kl_reverse_monte_carlo_correction_clip00_epoch2"
+    )

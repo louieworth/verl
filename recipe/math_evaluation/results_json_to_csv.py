@@ -3,8 +3,8 @@
 
 The JSON remains the source of truth. This script derives a flat table with one
 row per evaluated model and stable metadata columns parsed from the OPD/OPSD
-model key. The exported metric columns are intentionally compact: five avg@16
-columns, then five pass@16 columns for the canonical math eval datasets.
+model key. The exported metric columns contain the four canonical-suite
+datasets and their unweighted macro Avg@16/Pass@16.
 """
 
 from __future__ import annotations
@@ -34,18 +34,20 @@ META_COLUMNS = [
 ]
 
 SUMMARY_DATASETS = [
-    "aime24",
     "aime25",
-    "hmmt25",
-    "beyondaime",
+    "aime26",
+    "hmmt26",
     "amobench",
 ]
 
-AVG16_COLUMNS = [f"{dataset}_avg@16" for dataset in SUMMARY_DATASETS]
-PASS16_COLUMNS = [f"{dataset}_pass@16" for dataset in SUMMARY_DATASETS]
+AVG16_COLUMNS = [f"{dataset}_avg@16" for dataset in SUMMARY_DATASETS] + ["macro_avg@16"]
+PASS16_COLUMNS = [f"{dataset}_pass@16" for dataset in SUMMARY_DATASETS] + ["macro_pass@16"]
 SUMMARY_COLUMNS = AVG16_COLUMNS + PASS16_COLUMNS
 
 DATASET_ORDER = SUMMARY_DATASETS + [
+    "aime24",
+    "hmmt25",
+    "beyondaime",
     "math500",
     "gsm8k",
     "openai/gsm8k",
@@ -205,9 +207,15 @@ def rows_for_results(
     for model_key, entry in results.items():
         row = parse_model_key(model_key, fallback_model=fallback_model)
         for dataset in SUMMARY_DATASETS:
-            row[f"{dataset}_avg@16"] = format_scalar(entry.get(f"{dataset}_avg_pass1_generation_pass_16", ""))
+            row[f"{dataset}_avg@16"] = format_scalar(
+                entry.get(f"{dataset}_avg16", entry.get(f"{dataset}_avg_pass1_generation_pass_16", ""))
+            )
+        row["macro_avg@16"] = format_scalar(entry.get("macro_avg16", ""))
         for dataset in SUMMARY_DATASETS:
-            row[f"{dataset}_pass@16"] = format_scalar(entry.get(f"{dataset}_pass16_generation_pass_16", ""))
+            row[f"{dataset}_pass@16"] = format_scalar(
+                entry.get(f"{dataset}_pass16", entry.get(f"{dataset}_pass16_generation_pass_16", ""))
+            )
+        row["macro_pass@16"] = format_scalar(entry.get("macro_pass16", ""))
         rows.append(row)
     return rows
 

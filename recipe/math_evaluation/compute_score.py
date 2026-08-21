@@ -14,11 +14,23 @@
 
 
 def compute_score_data_source(data_source, response, ground_truth):
-    if data_source in ["openai/gsm8k", "gsm8k"]:
+    aliases = {
+        "math-ai/aime26": "aime26",
+        "matharena/aime_2026": "aime26",
+        "aime_2026": "aime26",
+        "matharena/hmmt_feb_2026": "hmmt26",
+        "hmmt_feb_2026": "hmmt26",
+        "amo-bench": "amobench",
+        "meituan-longcat/amo-bench": "amobench",
+        "deepscaler": "deepscaler",
+    }
+    normalized_source = aliases.get(str(data_source).strip().lower(), str(data_source).strip())
+
+    if normalized_source in ["openai/gsm8k", "gsm8k"]:
         from verl.utils.reward_score import gsm8k
 
         return gsm8k.compute_score(response, ground_truth)
-    if data_source == "amobench":
+    if normalized_source == "amobench":
         from verl.utils.reward_score import amobench_parser_reward
 
         return amobench_parser_reward.compute_score(response, ground_truth)
@@ -27,15 +39,15 @@ def compute_score_data_source(data_source, response, ground_truth):
 
     # Math competition datasets - all use the same scoring function
     math_datasets = [
-        "aime24", "aime25",  # AIME competitions
+        "aime24", "aime25", "aime26",  # AIME competitions
         "amc23",             # AMC competitions
         "math500",           # MATH benchmark
-        "hmmt25", "hmmt24", "hmmt23",  # HMMT competitions
+        "hmmt26", "hmmt25", "hmmt24", "hmmt23",  # HMMT competitions
         "beyondaime",        # BeyondAIME benchmark
         "deepscaleR", "deepscaler",  # DeepScaleR training data
     ]
 
-    if data_source in math_datasets:
+    if normalized_source in math_datasets:
         return compute_score(response, ground_truth)
     else:
         raise ValueError(f"Unknown data source: {data_source}")

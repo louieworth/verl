@@ -26,6 +26,40 @@ from typing import Any
 import orjson
 
 
+def canonical_wandb_training_metrics(data: dict[str, Any], step: int) -> dict[str, Any]:
+    """Add stable ``train/*`` aliases while retaining trainer-native metrics.
+
+    SFT already emits most values under ``train/*`` while GRPO uses actor,
+    critic, response-length, and perf namespaces.  A compact shared namespace
+    lets the four canonical W&B projects use the same dashboard panels without
+    discarding the more detailed native signals.
+    """
+    payload = dict(data)
+    aliases = {
+        "train/loss": ("train/loss", "actor/pg_loss"),
+        "train/learning_rate": ("train/learning_rate", "train/lr", "actor/lr"),
+        "train/grad_norm": ("train/grad_norm", "actor/grad_norm"),
+        "train/reward": ("train/reward", "critic/score/mean"),
+        "train/reward_after_kl": ("train/reward_after_kl", "critic/rewards/mean"),
+        "train/kl_loss": ("train/kl_loss", "actor/kl_loss"),
+        "train/entropy": ("train/entropy", "actor/entropy"),
+        "train/response_tokens": ("train/response_tokens", "response_length/mean"),
+        "train/step_time_sec": ("train/step_time_sec", "perf/time_per_step"),
+        "train/mfu": ("train/mfu", "perf/mfu/actor"),
+        "train/epoch": ("train/epoch", "training/epoch"),
+    }
+    found_training_metric = False
+    for target, candidates in aliases.items():
+        for candidate in candidates:
+            if candidate in payload:
+                payload.setdefault(target, payload[candidate])
+                found_training_metric = True
+                break
+    if found_training_metric:
+        payload.setdefault("train/global_step", step)
+    return payload
+
+
 class Tracking:
     """A unified tracking interface for logging experiment data to multiple backends.
 
@@ -61,17 +95,41 @@ class Tracking:
                 assert backend in self.supported_backend, f"{backend} is not supported"
 
         self.logger = {}
+        self._wandb_uses_global_step = False
 
         if "tracking" in default_backend or "wandb" in default_backend:
             import os
 
             import wandb
 
+            from verl.utils.wandb_metadata import (
+                merge_opd_wandb_config,
+                wandb_init_metadata_from_env,
+            )
+
             settings = None
             if config and config["trainer"].get("wandb_proxy", None):
                 settings = wandb.Settings(https_proxy=config["trainer"]["wandb_proxy"])
             entity = os.environ.get("WANDB_ENTITY", None)
-            wandb.init(project=project_name, name=experiment_name, entity=entity, config=config, settings=settings)
+            wandb_init_kwargs = {
+                "project": project_name,
+                "name": experiment_name,
+                "entity": entity,
+                "config": merge_opd_wandb_config(config),
+                "settings": settings,
+            }
+            wandb_init_kwargs.update(wandb_init_metadata_from_env())
+            wandb_run_id = os.environ.get("WANDB_RUN_ID")
+            wandb_resume = os.environ.get("WANDB_RESUME")
+            if wandb_run_id:
+                wandb_init_kwargs["id"] = wandb_run_id
+            if wandb_resume:
+                wandb_init_kwargs["resume"] = wandb_resume
+            wandb.init(**wandb_init_kwargs)
+            self._wandb_uses_global_step = bool(wandb_run_id)
+            if self._wandb_uses_global_step:
+                wandb.define_metric("global_step")
+                wandb.define_metric("*", step_metric="global_step")
             self.logger["wandb"] = wandb
 
         if "trackio" in default_backend:
@@ -162,7 +220,12 @@ class Tracking:
     def log(self, data, step, backend=None):
         for default_backend, logger_instance in self.logger.items():
             if backend is None or default_backend in backend:
-                logger_instance.log(data=data, step=step)
+                if default_backend == "wandb" and self._wandb_uses_global_step:
+                    wandb_data = canonical_wandb_training_metrics(data, step)
+                    wandb_data["global_step"] = step
+                    logger_instance.log(data=wandb_data)
+                else:
+                    logger_instance.log(data=data, step=step)
 
     def __del__(self):
         if "wandb" in self.logger:
@@ -371,11 +434,18 @@ class ValidationGenerationsLogger:
         self._log_generations_to_wandb(samples, step, vemlp_wandb)
 
     def log_generations_to_wandb(self, samples, step):
+        import os
+
         import wandb
 
-        self._log_generations_to_wandb(samples, step, wandb)
+        self._log_generations_to_wandb(
+            samples,
+            step,
+            wandb,
+            use_global_step=bool(os.environ.get("WANDB_RUN_ID")),
+        )
 
-    def _log_generations_to_wandb(self, samples, step, wandb):
+    def _log_generations_to_wandb(self, samples, step, wandb, *, use_global_step=False):
         """Log samples to wandb as a table"""
 
         # Create column names for all samples
@@ -401,7 +471,12 @@ class ValidationGenerationsLogger:
 
         # Update reference and log
         if wandb.run is not None:
-            wandb.log({"val/generations": new_table}, step=step)
+            payload = {"val/generations": new_table}
+            if use_global_step:
+                payload["global_step"] = step
+                wandb.log(payload)
+            else:
+                wandb.log(payload, step=step)
         self.validation_table = new_table
 
     def log_generations_to_swanlab(self, samples, step):

@@ -1,12 +1,20 @@
-# Keep the prepared DeepScaleR parquet in Git. Rebuild TACO and raw/download
-# artifacts on each training server.
+# Canonical TACO artifacts remain ignored and are transported byte-for-byte
+# through the Git-safe chunk bundle under recipe/opd/train_data_bundle/.
+# The two smaller canonical OpenThoughts parquets are checked into Git so a
+# fresh clone can launch math experiments without a preparation step.
 /train_dataset/*
 !/train_dataset/deepscaler/
 !/train_dataset/deepscaler/train_grpo.parquet
+!/train_dataset/openthoughts_math_30k_opsd/
+!/train_dataset/openthoughts_math_30k_opsd/manifest.json
+!/train_dataset/openthoughts_math_30k_opsd/train_grpo.parquet
+!/train_dataset/openthoughts_math_30k_opsd/train_sft.parquet
 /download_cache/
 
-# LiveCodeBench release_v6 is about 4.2 GB. The runtime copy is rebuilt from
-# external/LiveCodeBench by the GRPO preparation script.
+# Code eval assets are machine-local. LiveCodeBench release_v6 is about 4.2 GB;
+# prepare_code.sh downloads it and rebuilds the runtime copy on each fresh
+# Docker/EC2 worker.
+/eval_dataset/code/evalplus/
 /eval_dataset/code/livecodebench/
 /eval_dataset/code/LiveCodeBench/
 /eval_dataset/code/huggingface_cache/
@@ -16,3 +24,4 @@
 !/eval_dataset/math/
 !/eval_dataset/math/**/
 !/eval_dataset/math/**/*.parquet
+/eval_dataset/math/huggingface_cache/**

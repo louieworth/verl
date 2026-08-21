@@ -123,6 +123,10 @@ trainer:
   # Total training steps (can be set explicitly or derived from epochs)
   total_training_steps: null
 
+  # Optional inclusive step at which to checkpoint and return. The optimizer
+  # schedule still uses total_training_steps so the run can resume later.
+  stop_at_step: null
+
   # Project name for experiment tracking (e.g., wandb)
   project_name: verl_examples
 

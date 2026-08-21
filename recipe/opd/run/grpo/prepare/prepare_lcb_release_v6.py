@@ -18,6 +18,7 @@ FILE_NAMES = [
     "test5.jsonl",
     "test6.jsonl",
 ]
+LCB_REVISION = "0fe84c3912ea0c4d4a78037083943e8f0c4dd505"
 
 
 def main() -> None:
@@ -39,6 +40,7 @@ def main() -> None:
     snapshot_download(
         repo_id="livecodebench/code_generation_lite",
         repo_type="dataset",
+        revision=LCB_REVISION,
         local_dir=str(output_dir),
         allow_patterns=FILE_NAMES,
     )

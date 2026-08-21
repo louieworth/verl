@@ -24,6 +24,7 @@ import time
 import uuid
 from collections import defaultdict
 from copy import deepcopy
+from numbers import Integral
 from pprint import pprint
 from typing import Any, Optional
 
@@ -65,6 +66,27 @@ from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
 from verl.workers.config import FSDPEngineConfig
 from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
+
+
+def _validate_stop_at_step(stop_at_step, resumed_global_step: int, total_training_steps: int) -> Optional[int]:
+    """Validate and normalize an optional inclusive segment endpoint."""
+    if stop_at_step is None:
+        return None
+
+    if isinstance(stop_at_step, bool) or not isinstance(stop_at_step, Integral):
+        raise ValueError("trainer.stop_at_step must be an integer step")
+    normalized_stop = int(stop_at_step)
+    if normalized_stop <= 0:
+        raise ValueError("trainer.stop_at_step must be positive")
+    if normalized_stop > total_training_steps:
+        raise ValueError(
+            f"trainer.stop_at_step ({normalized_stop}) exceeds total_training_steps ({total_training_steps})"
+        )
+    if resumed_global_step > normalized_stop:
+        raise ValueError(
+            f"trainer.stop_at_step ({normalized_stop}) is behind resumed global step ({resumed_global_step})"
+        )
+    return normalized_stop
 
 
 def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, kl_penalty="kl"):
@@ -1241,6 +1263,19 @@ class RayPPOTrainer:
 
         # load checkpoint and update weights before doing anything
         self._load_checkpoint()
+
+        stop_at_step = _validate_stop_at_step(
+            self.config.trainer.get("stop_at_step", None),
+            resumed_global_step=self.global_steps,
+            total_training_steps=self.total_training_steps,
+        )
+        if self.global_steps >= self.total_training_steps or self.global_steps == stop_at_step:
+            pprint(
+                f"Training already reached step {self.global_steps}; "
+                f"configured endpoint is {stop_at_step or self.total_training_steps}. Nothing to do."
+            )
+            return
+
         self.checkpoint_manager.update_weights(self.global_steps)
 
         current_epoch = self.global_steps // len(self.train_dataloader)
@@ -1315,6 +1350,7 @@ class RayPPOTrainer:
                 )
 
                 is_last_step = self.global_steps >= self.total_training_steps
+                is_segment_end = stop_at_step is not None and self.global_steps >= stop_at_step
                 with marked_timer("step", timing_raw):
                     # generate a batch
                     with marked_timer("gen", timing_raw, color="red"):
@@ -1548,13 +1584,15 @@ class RayPPOTrainer:
                     max_train_duration_seconds is not None
                     and training_elapsed_seconds >= max_train_duration_seconds
                 )
-                is_terminal_step = is_last_step or is_time_limit_reached
+                is_terminal_step = is_last_step or is_segment_end or is_time_limit_reached
                 if is_time_limit_reached:
                     print(
                         f"Training time limit reached after step {self.global_steps}: "
                         f"{training_elapsed_seconds:.1f}/{max_train_duration_seconds:.1f} seconds"
                     )
-                if save_at_end and is_terminal_step and not checkpoint_saved_this_step:
+                # A segment endpoint is a resumability boundary, so it always
+                # gets a checkpoint even when save_freq/save_at_end are disabled.
+                if (is_segment_end or (save_at_end and is_terminal_step)) and not checkpoint_saved_this_step:
                     with marked_timer("save_checkpoint", timing_raw, color="green"):
                         self._save_checkpoint()
                     checkpoint_saved_this_step = True
@@ -1591,8 +1629,9 @@ class RayPPOTrainer:
                     {
                         "training/global_step": self.global_steps,
                         "training/epoch": epoch,
-                        "training/elapsed_seconds": training_elapsed_seconds,
+                        "training/segment_elapsed_seconds": training_elapsed_seconds,
                         "training/time_limit_reached": float(is_time_limit_reached),
+                        "training/segment_end_reached": float(is_segment_end),
                     }
                 )
                 # collect metrics

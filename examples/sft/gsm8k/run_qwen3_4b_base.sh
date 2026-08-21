@@ -1,3 +1,4 @@
+: "${WANDB_API_KEY:?Set WANDB_API_KEY in the runtime environment}"
 set -x
 
 if [ "$#" -lt 2 ]; then
@@ -7,9 +8,6 @@ fi
 
 nproc_per_node=4
 save_path=$2
-
-export WANDB_API_KEY=9d45bb78a65fb0f3b0402a9eae36ed832ae8cbdc
-
 
 # Shift the arguments so $@ refers to the rest
 shift 2

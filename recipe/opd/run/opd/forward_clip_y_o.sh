@@ -5,7 +5,7 @@
 #
 # Applicable knobs (override via env):
 #   MODEL_PATH              : student model (default Qwen/Qwen3-1.7B)
-#   TEACHER_MODEL_PATH      : teacher model (default Qwen/Qwen3-8B, must differ from student)
+#   TEACHER_MODEL_PATH      : teacher model (default Qwen/Qwen3-14B, must differ from student)
 #   Y_MODE                  : "y_o" (default) | "y_r"
 #   MAX_PROMPT_LENGTH       : auto-derived teacher prompt budget
 #   MAX_RESPONSE_LENGTH     : default 8192
@@ -23,7 +23,7 @@ set -e
 set -o pipefail
 
 export MODEL_PATH="${MODEL_PATH:-Qwen/Qwen3-1.7B}"
-export TEACHER_MODEL_PATH="${TEACHER_MODEL_PATH:-Qwen/Qwen3-8B}"
+export TEACHER_MODEL_PATH="${TEACHER_MODEL_PATH:-Qwen/Qwen3-14B}"
 export WANDB_MODE="${WANDB_MODE:-offline}"
 
 export DISTILL_MODE="opd"

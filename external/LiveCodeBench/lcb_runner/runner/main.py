@@ -44,7 +44,10 @@ def main():
         old_save_results = [
             instance
             for instance in old_save_results
-            if instance["output_list"] and [x for x in instance["output_list"] if x]
+            # A task is resumable only when all requested samples exist.
+            # Treat partial rows as unfinished so --continue_existing reruns
+            # them instead of permanently skipping them.
+            if len(instance.get("output_list") or []) >= args.n
         ]
         old_save_results_question_ids = [
             instance["question_id"] for instance in old_save_results

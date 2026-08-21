@@ -6,9 +6,9 @@
 #   bash recipe/math_evaluation/eval_qwen3_4b_opd_math_all_serial.sh
 #
 # Common overrides:
-#   PASS_K=16 DATASETS="aime24 aime25 hmmt25 beyondaime amobench" \
+#   PASS_K=16 DATASETS="aime25 aime26 hmmt26 amobench" \
 #     bash recipe/math_evaluation/eval_qwen3_4b_opd_math_all_serial.sh
-#   EVAL_RESPONSE_LENGTH=16384 EVAL_MAX_MODEL_LEN=20480 \
+#   EVAL_RESPONSE_LENGTH=16384 EVAL_MAX_MODEL_LEN=18432 \
 #     bash recipe/math_evaluation/eval_qwen3_4b_opd_math_all_serial.sh
 
 set -euo pipefail
@@ -21,14 +21,14 @@ PYTHON_BIN="${PYTHON_BIN:-python3}"
 NGPUS_PER_NODE="${NGPUS_PER_NODE:-8}"
 NNODES="${NNODES:-1}"
 GEN_TP="${GEN_TP:-${NGPUS_PER_NODE}}"
-EVAL_DATASETS_DIR="${EVAL_DATASETS_DIR:-/data/data/jiangli/huggingface/datasets}"
+EVAL_DATASETS_DIR="${EVAL_DATASETS_DIR:-$VERL_ROOT/data/eval_dataset/math}"
 
-DATASETS="${DATASETS:-aime24 aime25 hmmt25 beyondaime amobench}"
+DATASETS="${DATASETS:-aime25 aime26 hmmt26 amobench}"
 PASS_K="${PASS_K:-16}"
 
-EVAL_PROMPT_LENGTH="${EVAL_PROMPT_LENGTH:-4096}"
+EVAL_PROMPT_LENGTH="${EVAL_PROMPT_LENGTH:-2048}"
 EVAL_RESPONSE_LENGTH="${EVAL_RESPONSE_LENGTH:-16384}"
-EVAL_MAX_MODEL_LEN="${EVAL_MAX_MODEL_LEN:-20480}"
+EVAL_MAX_MODEL_LEN="${EVAL_MAX_MODEL_LEN:-18432}"
 
 RUN_ID="${RUN_ID:-$(date +%Y%m%d_%H%M%S)}"
 LOG_DIR="${LOG_DIR:-$VERL_ROOT/outputs/math_evaluation}"

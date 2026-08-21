@@ -4,15 +4,25 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from recipe.math_evaluation.eval_utils import (
+    DEFAULT_EVAL_DATASETS,
+    DEFAULT_N_SAMPLES,
+    DEFAULT_PROMPT_LENGTH,
+    DEFAULT_RESPONSE_LENGTH,
+    DEFAULT_SEED,
+    DEFAULT_TEMPERATURE,
+    DEFAULT_TOP_P,
+    build_generation_cache_provenance,
     build_result_key,
     evaluate_generated_output,
     find_existing_result_value,
     generate_responses_with_server,
+    generation_parquet_is_complete,
     launch_generation_server,
     normalize_eval_dataset_name,
     resolve_eval_dataset_paths,
@@ -35,6 +45,8 @@ def load_json(path: str) -> dict:
 
 
 def normalize_model_path(model_path: str) -> str:
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*", model_path):
+        return model_path
     resolved_path = os.path.abspath(os.path.expanduser(model_path))
     if os.path.isdir(os.path.join(resolved_path, "hf_merged")):
         resolved_path = os.path.join(resolved_path, "hf_merged")
@@ -44,7 +56,7 @@ def normalize_model_path(model_path: str) -> str:
 
 
 def extract_model_identity(model_path: str) -> tuple[str, str, str]:
-    full_model_dir = os.path.dirname(model_path)
+    full_model_dir = os.path.dirname(model_path) if os.path.basename(model_path) == "hf_merged" else model_path
     full_model_name = os.path.basename(full_model_dir)
 
     epoch_suffix = ""
@@ -64,7 +76,12 @@ def load_existing_results(results_file: str) -> dict:
     return load_json(results_file)
 
 
-def find_reusable_generation_file(output_dir: str, dataset_name: str, min_pass_k: int) -> tuple[str | None, int | None]:
+def find_reusable_generation_file(
+    output_dir: str,
+    dataset_name: str,
+    min_pass_k: int,
+    cache_validator=None,
+) -> tuple[str | None, int | None]:
     if not os.path.isdir(output_dir):
         return None, None
 
@@ -81,8 +98,10 @@ def find_reusable_generation_file(output_dir: str, dataset_name: str, min_pass_k
         return None, None
 
     reusable_candidates.sort()
-    selected_pass_k, selected_path = reusable_candidates[0]
-    return selected_path, selected_pass_k
+    for selected_pass_k, selected_path in reusable_candidates:
+        if cache_validator is None or cache_validator(selected_path, selected_pass_k):
+            return selected_path, selected_pass_k
+    return None, None
 
 
 def print_model_summary(results_file: str, model_name: str, dataset_names: list[str], pass_k_values: list[int]):
@@ -129,6 +148,76 @@ def write_comparison_csv(results_file: str, model_config: dict, config: dict, ba
     print(f"CSV comparison: {output_file}")
 
 
+def write_canonical_metrics(
+    *,
+    output_dir: str,
+    results_file: str,
+    model_name: str,
+    model_path: str,
+    dataset_names: list[str],
+    model_config: dict,
+    prompt_length: int,
+    response_length: int,
+    temperature: float,
+    top_p: float,
+    seed: int,
+):
+    metrics_file = os.path.abspath(
+        os.path.expanduser(model_config.get("metrics_file", os.path.join(output_dir, "metrics.json")))
+    )
+    metrics_cmd = [
+        sys.executable,
+        os.path.join(os.path.dirname(__file__), "compute_pass_at_k_from_gen.py"),
+        "--gen_dir",
+        output_dir,
+        "--results_file",
+        results_file,
+        "--metrics_file",
+        metrics_file,
+        "--model_name",
+        model_name,
+        "--model_path",
+        model_path,
+        "--datasets",
+        ",".join(dataset_names),
+        "--n_samples",
+        str(DEFAULT_N_SAMPLES),
+        "--prompt_length",
+        str(prompt_length),
+        "--response_length",
+        str(response_length),
+        "--temperature",
+        str(temperature),
+        "--top_p",
+        str(top_p),
+        "--seed",
+        str(seed),
+    ]
+    effective_step = model_config.get("step", os.environ.get("WANDB_GLOBAL_STEP"))
+    milestone_fraction = model_config.get("milestone_fraction", os.environ.get("EVAL_MILESTONE_FRACTION"))
+    if effective_step is not None:
+        metrics_cmd.extend(["--step", str(int(effective_step))])
+    if milestone_fraction is not None:
+        metrics_cmd.extend(["--milestone_fraction", str(float(milestone_fraction))])
+    subprocess.run(metrics_cmd, check=True)
+    if os.environ.get("WANDB_RUN_ID"):
+        required_env = ["WANDB_PROJECT", "WANDB_GLOBAL_STEP"]
+        if os.environ.get("EVAL_KIND", "milestone") != "base":
+            required_env.append("EVAL_MILESTONE_FRACTION")
+        missing_env = [name for name in required_env if not os.environ.get(name)]
+        if missing_env:
+            raise ValueError(f"WANDB_RUN_ID requires environment variables: {missing_env}")
+        subprocess.run(
+            [
+                sys.executable,
+                os.path.join(os.path.dirname(__file__), "log_metrics_wandb.py"),
+                "--metrics_file",
+                metrics_file,
+            ],
+            check=True,
+        )
+
+
 def evaluate_from_generation_file(
     dataset_name: str,
     source_output_path: str,
@@ -166,17 +255,28 @@ def main():
     args = parse_args()
     config = load_json(os.path.abspath(os.path.expanduser(args.config)))
 
-    dataset_names = [normalize_eval_dataset_name(name) for name in config["datasets"]]
-    pass_k_values = sorted({int(value) for value in config["pass_k_values"]})
-    datasets_dir = config.get("datasets_dir", "/data/data/jiangli/huggingface/datasets")
+    dataset_names = [normalize_eval_dataset_name(name) for name in config.get("datasets", DEFAULT_EVAL_DATASETS)]
+    pass_k_values = sorted({int(value) for value in config.get("pass_k_values", [DEFAULT_N_SAMPLES])})
+    datasets_dir = config.get("datasets_dir", "data/eval_dataset/math")
     dataset_paths = resolve_eval_dataset_paths(dataset_names, datasets_dir)
 
     missing_dataset_names = [name for name in dataset_names if name not in dataset_paths]
     if missing_dataset_names:
         raise ValueError(f"Unsupported dataset names in config: {missing_dataset_names}")
+    missing_dataset_files = {name: path for name, path in dataset_paths.items() if not os.path.isfile(path)}
+    if missing_dataset_files:
+        raise FileNotFoundError(f"Prepared evaluation datasets are missing: {missing_dataset_files}")
 
-    default_temperature = float(config.get("temperature", 0.6))
-    default_top_p = float(config.get("top_p", 0.95))
+    default_temperature = float(config.get("temperature", DEFAULT_TEMPERATURE))
+    default_top_p = float(config.get("top_p", DEFAULT_TOP_P))
+    default_seed = int(config.get("seed", DEFAULT_SEED))
+    default_prompt_length = int(config.get("prompt_length", DEFAULT_PROMPT_LENGTH))
+    default_response_length = int(config.get("response_length", DEFAULT_RESPONSE_LENGTH))
+    os.environ["EVAL_PROMPT_LENGTH"] = str(default_prompt_length)
+    os.environ["EVAL_RESPONSE_LENGTH"] = str(default_response_length)
+    os.environ["EVAL_MAX_MODEL_LEN"] = str(
+        int(config.get("max_model_len", default_prompt_length + default_response_length))
+    )
     default_nnodes = int(config.get("nnodes", 1))
     default_n_gpus_per_node = int(config.get("n_gpus_per_node", 8))
     default_gen_tp = int(config.get("gen_tp", default_n_gpus_per_node))
@@ -189,12 +289,33 @@ def main():
         results_file = os.path.abspath(
             os.path.expanduser(model_config.get("results_file", config.get("results_file", f"results/{base_model_name}/results.json")))
         )
+        model_temperature = float(model_config.get("temperature", default_temperature))
+        model_top_p = float(model_config.get("top_p", default_top_p))
+        model_seed = int(model_config.get("seed", default_seed))
+        model_prompt_length = int(model_config.get("prompt_length", default_prompt_length))
+        model_response_length = int(model_config.get("response_length", default_response_length))
+        model_max_length = int(
+            model_config.get("max_model_len", config.get("max_model_len", model_prompt_length + model_response_length))
+        )
+        os.environ["EVAL_PROMPT_LENGTH"] = str(model_prompt_length)
+        os.environ["EVAL_RESPONSE_LENGTH"] = str(model_response_length)
+        os.environ["EVAL_MAX_MODEL_LEN"] = str(model_max_length)
+        sampling_signature = (
+            f"n{max(pass_k_values)}_t{model_temperature}_p{model_top_p}_prompt{model_prompt_length}"
+            f"_response{model_response_length}_seed{model_seed}_base"
+        )
         output_dir = os.path.abspath(
-            os.path.expanduser(model_config.get("output_dir", os.path.join("gen_results", "eval", full_model_name)))
+            os.path.expanduser(
+                model_config.get("output_dir", os.path.join("gen_results", "eval", full_model_name, sampling_signature))
+            )
         )
         tokenizer_path = model_config.get("tokenizer_path") or config.get("tokenizer_path")
         if tokenizer_path:
-            tokenizer_path = os.path.abspath(os.path.expanduser(tokenizer_path))
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*", tokenizer_path):
+                tokenizer_path = os.path.abspath(os.path.expanduser(tokenizer_path))
+                if not os.path.isdir(tokenizer_path):
+                    raise FileNotFoundError(f"Tokenizer path not found: {tokenizer_path}")
+        model_force_base_prompt = truthy_config(model_config.get("force_base_prompt", True))
 
         model_results = load_existing_results(results_file).get(model_name, {})
         missing_passes_by_dataset: dict[str, list[int]] = {}
@@ -217,6 +338,20 @@ def main():
         if not missing_passes_by_dataset:
             print("All requested results already exist. Skipping model.")
             print_model_summary(results_file, model_name, dataset_names, pass_k_values)
+            if DEFAULT_N_SAMPLES in pass_k_values and not args.dry_run:
+                write_canonical_metrics(
+                    output_dir=output_dir,
+                    results_file=results_file,
+                    model_name=model_name,
+                    model_path=model_path,
+                    dataset_names=dataset_names,
+                    model_config=model_config,
+                    prompt_length=int(model_config.get("prompt_length", default_prompt_length)),
+                    response_length=int(model_config.get("response_length", default_response_length)),
+                    temperature=float(model_config.get("temperature", default_temperature)),
+                    top_p=float(model_config.get("top_p", default_top_p)),
+                    seed=int(model_config.get("seed", default_seed)),
+                )
             write_comparison_csv(results_file, model_config, config, base_model_name)
             continue
 
@@ -236,10 +371,34 @@ def main():
         try:
             datasets_requiring_generation = {}
             for dataset_name, missing_pass_values in missing_passes_by_dataset.items():
+                def reusable_cache_is_valid(path, candidate_pass_k, current_dataset=dataset_name):
+                    provenance = build_generation_cache_provenance(
+                        model_path=model_path,
+                        tokenizer_path=tokenizer_path,
+                        dataset_path=dataset_paths[current_dataset],
+                        dataset_name=current_dataset,
+                        prompt_key="prompt",
+                        pass_k=candidate_pass_k,
+                        temperature=model_temperature,
+                        top_p=model_top_p,
+                        max_tokens=model_response_length,
+                        prompt_length=model_prompt_length,
+                        seed=model_seed,
+                        force_base_prompt=model_force_base_prompt,
+                    )
+                    return generation_parquet_is_complete(
+                        path,
+                        dataset_paths[current_dataset],
+                        current_dataset,
+                        candidate_pass_k,
+                        expected_provenance=provenance,
+                    )
+
                 reusable_output_path, reusable_pass_k = find_reusable_generation_file(
                     output_dir,
                     dataset_name,
                     max(missing_pass_values),
+                    reusable_cache_is_valid,
                 )
                 if reusable_output_path:
                     print(f"Reusing existing generation file for {dataset_name}: {reusable_output_path}")
@@ -257,7 +416,7 @@ def main():
 
             if datasets_requiring_generation:
                 max_requested_pass_k = max(max(pass_values) for pass_values in datasets_requiring_generation.values())
-                server_handles, server_addresses = launch_generation_server(
+                server_handles, server_addresses, response_length = launch_generation_server(
                     model_path,
                     tokenizer_path,
                     temperature=float(model_config.get("temperature", default_temperature)),
@@ -271,6 +430,20 @@ def main():
                 for dataset_name, missing_pass_values in datasets_requiring_generation.items():
                     required_pass_k = max(missing_pass_values)
                     output_path = os.path.join(output_dir, f"{dataset_name}_pass{required_pass_k}_generation.parquet")
+                    cache_provenance = build_generation_cache_provenance(
+                        model_path=model_path,
+                        tokenizer_path=tokenizer_path,
+                        dataset_path=dataset_paths[dataset_name],
+                        dataset_name=dataset_name,
+                        prompt_key="prompt",
+                        pass_k=required_pass_k,
+                        temperature=model_temperature,
+                        top_p=model_top_p,
+                        max_tokens=response_length,
+                        prompt_length=model_prompt_length,
+                        seed=model_seed,
+                        force_base_prompt=model_force_base_prompt,
+                    )
                     print(f"Generating {dataset_name} with pass@{required_pass_k} ...")
                     generate_responses_with_server(
                         server_addresses,
@@ -279,8 +452,14 @@ def main():
                         output_path,
                         prompt_key="prompt",
                         pass_k=required_pass_k,
-                        temperature=float(model_config.get("temperature", default_temperature)),
-                        top_p=float(model_config.get("top_p", default_top_p)),
+                        temperature=model_temperature,
+                        top_p=model_top_p,
+                        max_tokens=response_length,
+                        prompt_length=model_prompt_length,
+                        seed=model_seed,
+                        force_base_prompt=model_force_base_prompt,
+                        tokenizer_path=tokenizer_path,
+                        cache_provenance=cache_provenance,
                     )
                     evaluate_from_generation_file(
                         dataset_name,
@@ -295,6 +474,20 @@ def main():
             shutdown_generation_server(server_handles)
 
         print_model_summary(results_file, model_name, dataset_names, pass_k_values)
+        if DEFAULT_N_SAMPLES in pass_k_values:
+            write_canonical_metrics(
+                output_dir=output_dir,
+                results_file=results_file,
+                model_name=model_name,
+                model_path=model_path,
+                dataset_names=dataset_names,
+                model_config=model_config,
+                prompt_length=int(model_config.get("prompt_length", default_prompt_length)),
+                response_length=int(model_config.get("response_length", default_response_length)),
+                temperature=float(model_config.get("temperature", default_temperature)),
+                top_p=float(model_config.get("top_p", default_top_p)),
+                seed=int(model_config.get("seed", default_seed)),
+            )
         write_comparison_csv(results_file, model_config, config, base_model_name)
 
 

@@ -1,0 +1,3 @@
+recipe/opd/train_data_bundle/taco_canonical/chunks/*.bin binary
+data/train_dataset/openthoughts_math_30k_opsd/*.parquet binary
+data/eval_dataset/math/**/*.parquet binary

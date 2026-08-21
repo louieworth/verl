@@ -14,7 +14,7 @@
 # Applicable knobs (override via env): same as forward_y_r.sh except
 # TEACHER_TRAINING_PROMPT defaults to "vanilla" here.
 #   MODEL_PATH              : student model (default Qwen/Qwen3-1.7B)
-#   TEACHER_MODEL_PATH      : teacher model (default Qwen/Qwen3-8B)
+#   TEACHER_MODEL_PATH      : teacher model (default Qwen/Qwen3-14B)
 #   MULTI_STEP              : default 40 offline on-policy updates
 # =============================================================================
 
@@ -22,7 +22,7 @@ set -e
 set -o pipefail
 
 export MODEL_PATH="${MODEL_PATH:-Qwen/Qwen3-1.7B}"
-export TEACHER_MODEL_PATH="${TEACHER_MODEL_PATH:-Qwen/Qwen3-8B}"
+export TEACHER_MODEL_PATH="${TEACHER_MODEL_PATH:-Qwen/Qwen3-14B}"
 export WANDB_MODE="${WANDB_MODE:-offline}"
 
 export DISTILL_MODE="opd"

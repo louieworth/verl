@@ -1,0 +1,139 @@
+from __future__ import annotations
+
+import json
+import subprocess
+from argparse import Namespace
+from pathlib import Path
+
+import pytest
+
+from recipe.opd import export_checkpoint
+from recipe.opd.export_checkpoint import ensure_lora_metadata
+
+
+def test_lora_metadata_is_persisted_and_validated(tmp_path):
+    ensure_lora_metadata(tmp_path, rank=64, alpha=128)
+    assert json.loads((tmp_path / "lora_train_meta.json").read_text()) == {
+        "lora_alpha": 128,
+        "r": 64,
+        "task_type": "CAUSAL_LM",
+    }
+    ensure_lora_metadata(tmp_path, rank=64, alpha=128)
+    with pytest.raises(ValueError, match="LoRA metadata mismatch"):
+        ensure_lora_metadata(tmp_path, rank=32, alpha=128)
+
+
+def test_lora_metadata_is_not_required_for_full_finetuning(tmp_path):
+    ensure_lora_metadata(tmp_path, rank=0, alpha=0)
+    assert not (tmp_path / "lora_train_meta.json").exists()
+
+
+def _args(checkpoint_dir, target_dir, *, rank=0, alpha=0):
+    return Namespace(
+        local_dir=str(checkpoint_dir),
+        target_dir=str(target_dir),
+        base_model="base-model",
+        lora_rank=rank,
+        lora_alpha=alpha,
+        trust_remote_code=False,
+    )
+
+
+def test_reexport_uses_clean_staging_and_atomically_replaces_target(monkeypatch, tmp_path):
+    checkpoint_dir = tmp_path / "checkpoint"
+    target_dir = tmp_path / "target"
+    checkpoint_dir.mkdir()
+    target_dir.mkdir()
+    marker = target_dir / "opd_export.json"
+    marker.write_text('{"stale": true}\n', encoding="utf-8")
+    (target_dir / "old_weights.safetensors").write_text("old", encoding="utf-8")
+    stale_adapter = target_dir / "lora_adapter"
+    stale_adapter.mkdir()
+    (stale_adapter / "adapter_config.json").write_text("{}\n", encoding="utf-8")
+
+    monkeypatch.setattr(export_checkpoint, "parse_args", lambda: _args(checkpoint_dir, target_dir))
+
+    observed = {}
+
+    def fake_run(command, **_kwargs):
+        staging_dir = Path(command[command.index("--target_dir") + 1])
+        observed["staging"] = staging_dir
+        assert staging_dir != target_dir
+        assert staging_dir.parent == target_dir.parent
+        assert not (staging_dir / "lora_adapter").exists()
+        assert json.loads(marker.read_text(encoding="utf-8")) == {"stale": True}
+        (staging_dir / "new_weights.safetensors").write_text("new", encoding="utf-8")
+
+    def fake_strict_load(staging_dir, _trust_remote_code):
+        assert staging_dir == observed["staging"]
+        assert (staging_dir / "new_weights.safetensors").read_text(encoding="utf-8") == "new"
+        # The previously committed export stays visible through validation.
+        assert (target_dir / "old_weights.safetensors").read_text(encoding="utf-8") == "old"
+
+    monkeypatch.setattr(export_checkpoint.subprocess, "run", fake_run)
+    monkeypatch.setattr(export_checkpoint, "strict_load", fake_strict_load)
+
+    export_checkpoint.main()
+    assert json.loads(marker.read_text(encoding="utf-8"))["schema_version"] == export_checkpoint.EXPORT_SCHEMA
+    assert (target_dir / "new_weights.safetensors").read_text(encoding="utf-8") == "new"
+    assert not (target_dir / "old_weights.safetensors").exists()
+    assert not (target_dir / "lora_adapter").exists()
+    assert not observed["staging"].exists()
+
+
+def test_failed_reexport_preserves_previous_committed_target(monkeypatch, tmp_path):
+    checkpoint_dir = tmp_path / "checkpoint"
+    target_dir = tmp_path / "target"
+    checkpoint_dir.mkdir()
+    target_dir.mkdir()
+    marker = target_dir / "opd_export.json"
+    marker.write_text('{"committed": true}\n', encoding="utf-8")
+    old_weights = target_dir / "model.safetensors"
+    old_weights.write_text("old", encoding="utf-8")
+
+    monkeypatch.setattr(export_checkpoint, "parse_args", lambda: _args(checkpoint_dir, target_dir))
+
+    def failed_merge(command, **_kwargs):
+        staging_dir = Path(command[command.index("--target_dir") + 1])
+        (staging_dir / "partial.safetensors").write_text("partial", encoding="utf-8")
+        raise subprocess.CalledProcessError(1, command)
+
+    monkeypatch.setattr(export_checkpoint.subprocess, "run", failed_merge)
+
+    with pytest.raises(subprocess.CalledProcessError):
+        export_checkpoint.main()
+
+    assert json.loads(marker.read_text(encoding="utf-8")) == {"committed": True}
+    assert old_weights.read_text(encoding="utf-8") == "old"
+    assert not list(tmp_path.glob(".target.staging.*"))
+
+
+def test_stale_adapter_cannot_satisfy_new_lora_export(monkeypatch, tmp_path):
+    checkpoint_dir = tmp_path / "checkpoint"
+    target_dir = tmp_path / "target"
+    checkpoint_dir.mkdir()
+    target_dir.mkdir()
+    marker = target_dir / "opd_export.json"
+    marker.write_text('{"committed": true}\n', encoding="utf-8")
+    stale_adapter = target_dir / "lora_adapter"
+    stale_adapter.mkdir()
+    (stale_adapter / "adapter_config.json").write_text("{}\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        export_checkpoint,
+        "parse_args",
+        lambda: _args(checkpoint_dir, target_dir, rank=64, alpha=128),
+    )
+
+    def merger_without_adapter(command, **_kwargs):
+        staging_dir = Path(command[command.index("--target_dir") + 1])
+        (staging_dir / "model.safetensors").write_text("new", encoding="utf-8")
+
+    monkeypatch.setattr(export_checkpoint.subprocess, "run", merger_without_adapter)
+
+    with pytest.raises(RuntimeError, match="no adapter was exported"):
+        export_checkpoint.main()
+
+    assert json.loads(marker.read_text(encoding="utf-8")) == {"committed": True}
+    assert (stale_adapter / "adapter_config.json").is_file()
+    assert not list(tmp_path.glob(".target.staging.*"))

@@ -14,6 +14,12 @@ MODULE_PATH = REPO_ROOT / "recipe" / "opd" / "generation" / "skd_vllm_y_o_genera
 
 # The helpers tested here are pure Python. Stub heavy runtime-only imports so
 # this regression test runs in CPU-only pytest environments without torch/vLLM.
+_STUBBED_MODULE_NAMES = ("vllm", "pandas", "tqdm", "transformers")
+_MISSING_MODULE = object()
+_ORIGINAL_MODULES = {
+    name: sys.modules.get(name, _MISSING_MODULE) for name in _STUBBED_MODULE_NAMES
+}
+
 vllm_stub = types.ModuleType("vllm")
 
 
@@ -46,7 +52,16 @@ spec = importlib.util.spec_from_file_location("skd_vllm_y_o_generate_for_test", 
 skd_module = importlib.util.module_from_spec(spec)
 assert spec.loader is not None
 sys.modules[spec.name] = skd_module
-spec.loader.exec_module(skd_module)
+try:
+    spec.loader.exec_module(skd_module)
+finally:
+    # Do not leak lightweight stubs into unrelated tests collected in the same
+    # interpreter. The loaded module keeps the object references it needs.
+    for module_name, original_module in _ORIGINAL_MODULES.items():
+        if original_module is _MISSING_MODULE:
+            sys.modules.pop(module_name, None)
+        else:
+            sys.modules[module_name] = original_module
 
 RowState = skd_module.RowState
 _one_pos_accepts = skd_module._one_pos_accepts

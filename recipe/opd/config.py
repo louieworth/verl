@@ -6,6 +6,8 @@
 from dataclasses import dataclass, field
 from typing import Literal, Optional
 
+from .experiment_tracking import DEFAULT_EVAL_FRACTIONS, DEFAULT_WANDB_PROJECT, parse_eval_fractions
+
 
 def get_prompt_mode_tag(use_initial_response: bool) -> str:
     """Return the prompt-mode suffix used in paths and evaluation names.
@@ -21,26 +23,27 @@ class KLTrainingConfig:
     """Configuration for KL Divergence Training."""
 
     # Distillation Mode
-    # opsd: on-policy self-distillation — teacher = student, teacher prompt embeds y* (expert solution).
-    # opd : on-policy distillation       — teacher ≠ student, teacher prompt has NO expert reference.
+    # Canonical matrix: OPD uses external Qwen3-14B (non-Base); OPSD uses the
+    # student's frozen step-0 Base checkpoint. OPSD embeds y* (expert
+    # solution), while OPD deliberately withholds it.
     distill_mode: Literal["opsd", "opd"] = "opsd"
     task: Literal["math", "code"] = "math"
 
     # KL Settings
     kl_type: Literal["reverse", "forward", "jsd"] = "reverse"
-    kl_method: Literal["monte_carlo", "full_vocab"] = "monte_carlo"
-    temperature: float = 0.7
+    kl_method: Literal["monte_carlo", "full_vocab"] = "full_vocab"
+    temperature: float = 1.0
     # Per-token KL clip (OPSD `jsd_token_clip`). Caps each token's KL
     # contribution to prevent outlier tokens (where teacher >> student)
     # from dominating the gradient. 0 disables.
-    kl_token_clip: float = 0.1
+    kl_token_clip: float = 0.0
     # Mixture coefficient for generalized JSD (only used when kl_type="jsd").
     # OPSD convention: beta=0 → forward KL, beta=1 → reverse KL, beta∈(0,1) → JSD mixture.
     beta: float = 0.0
 
     # Model Settings
-    student_model_path: str = "Qwen/Qwen3-1.7B"
-    teacher_model_path: str = ""  # Empty means same as student (memory efficient with LoRA)
+    student_model_path: str = "Qwen/Qwen3-1.7B-Base"
+    teacher_model_path: str = ""
     base_model_name: str = ""  # Stable name used for result keys/paths across multi-epoch runs
     use_lora: bool = True
     lora_rank: int = 64
@@ -54,11 +57,11 @@ class KLTrainingConfig:
     )
 
     # Training Settings
-    learning_rate: float = 2e-5
+    learning_rate: float = 1e-6
     train_batch_size: int = 1  # per-GPU batch size
-    gradient_accumulation_steps: int = 4
+    gradient_accumulation_steps: int = 64
     total_epochs: int = 1
-    max_length: int = 20480
+    max_length: int = 18432
     warmup_steps_ratio: float = 0.1
     weight_decay: float = 0.01
     max_grad_norm: float = 1.0
@@ -77,6 +80,8 @@ class KLTrainingConfig:
     fsdp_size: int = -1
     ulysses_sequence_parallel_size: int = 1
     max_token_len_per_gpu: Optional[int] = None
+    use_dynamic_bsz: bool = False
+    micro_batch_size_per_gpu: int = 1
     use_remove_padding: bool = True
     use_torch_compile: bool = True
     param_offload: bool = False
@@ -107,15 +112,18 @@ class KLTrainingConfig:
     async_hf_export: bool = False  # Launch rank-0 HF export in the background when eval does not need it
 
     # Evaluation Settings
-    eval_datasets: list = field(default_factory=lambda: ["aime24", "aime25", "math500", "hmmt25"])
+    eval_datasets: list = field(default_factory=lambda: ["aime25", "aime26", "hmmt26", "amobench"])
+    eval_fractions: tuple[float, ...] = field(default_factory=lambda: DEFAULT_EVAL_FRACTIONS)
     run_eval_after_training: bool = False  # Set to True to run evaluation automatically
-    eval_datasets_dir: str = "/data/data/jiangli/huggingface/datasets"
+    eval_datasets_dir: str = "data/eval_dataset/math"
     eval_dataset_paths: dict = field(default_factory=lambda: {
         "aime24": "data/aime24.parquet",
         "aime25": "data/aime25.parquet",
+        "aime26": "data/aime26.parquet",
         "math500": "data/math500.parquet",
         "hmmt24": "data/hmmt24.parquet",
         "hmmt25": "data/hmmt25.parquet",
+        "hmmt26": "data/hmmt26.parquet",
         "amc23": "data/amc23.parquet",
         "beyondaime": "data/beyondaime.parquet",
         "amobench": "data/amobench.parquet",
@@ -128,8 +136,13 @@ class KLTrainingConfig:
     gradient_checkpointing: bool = True
 
     # Wandb
-    wandb_project: str = "verl-kl-training"
+    wandb_project: str = DEFAULT_WANDB_PROJECT
     wandb_run_name: str = ""
+    wandb_run_id: str = ""
+    wandb_run_id_file: str = ""
+    wandb_run_identity: str = ""
+    wandb_global_step_offset: int = 0
+    wandb_total_training_steps: Optional[int] = None
 
     # ------------------------------------------------------------------
     # Diagnostic metrics (T1–T4 from the y vs y' study)
@@ -170,6 +183,17 @@ class KLTrainingConfig:
         if self.max_token_len_per_gpu is None:
             self.max_token_len_per_gpu = self.max_length
 
+        if self.micro_batch_size_per_gpu <= 0:
+            raise ValueError("micro_batch_size_per_gpu must be positive")
+
+        if self.wandb_global_step_offset < 0:
+            raise ValueError("wandb_global_step_offset must be non-negative")
+
+        if self.wandb_total_training_steps is not None and self.wandb_total_training_steps <= 0:
+            raise ValueError("wandb_total_training_steps must be positive when set")
+
+        self.eval_fractions = parse_eval_fractions(self.eval_fractions)
+
         if self.bf16 and self.fp16:
             raise ValueError("Cannot use both bf16 and fp16")
 
@@ -178,9 +202,11 @@ class KLTrainingConfig:
 
         if self.distill_mode == "opd" and not self.teacher_model_path:
             raise ValueError(
-                "distill_mode='opd' requires a distinct teacher: set teacher_model_path. "
-                "Leave it empty only for distill_mode='opsd' (teacher = student)."
+                "distill_mode='opd' requires an explicit teacher_model_path. "
+                "The canonical recipe launchers set Qwen3-14B explicitly for OPD."
             )
+        if self.distill_mode == "opsd" and not self.teacher_model_path:
+            self.teacher_model_path = self.student_model_path
 
         if self.resume_checkpoint_mode not in {"continue", "initialize"}:
             raise ValueError(
@@ -199,9 +225,11 @@ class KLTrainingConfig:
         self.eval_dataset_paths = {
             "aime24": f"{self.eval_datasets_dir}/aime24/aime24_test.parquet",
             "aime25": f"{self.eval_datasets_dir}/aime25/aime25_test.parquet",
+            "aime26": f"{self.eval_datasets_dir}/aime26/aime26_test.parquet",
             "math500": f"{self.eval_datasets_dir}/math500/math500_test.parquet",
             "hmmt24": f"{self.eval_datasets_dir}/hmmt24/hmmt24_test.parquet",
             "hmmt25": f"{self.eval_datasets_dir}/hmmt25/hmmt25_test.parquet",
+            "hmmt26": f"{self.eval_datasets_dir}/hmmt26/hmmt26_test.parquet",
             "amc23": f"{self.eval_datasets_dir}/amc23/amc23_test.parquet",
             "beyondaime": f"{self.eval_datasets_dir}/beyondaime/beyondaime_test.parquet",
             "amobench": f"{self.eval_datasets_dir}/amobench/amobench_test.parquet",

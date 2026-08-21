@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "assets": {
+    "data/eval_dataset/math/aime25/aime25_test.parquet": {
+      "source": "math-ai/aime25",
+      "revision": "563bb8404243c5f09de6ec262f2db674fe5bce9b",
+      "sha256": "adc32e487974f881114e63ae7e3df7b4603beb5d4b6ed6772b1c99581d389263"
+    },
+    "data/eval_dataset/math/aime26/aime26_test.parquet": {
+      "source": "math-ai/aime26",
+      "revision": "79037aebdb6580008fb960d17cb21fd3099083e3",
+      "sha256": "42ad0b2cec78300cc458351dbb974fd1c85b1f00014aaf65f796d10980c294b9"
+    },
+    "data/eval_dataset/math/hmmt26/hmmt26_test.parquet": {
+      "source": "MathArena/hmmt_feb_2026",
+      "revision": "02fba4f74d8e68e73e66a02d540fd979c05c274c",
+      "sha256": "870f579b145b80a3b9d239be1f8c605de63f1eab8b22e5e4e8510e144a2758f6"
+    },
+    "data/eval_dataset/math/amobench/amobench_test.parquet": {
+      "source": "GAIR/AMO-Bench",
+      "revision": "2f422616c25d862984408fbbfaed63a961e8e025",
+      "sha256": "aafe3e844c734efcb5c5a187e8b5d787a2e3e5151a3f8aa43dd33da2bc148dfd"
+    },
+    "data/eval_dataset/code/evalplus/HumanEvalPlus-v0.1.10.jsonl": {
+      "source": "evalplus/humanevalplus_release",
+      "revision": "v0.1.10",
+      "sha256": "42526ec0e7d5f3ee0b06d6ced98f8c8bae3d76519151bfb3d36f79010645bd7f"
+    },
+    "data/eval_dataset/code/evalplus/MbppPlus-v0.2.0.jsonl": {
+      "source": "evalplus/mbppplus_release",
+      "revision": "v0.2.0",
+      "sha256": "b54e762755248ca411b523c917fa9f93c07b5ff2966bf60b3917b853926a3dad"
+    },
+    "data/eval_dataset/code/livecodebench/code_generation_lite/test.jsonl": {
+      "source": "livecodebench/code_generation_lite",
+      "revision": "0fe84c3912ea0c4d4a78037083943e8f0c4dd505",
+      "sha256": "2bd02b38beb48e8c46b5b9987095d999ff38cd8efc255ea5d58974317c48f63f"
+    },
+    "data/eval_dataset/code/livecodebench/code_generation_lite/test2.jsonl": {
+      "source": "livecodebench/code_generation_lite",
+      "revision": "0fe84c3912ea0c4d4a78037083943e8f0c4dd505",
+      "sha256": "095df7c5daf15f882c51a9deb84085cff1e073495a5dbcf95015a564d485f3a3"
+    },
+    "data/eval_dataset/code/livecodebench/code_generation_lite/test3.jsonl": {
+      "source": "livecodebench/code_generation_lite",
+      "revision": "0fe84c3912ea0c4d4a78037083943e8f0c4dd505",
+      "sha256": "28ed26cc83363ce3f1fe2d5fad9f8393077beb1907b167a31bd3b32f80801b79"
+    },
+    "data/eval_dataset/code/livecodebench/code_generation_lite/test4.jsonl": {
+      "source": "livecodebench/code_generation_lite",
+      "revision": "0fe84c3912ea0c4d4a78037083943e8f0c4dd505",
+      "sha256": "d711138ddaebfcf5f8ec6a4283ee677298c0f5c5d374a235af92aaf0584510da"
+    },
+    "data/eval_dataset/code/livecodebench/code_generation_lite/test5.jsonl": {
+      "source": "livecodebench/code_generation_lite",
+      "revision": "0fe84c3912ea0c4d4a78037083943e8f0c4dd505",
+      "sha256": "7f77571c2a6df0c2a72a3277650309f67e01e0008e18117e624633df53f81214"
+    },
+    "data/eval_dataset/code/livecodebench/code_generation_lite/test6.jsonl": {
+      "source": "livecodebench/code_generation_lite",
+      "revision": "0fe84c3912ea0c4d4a78037083943e8f0c4dd505",
+      "sha256": "bb4c364f71921c4495a6ad15abe1a927350b720009f4933e2e71f8af0f6fd1f5"
+    }
+  }
+}

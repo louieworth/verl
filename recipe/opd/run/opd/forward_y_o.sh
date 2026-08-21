@@ -5,7 +5,7 @@
 #
 # Applicable knobs (override via env):
 #   MODEL_PATH              : student model (default Qwen/Qwen3-1.7B)
-#   TEACHER_MODEL_PATH      : teacher model (default Qwen/Qwen3-8B, must differ from student)
+#   TEACHER_MODEL_PATH      : teacher model (default Qwen/Qwen3-14B, must differ from student)
 #   Y_MODE                  : "y_o" (default) | "y_r"
 #   MAX_PROMPT_LENGTH       : auto-derived teacher prompt budget
 #   MAX_RESPONSE_LENGTH     : default 8192
@@ -25,7 +25,7 @@ set -e
 set -o pipefail
 
 export MODEL_PATH="${MODEL_PATH:-Qwen/Qwen3-1.7B}"
-export TEACHER_MODEL_PATH="${TEACHER_MODEL_PATH:-Qwen/Qwen3-8B}"
+export TEACHER_MODEL_PATH="${TEACHER_MODEL_PATH:-Qwen/Qwen3-14B}"
 export WANDB_MODE="${WANDB_MODE:-offline}"
 export RESIDENT_STUDENT_ROLLOUT="${RESIDENT_STUDENT_ROLLOUT:-false}"
 
@@ -40,7 +40,7 @@ export TEMPERATURE="${TEMPERATURE:-1.0}"
 export TOTAL_EPOCHS="${TOTAL_EPOCHS:-1}"
 export MULTI_STEP="${MULTI_STEP:-40}"
 
-# OPD with Qwen3-8B teacher + full_vocab needs much smaller token budget than
+# OPD with Qwen3-14B teacher + full_vocab needs much smaller token budget than
 # OPSD (teacher = student = 1.7B). On A100-40G, default 49152 OOMs in the
 # teacher forward (logits cat ≈ 15 GiB on top of ~25 GiB teacher+student
 # resident). Keep this at least BASE_PROMPT_LENGTH + MAX_RESPONSE_LENGTH so

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import gc
+import hashlib
 import importlib
 import os
 import signal
@@ -105,11 +106,18 @@ class EvalPlusVllmDecoder(DecoderBase):
         max_num_seqs: int,
         top_p: float,
         force_base_prompt: bool,
+        max_prompt_tokens: int,
+        seed: int,
+        total_samples: int,
         **kwargs,
     ) -> None:
         super().__init__(name, **kwargs)
         self.top_p = top_p
         self.force_base_prompt = force_base_prompt
+        self.max_prompt_tokens = max_prompt_tokens
+        self.seed = seed
+        self.total_samples = total_samples
+        self.prompt_seed_offsets: dict[str, int] = {}
         self.tokenizer = AutoTokenizer.from_pretrained(name, use_fast=False, trust_remote_code=self.trust_remote_code)
         if self.is_direct_completion():
             self.eos += extra_eos_for_direct_completion(dataset)
@@ -137,35 +145,59 @@ class EvalPlusVllmDecoder(DecoderBase):
             if self.is_direct_completion()
             else make_raw_chat_prompt(prompt, self.instruction_prefix, self.response_prefix, self.tokenizer)
         )
-        outputs = self.llm.generate(
-            [raw_prompt] * batch_size,
+        prompt_tokens = len(self.tokenizer.encode(raw_prompt, add_special_tokens=False))
+        if prompt_tokens > self.max_prompt_tokens:
+            raise ValueError(
+                f"EvalPlus prompt has {prompt_tokens} tokens, exceeding the "
+                f"{self.max_prompt_tokens}-token evaluation cap; refusing to truncate."
+            )
+        # EvalPlus passes only the number of missing samples on resume. Infer
+        # the existing prefix so a resumed 8+8 run uses offsets 8..15 instead
+        # of duplicating offsets 0..7.
+        seed_offset = self.prompt_seed_offsets.get(
+            raw_prompt,
+            max(0, self.total_samples - num_samples),
+        )
+        prompt_seed = int.from_bytes(hashlib.sha256(raw_prompt.encode()).digest()[:4], "big")
+        sampling_params = [
             SamplingParams(
                 temperature=self.temperature if do_sample else 0.0,
                 max_tokens=self.max_new_tokens,
                 top_p=self.top_p if do_sample else 1.0,
+                seed=(self.seed + prompt_seed + seed_offset + sample_index) % (2**31),
                 stop=self.eos,
-            ),
+            )
+            for sample_index in range(batch_size)
+        ]
+        self.prompt_seed_offsets[raw_prompt] = seed_offset + batch_size
+        outputs = self.llm.generate(
+            [raw_prompt] * batch_size,
+            sampling_params,
             use_tqdm=False,
         )
         return [out.outputs[0].text.replace("\t", "    ") for out in outputs]
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run EvalPlus generation/evaluation with explicit vLLM sampling parameters.")
+    parser = argparse.ArgumentParser(
+        description="Run EvalPlus generation/evaluation with explicit vLLM sampling parameters."
+    )
     parser.add_argument("--dataset", required=True, choices=["humaneval", "mbpp"])
     parser.add_argument("--model", required=True)
     parser.add_argument("--root", required=True)
-    parser.add_argument("--n_samples", type=int, default=4)
-    parser.add_argument("--temperature", type=float, default=1.0)
-    parser.add_argument("--top_p", type=float, default=1.0)
+    parser.add_argument("--n_samples", type=int, default=16)
+    parser.add_argument("--temperature", type=float, default=0.6)
+    parser.add_argument("--top_p", type=float, default=0.95)
     parser.add_argument("--max_tokens", type=int, default=16384)
-    parser.add_argument("--max_model_len", type=int, default=32768)
+    parser.add_argument("--max_prompt_tokens", type=int, default=2048)
+    parser.add_argument("--max_model_len", type=int, default=18432)
     parser.add_argument("--max_num_seqs", type=int, default=128)
     parser.add_argument("--tp", type=int, default=1)
     parser.add_argument("--bs", type=int, default=None)
     parser.add_argument("--dtype", default="bfloat16")
     parser.add_argument("--trust_remote_code", action="store_true")
     parser.add_argument("--force_base_prompt", action="store_true")
+    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--version", default="default")
     parser.add_argument("--parallel", type=int, default=None)
     parser.add_argument("--resume", action=argparse.BooleanOptionalAction, default=True)
@@ -183,6 +215,12 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    if args.n_samples <= 0:
+        parser.error("--n_samples must be positive")
+    if args.max_prompt_tokens <= 0 or args.max_tokens <= 0:
+        parser.error("prompt and response token limits must be positive")
+    if args.max_model_len < args.max_prompt_tokens + args.max_tokens:
+        parser.error("--max_model_len must be at least max_prompt_tokens + max_tokens")
     if args.id_range is not None and args.id_range[0] >= args.id_range[1]:
         parser.error("--id_range requires LOW < HIGH")
 
@@ -205,8 +243,16 @@ def main() -> None:
         max_num_seqs=args.max_num_seqs,
         top_p=args.top_p,
         force_base_prompt=args.force_base_prompt,
+        max_prompt_tokens=args.max_prompt_tokens,
+        seed=args.seed,
+        total_samples=args.n_samples,
     )
-    identifier = Path(args.model.strip("./").replace("/", "--")).name + f"_vllm_temp_{args.temperature}_top_p_{args.top_p}_max_tokens_{args.max_tokens}"
+    prompt_style = "base" if args.force_base_prompt else "chat"
+    identifier = (
+        Path(args.model.strip("./").replace("/", "--")).name
+        + f"_vllm_{prompt_style}_temp_{args.temperature}_top_p_{args.top_p}"
+        + f"_prompt_{args.max_prompt_tokens}_max_tokens_{args.max_tokens}_seed_{args.seed}"
+    )
     if args.id_range is not None:
         identifier += f"_ids_{args.id_range[0]}_{args.id_range[1]}"
     target_path = os.path.join(args.root, args.dataset, identifier + ".jsonl")

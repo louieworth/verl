@@ -2,7 +2,27 @@
 
 Evaluates OPD/OPSD code-task checkpoints on HumanEval+, MBPP+, and LiveCodeBench v6.
 
-The table-baseline defaults are `PASS_K=16`, `temperature=0.6`, `top_p=0.95`, `max_prompt_length=2048`, and `max_response_length=16384`. Results are written to JSON plus CSV summaries with `Avg@16` and `Pass@16`.
+The code-suite defaults remain `PASS_K=16`, `temperature=0.6`, `top_p=0.95`,
+`max_prompt_length=2048`, and `max_response_length=16384`. HumanEval+/MBPP+
+and LiveCodeBench v6 all use raw Base-model completion prompts. Results are
+written to the historical JSON, a CSV with dataset/macro Avg@16 and Pass@16,
+and `gen_results/.../metrics.json` using the stable
+`opd_eval_metrics/v1` schema. Its `wandb` object can be logged directly by the
+outer milestone runner at the JSON `step` value.
+If `WANDB_RUN_ID`, `WANDB_PROJECT`, `WANDB_GLOBAL_STEP`, and
+`EVAL_MILESTONE_FRACTION` are set, the wrapper resumes the existing run and logs
+those metrics at the explicit step; credential handling stays outside this
+recipe.
+
+On a fresh Docker/EC2 worker, prepare the pinned evaluator environment and
+machine-local datasets with:
+
+```bash
+bash recipe/opd/script_code/prepare_code.sh all
+```
+
+The command expects the separately deployed canonical TACO parquets under
+`data/train_dataset/taco/canonical`; it never rebuilds TACO in `all` mode.
 
 Dependencies, in the `verl` conda environment:
 

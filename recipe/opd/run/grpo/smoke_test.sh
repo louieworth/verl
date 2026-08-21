@@ -24,7 +24,7 @@ for launcher in "${launchers[@]}"; do
             ;;
         *_code_*)
             [[ "$output" == *"Task:              code"* ]]
-            [[ "$output" == *"data/train_dataset/taco/train_grpo.parquet"* ]]
+            [[ "$output" == *"data/train_dataset/taco/canonical/train_grpo.parquet"* ]]
             [[ "$output" == *"Qwen3-1.7B_code_grpo_smoke"* ]]
             [[ "$output" == *"Training time cap: 8106s"* ]]
             ;;

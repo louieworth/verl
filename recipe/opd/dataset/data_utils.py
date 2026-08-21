@@ -15,8 +15,15 @@ from verl.utils.dataset.dataset_utils import DatasetPadMode, SFTTensorCollator
 instruction_following = "Please reason step by step, and put your final answer within \\boxed{}."
 code_instruction_following = (
     "You will be given a programming problem. Write a correct Python program that solves it. "
-    "Return only the code inside a single ```python code block."
+    "Return only raw Python source code. Do not use Markdown fences or explanations."
 )
+
+
+def build_student_prompt(problem: str, task: str = "math") -> str:
+    """Render the canonical plain Base-model prompt used for rollout and loss."""
+    problem = problem.strip()
+    suffix = code_instruction_following if task == "code" else instruction_following
+    return f"{problem}\n\n{suffix}"
 
 
 
@@ -231,7 +238,7 @@ def build_teacher_prompt(
                 .replace("{EXPERT_SOLUTION}", expert_solution)
                 .strip()
             )
-    return prompt + " " + suffix
+    return f"{prompt.strip()}\n\n{suffix}"
 
 
 _INIT_BLOCK_MARKER = "**Your Initial Solution:**"
@@ -492,11 +499,9 @@ class KLTrainingDataset(Dataset):
             raise ValueError("Reverse KL requires stage1 responses in the 'responses' field.")
 
         if self.task == "code":
-            student_prompt = PROMPT_TEMPLATE_CODE_STUDENT.replace("{PROBLEM}", problem).strip()
-            student_prompt = student_prompt + " " + code_instruction_following
+            student_prompt = build_student_prompt(problem, task="code")
         else:
-            student_prompt = PROMPT_TEMPLATE_STUDENT.replace("{PROBLEM}", problem).strip()
-            student_prompt = student_prompt + " " + instruction_following
+            student_prompt = build_student_prompt(problem, task="math")
 
         teacher_prompt = build_teacher_prompt(
             problem,
@@ -536,17 +541,29 @@ class KLTrainingDataset(Dataset):
                 )
 
         if self.task == "code":
-            student_prompt = problem + " " + code_instruction_following
+            student_prompt = build_student_prompt(problem, task="code")
         else:
-            student_prompt = problem + " " + instruction_following
-        teacher_prompt = build_teacher_prompt(
-            problem,
-            expert_solution,
-            initial_response=initial_response,
-            use_initial_response=self.use_initial_response,
-            distill_mode=self.distill_mode,
-            task=self.task,
-        )
+            student_prompt = build_student_prompt(problem, task="math")
+        teacher_prompt = ""
+        if extra_info.get("teacher_prompt_contract") == "srd_generation_prompt_v1":
+            raw_prompt = item.get("prompt")
+            if hasattr(raw_prompt, "tolist"):
+                raw_prompt = raw_prompt.tolist()
+            if isinstance(raw_prompt, (list, tuple)) and len(raw_prompt) == 1:
+                message = raw_prompt[0]
+                if isinstance(message, dict) and message.get("role") == "user":
+                    teacher_prompt = message.get("content", "")
+            if not isinstance(teacher_prompt, str) or not teacher_prompt.strip():
+                raise ValueError("TRD row is missing its exact generation teacher prompt")
+        else:
+            teacher_prompt = build_teacher_prompt(
+                problem,
+                expert_solution,
+                initial_response=initial_response,
+                use_initial_response=self.use_initial_response,
+                distill_mode=self.distill_mode,
+                task=self.task,
+            )
 
         out = self._prepare_item(
             student_prompt=student_prompt,

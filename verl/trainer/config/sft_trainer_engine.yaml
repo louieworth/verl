@@ -65,6 +65,9 @@ trainer:
   experiment_name: test
   total_epochs: 4
   total_training_steps: null
+  # Optional inclusive step at which to checkpoint and return. This does not
+  # shorten total_training_steps or the optimizer schedule.
+  stop_at_step: null
   logger: [ 'console', 'wandb' ]
   seed: 1
   save_freq: -1

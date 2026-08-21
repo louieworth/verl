@@ -41,7 +41,7 @@ bash recipe/math_evaluation/benchmark_kl_model.sh /path/to/m1 /path/to/m2 ...
 Datasets (override via env):
 
 ```bash
-DATASETS="aime24 aime25 math500" bash recipe/math_evaluation/benchmark_kl_model.sh ...
+DATASETS="aime25 aime26 hmmt26 amobench" bash recipe/math_evaluation/benchmark_kl_model.sh ...
 ```
 
 ## Scoring as a library
@@ -56,7 +56,7 @@ The function is a pure router; the actual scorers live in `verl/utils/reward_sco
 | `data_source` | backend |
 |---|---|
 | `gsm8k`, `openai/gsm8k` | `verl.utils.reward_score.gsm8k` |
-| `aime24`/`aime25`/`amc23`/`math500`/`hmmt*`/`beyondaime`/`deepscaleR` | `verl.utils.reward_score.math_reward` |
+| `aime24`/`aime25`/`aime26`/`amc23`/`math500`/`hmmt*`/`beyondaime`/`deepscaleR` | `verl.utils.reward_score.math_reward` |
 | `amobench` | `verl.utils.reward_score.amobench_parser_reward` |
 
 Used internally by `recipe/opd/dataset/score_stage1_reward.py`,
@@ -72,5 +72,15 @@ python recipe/math_evaluation/datasets/prepare_hmmt.py    --local_dataset_path /
 python recipe/math_evaluation/datasets/prepare_usamo.py   --local_dataset_path /path/to/datasets
 ```
 
-See `datasets/EVALUATION_DATASETS.md` for the full list (AIME24/25, AMC23,
-MATH500, HMMT23/24/25, USAMO24/25, AMO-Bench, BeyondAIME, GSM8K).
+Canonical defaults are AIME25, AIME26, HMMT February 2026, and the 39
+parser-valid AMO-Bench problems. Generation uses raw Base completion prompts with
+`prompt=2048`, `response=16384`, `n=16`, `temperature=1.0`, and `top_p=0.7`.
+`compute_pass_at_k_from_gen.py` writes both the historical model-keyed JSON and
+a stable `opd_eval_metrics/v1` milestone JSON containing dataset/macro
+Avg@16/Pass@16 plus ready-to-log W&B keys. See
+`datasets/EVALUATION_DATASETS.md` for preparation details and legacy datasets.
+
+When `WANDB_RUN_ID`, `WANDB_PROJECT`, `WANDB_GLOBAL_STEP`, and
+`EVAL_MILESTONE_FRACTION` are set, the benchmark wrapper resumes that persisted
+run and logs the JSON `wandb` object at the explicit global step. Authentication
+is not handled by the evaluation recipe.

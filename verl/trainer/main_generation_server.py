@@ -34,6 +34,7 @@ from pprint import pprint
 import pandas as pd
 import pyarrow.lib
 from omegaconf import OmegaConf
+from openai.types import Completion
 from openai.types.chat import ChatCompletion
 from tqdm import tqdm
 
@@ -43,6 +44,25 @@ from verl.trainer.generation_server_env import (
 )
 from verl.utils.hdfs_io import makedirs
 from verl.workers.rollout.replica import get_rollout_replica_class
+
+
+def render_base_completion_prompt(messages) -> str:
+    """Render a prompt without invoking the tokenizer chat template."""
+    if isinstance(messages, str):
+        prompt = messages
+    else:
+        if hasattr(messages, "tolist"):
+            messages = messages.tolist()
+        if not isinstance(messages, list) or not messages:
+            raise ValueError("Base completion requires a prompt string or non-empty message list")
+        roles = [message.get("role") for message in messages]
+        if any(role != "user" for role in roles):
+            raise ValueError(f"Base completion only accepts user messages, got roles={roles}")
+        prompt = "\n".join(str(message.get("content", "")) for message in messages)
+    prompt = prompt.strip()
+    if not prompt:
+        raise ValueError("Base completion prompt is empty")
+    return prompt + "\n"
 
 
 def read_parquet_compat(path: str) -> pd.DataFrame:
@@ -88,6 +108,7 @@ async def start_server(config):
 
 
 async def submit_request(server_address, max_retries=5, retry_base_delay=2.0, **chat_complete_request):
+    base_completion = bool(chat_complete_request.pop("_base_completion", False))
     extra_headers = chat_complete_request.pop("extra_headers", {})
     for attempt in range(max_retries + 1):
         try:
@@ -95,7 +116,7 @@ async def submit_request(server_address, max_retries=5, retry_base_delay=2.0, **
             session = aiohttp.ClientSession(timeout=timeout)
             try:
                 async with session.post(
-                    url=f"http://{server_address}/v1/chat/completions",
+                    url=f"http://{server_address}/v1/{'completions' if base_completion else 'chat/completions'}",
                     headers={"Authorization": "Bearer token-abc123", **extra_headers},
                     json=chat_complete_request,
                 ) as resp:
@@ -120,7 +141,7 @@ async def submit_request(server_address, max_retries=5, retry_base_delay=2.0, **
                                 )
                                 continue
                         raise RuntimeError(f"Server returned {resp.status}: {error_msg}")
-                    return ChatCompletion(**data)
+                    return Completion(**data) if base_completion else ChatCompletion(**data)
             finally:
                 await session.close()
         except Exception as e:
@@ -155,15 +176,29 @@ async def generate_per_replica(
     #     base_url=f"http://{server_address}/v1",
     # )
 
-    chat_complete_request = [
-        {
-            "model": model_path,
-            "messages": messages,
-            **sampling_params,
-        }
-        for messages in chat_lst
-        for _ in range(n_samples)
-    ]
+    base_completion = os.environ.get("VERL_FORCE_BASE_COMPLETION", "").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+    chat_complete_request = []
+    for messages in chat_lst:
+        request_params = dict(sampling_params)
+        if base_completion:
+            # These fields are valid only for the chat-completions endpoint.
+            # Math evaluation supplies them when it must emulate Base prompts
+            # through chat; forwarding them to /v1/completions can make the
+            # OpenAI-compatible server reject an otherwise valid request.
+            request_params.pop("chat_template", None)
+            request_params.pop("add_generation_prompt", None)
+            request = {"model": model_path, **request_params}
+            request.update({"prompt": render_base_completion_prompt(messages), "_base_completion": True})
+        else:
+            request = {"model": model_path, **request_params}
+            request["messages"] = messages
+        chat_complete_request.extend(dict(request) for _ in range(n_samples))
 
     if not chat_complete_request:
         return []
@@ -283,7 +318,12 @@ def main(config):
         sampling_params = {
             "temperature": config.actor_rollout_ref.rollout.temperature,
             "top_p": config.actor_rollout_ref.rollout.top_p,
-            # "top_k": config.actor_rollout_ref.rollout.top_k,
+            "top_k": config.actor_rollout_ref.rollout.top_k,
+            # Empty completions cannot form KL targets. Ignore EOS for the
+            # first token and retain normal EOS handling after that.
+            "min_tokens": int(
+                OmegaConf.select(config, "actor_rollout_ref.rollout.min_tokens", default=1)
+            ),
             "max_tokens": config.actor_rollout_ref.rollout.response_length,
         }
 
@@ -348,10 +388,13 @@ def main(config):
             results = results[complete_rows]
 
         # extract content from results
-        results = np.array(
-            [result.choices[0].message.content or "" for result in results.flat],
-            dtype=object,
-        )
+        def response_text(result) -> str:
+            choice = result.choices[0]
+            if hasattr(choice, "text"):
+                return choice.text or ""
+            return choice.message.content or ""
+
+        results = np.array([response_text(result) for result in results.flat], dtype=object)
         results = np.reshape(results, (-1, n_samples))
 
         assert results.shape == (len(dataset), n_samples)

@@ -27,6 +27,8 @@ import pandas as pd
 from tqdm import tqdm
 from transformers import AutoTokenizer
 
+from recipe.opd.base_completion import render_plain_prompt
+
 
 @dataclass
 class RowState:
@@ -50,13 +52,15 @@ def _normalize_chat(chat: Any) -> list[dict[str, str]]:
 
 
 def _prompt_token_ids(tokenizer, chat: Any, prompt_length: int) -> list[int]:
-    return tokenizer.apply_chat_template(
-        _normalize_chat(chat),
-        tokenize=True,
-        add_generation_prompt=True,
-        truncation=True,
-        max_length=prompt_length,
+    prompt_ids = tokenizer.encode(
+        render_plain_prompt(_normalize_chat(chat)),
+        add_special_tokens=False,
     )
+    if len(prompt_ids) > prompt_length:
+        raise ValueError(
+            f"Base completion prompt has {len(prompt_ids)} tokens, exceeding cap {prompt_length}"
+        )
+    return prompt_ids
 
 
 def _decode_response(tokenizer, token_ids: list[int], eos_ids: set[int]) -> str:
@@ -115,6 +119,7 @@ def _sampling_params(max_tokens: int, temperature: float, top_p: float,
                      prompt_logprobs: int | None = None) -> dict[str, Any]:
     params = {
         "max_tokens": max_tokens,
+        "min_tokens": 1,
         "temperature": temperature,
         "top_p": top_p,
         "logprobs": logprobs,

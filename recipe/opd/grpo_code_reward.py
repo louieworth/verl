@@ -1,10 +1,7 @@
 # Copyright 2026
 #
-# Adapter for running code GRPO with the standard verl naive reward manager.
+# Backward-compatible import for the canonical DeepCoder-style code reward.
 
-from verl.utils.reward_score import prime_code
+from recipe.opd.run.grpo.code_reward import compute_score
 
-
-def compute_score(data_source, solution_str, ground_truth, extra_info=None):
-    score, _metadata = prime_code.compute_score(solution_str, ground_truth, continuous=True)
-    return float(score)
+__all__ = ["compute_score"]

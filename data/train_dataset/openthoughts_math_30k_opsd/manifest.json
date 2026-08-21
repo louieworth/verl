@@ -1,0 +1,116 @@
+{
+  "manifest_schema_version": "opd_canonical_training_data/v2",
+  "task": "math",
+  "repo_id": "siyanzhao/Openthoughts_math_30k_opsd",
+  "revision": "1f33e9dc2e8a1c639ca74f8024ad4a9f1f5eae62",
+  "source_kind": "local",
+  "source_input": "/data2/OPSD/data/train/openthoughts_math_30k_opsd/data",
+  "dataset_fingerprint": "34a62e116757b7c2",
+  "selected_source_dataset_fingerprint": "34a62e116757b7c2",
+  "prepared_dataset_fingerprint": "eb11598cc799b4a063dc108f9f7ad492ffc68c2aef2af678d6c6a542c3b79443",
+  "output_row_fingerprints": {
+    "grpo": "734be7acf7b5a943",
+    "sft": "cf217786d5316731"
+  },
+  "model_path": "/data2/.huggingface/Qwen3-4B-Base",
+  "split": "train",
+  "max_samples": null,
+  "min_prompt_coverage": 0.95,
+  "prompt_contract_version": "plain_base_completion_v3",
+  "prompt_format": "plain_base_completion",
+  "completion_separator": "\n",
+  "code_solution_validation": "not_applicable",
+  "code_distill_artifact_version": "not_applicable",
+  "code_grpo_reward_contract_version": "not_applicable",
+  "code_grpo_reward_type": "not_applicable",
+  "code_grpo_test_selection": "not_applicable",
+  "code_grpo_max_test_cases": 0,
+  "parquet_compression": "zstd",
+  "parquet_compression_level": 9,
+  "max_prompt_length": 2048,
+  "max_response_length": 16384,
+  "input_rows": 29434,
+  "retained_grpo_rows": 29426,
+  "retained_sft_rows": 29426,
+  "grpo_rows": 29696,
+  "sft_rows": 29696,
+  "distill_rows": 0,
+  "pad_to_multiple": 512,
+  "grpo_padding_rows": 270,
+  "sft_padding_rows": 270,
+  "distill_padding_rows": 0,
+  "dropped_empty_or_invalid": 7,
+  "dropped_overlong_prompt": 0,
+  "dropped_overlong_sft_response": 0,
+  "dropped_invalid_code_solution": 0,
+  "dropped_contaminated_rows": 1,
+  "prompt_coverage": 1.0,
+  "prompt_length_p95": 172,
+  "prompt_length_max": 1758,
+  "response_length_p95": 1147,
+  "response_length_max": 2887,
+  "contamination_policy": "drop_exact_canonical_math_eval_overlap",
+  "contamination_policy_version": "canonical_math_eval_decontamination_v1",
+  "contamination_hash_version": "nfkc_casefold_no_whitespace_latex_spacing_v1",
+  "contamination_eval_root": "/data2/verl/data/eval_dataset/math",
+  "contamination_eval_datasets": [
+    {
+      "dataset": "aime25",
+      "relative_path": "aime25/aime25_test.parquet",
+      "rows": 30,
+      "parquet_sha256": "adc32e487974f881114e63ae7e3df7b4603beb5d4b6ed6772b1c99581d389263"
+    },
+    {
+      "dataset": "aime26",
+      "relative_path": "aime26/aime26_test.parquet",
+      "rows": 30,
+      "parquet_sha256": "42ad0b2cec78300cc458351dbb974fd1c85b1f00014aaf65f796d10980c294b9"
+    },
+    {
+      "dataset": "hmmt26",
+      "relative_path": "hmmt26/hmmt26_test.parquet",
+      "rows": 33,
+      "parquet_sha256": "870f579b145b80a3b9d239be1f8c605de63f1eab8b22e5e4e8510e144a2758f6"
+    },
+    {
+      "dataset": "amobench",
+      "relative_path": "amobench/amobench_test.parquet",
+      "rows": 39,
+      "parquet_sha256": "aafe3e844c734efcb5c5a187e8b5d787a2e3e5151a3f8aa43dd33da2bc148dfd"
+    }
+  ],
+  "contamination_eval_fingerprint": "6a72021106946ea4a207a703623c6491f2ffe88dc9b7441295a5d30cedbe3a42",
+  "contamination_eval_unique_problem_hashes": 132,
+  "dropped_contamination_details": [
+    {
+      "source_index": 27420,
+      "source": "aops_forum",
+      "sha256": "ca6d9dca883220c7e94a679c2660425429d41688fb418a713bd6786d5a89bf6c",
+      "eval_matches": [
+        {
+          "dataset": "aime26",
+          "eval_index": 0,
+          "sha256": "ca6d9dca883220c7e94a679c2660425429d41688fb418a713bd6786d5a89bf6c"
+        }
+      ]
+    }
+  ],
+  "outputs": {
+    "grpo": "data/train_dataset/openthoughts_math_30k_opsd/train_grpo.parquet",
+    "sft": "data/train_dataset/openthoughts_math_30k_opsd/train_sft.parquet"
+  },
+  "artifacts": {
+    "grpo": {
+      "path": "data/train_dataset/openthoughts_math_30k_opsd/train_grpo.parquet",
+      "bytes": 18988282,
+      "sha256": "48ee67ebec001adee2e8982b07c8dc8511839b8accf7b24d28c01bd9e7987923",
+      "rows": 29696
+    },
+    "sft": {
+      "path": "data/train_dataset/openthoughts_math_30k_opsd/train_sft.parquet",
+      "bytes": 31970025,
+      "sha256": "2f45e0d183486f0f9a950b6f8eff6bd18b1f8c1d14af9197f3f14ccdc30e3536",
+      "rows": 29696
+    }
+  }
+}

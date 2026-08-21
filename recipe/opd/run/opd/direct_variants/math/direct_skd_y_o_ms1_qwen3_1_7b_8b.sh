@@ -11,7 +11,7 @@ export TASK="math"
 export MODEL_PATH="${MODEL_PATH:-Qwen/Qwen3-1.7B}"
 export MODEL_NAME="${MODEL_NAME:-Qwen3-1.7B}"
 export STUDENT_MODEL="${STUDENT_MODEL:-Qwen3-1.7B}"
-export TEACHER_MODEL_PATH="${TEACHER_MODEL_PATH:-Qwen/Qwen3-8B}"
+export TEACHER_MODEL_PATH="${TEACHER_MODEL_PATH:-Qwen/Qwen3-14B}"
 export TEACHER_MODEL="${TEACHER_MODEL:-Qwen3-8B}"
 
 export NNODES="${NNODES:-1}"

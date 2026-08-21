@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Copyright 2025 Bytedance Ltd. and/or its affiliates
 #
-# Prepare BeyondAIME, AMO-Bench, and GSM8K evaluation datasets in verl parquet format.
+# Prepare optional math evaluation datasets in verl parquet format.
 
 import argparse
 import os
@@ -91,6 +91,7 @@ DATASET_CONFIGS = {
     },
     "amobench": {
         "hf_name": "meituan-longcat/AMO-Bench",
+        "revision": "2f422616c25d862984408fbbfaed63a961e8e025",
         "split": "test",
         "prompt_key": "prompt",
         "answer_key": "answer",
@@ -122,9 +123,12 @@ def resolve_dataset_id(local_dataset_root, hf_name):
 def load_raw_dataset(config, local_dataset_root=None):
     dataset_id = resolve_dataset_id(local_dataset_root, config["hf_name"])
     config_name = config.get("config_name")
+    load_kwargs = {"split": config["split"]}
+    if config.get("revision") and local_dataset_root is None:
+        load_kwargs["revision"] = config["revision"]
     if config_name:
-        return datasets.load_dataset(dataset_id, config_name, split=config["split"])
-    return datasets.load_dataset(dataset_id, split=config["split"])
+        return datasets.load_dataset(dataset_id, config_name, **load_kwargs)
+    return datasets.load_dataset(dataset_id, **load_kwargs)
 
 
 def make_map_fn(config):
@@ -165,13 +169,13 @@ def make_map_fn(config):
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Prepare BeyondAIME, AMO-Bench, and GSM8K evaluation datasets in verl parquet format."
+        description="Prepare AMO-Bench (canonical) and optional legacy evaluation datasets in verl parquet format."
     )
     parser.add_argument(
         "--datasets",
         type=str,
-        default="beyondaime,amobench,gsm8k",
-        help="Comma-separated dataset names. Supported: beyondaime, amobench, gsm8k",
+        default="amobench",
+        help="Comma-separated dataset names. Canonical default: amobench; optional legacy: beyondaime,gsm8k",
     )
     parser.add_argument(
         "--local_dataset_path",
@@ -180,7 +184,7 @@ def parse_args():
     )
     parser.add_argument(
         "--local_save_dir",
-        default="/data/data/jiangli/huggingface/datasets",
+        default="data/eval_dataset/math",
         help="Base directory for the prepared parquet files.",
     )
     parser.add_argument(
@@ -212,6 +216,11 @@ def main():
         dataset = load_raw_dataset(config, local_dataset_root=args.local_dataset_path)
         if "filter_fn" in config:
             dataset = dataset.filter(config["filter_fn"])
+        if dataset_name == "amobench" and len(dataset) != 39:
+            raise ValueError(
+                f"Expected the canonical 39 parser-valid AMO-Bench problems, found {len(dataset)}. "
+                "Pin or audit the upstream dataset before evaluating."
+            )
         dataset = dataset.map(make_map_fn(config), with_indices=True, remove_columns=dataset.column_names)
         dataset.to_parquet(output_path)
         print(f"Saved {dataset_name} to {output_path}")

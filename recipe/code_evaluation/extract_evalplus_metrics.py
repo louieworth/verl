@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 PASS = "pass"
+EXPECTED_TASKS = {"humaneval": 164, "mbpp": 378}
 
 
 def find_json(root: Path, dataset: str) -> Path:
@@ -36,8 +37,10 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", required=True)
     parser.add_argument("--dataset", required=True)
-    parser.add_argument("--pass_k", type=int, default=4)
+    parser.add_argument("--pass_k", type=int, default=16)
     args = parser.parse_args()
+    if args.pass_k <= 0:
+        raise SystemExit("--pass_k must be positive")
     path = find_json(Path(args.root), args.dataset)
     with open(path) as f:
         data = json.load(f)
@@ -46,11 +49,23 @@ def main() -> None:
     if not eval_by_task:
         raise SystemExit(f"No EvalPlus eval entries found in {path}")
 
+    expected_tasks = EXPECTED_TASKS.get(args.dataset.lower())
+    if expected_tasks is not None and len(eval_by_task) != expected_tasks:
+        raise SystemExit(
+            f"EvalPlus {args.dataset} has {len(eval_by_task)} evaluated tasks in {path}; "
+            f"canonical evaluation requires {expected_tasks}"
+        )
+
     avg_values = []
     pass_values = []
-    for samples in eval_by_task.values():
+    for task_id, samples in eval_by_task.items():
         if not samples:
-            continue
+            raise SystemExit(f"EvalPlus task {task_id} has no evaluated samples in {path}")
+        if len(samples) < args.pass_k:
+            raise SystemExit(
+                f"EvalPlus task {task_id} has {len(samples)} samples; "
+                f"Avg@{args.pass_k}/Pass@{args.pass_k} requires at least {args.pass_k}"
+            )
         limited = samples[: args.pass_k]
         correct = sum(1 for sample in limited if is_correct(sample))
         avg_values.append(correct / len(limited))
@@ -59,6 +74,7 @@ def main() -> None:
         raise SystemExit(f"No EvalPlus samples found in {path}")
     print(f"avg={sum(avg_values) / len(avg_values)}")
     print(f"pass={sum(pass_values) / len(pass_values)}")
+    print(f"num_problems={len(avg_values)}")
 
 
 if __name__ == "__main__":

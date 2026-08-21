@@ -25,7 +25,10 @@ def build_trainer(tmp_path, rank: int):
     trainer.rank = rank
     trainer.config = SimpleNamespace(
         model_save_dir=str(tmp_path),
-        student_model_path="Qwen/Qwen3-4B-Instruct-2507",
+        student_model_path="Qwen/Qwen3-4B-Base",
+        use_lora=True,
+        lora_rank=64,
+        lora_alpha=128,
     )
     trainer._find_latest_checkpoint = lambda: str(tmp_path / "global_step_27")
     return trainer
@@ -45,9 +48,9 @@ def test_export_hf_model_rank0_success(monkeypatch, tmp_path):
     trainer._export_hf_model()
 
     assert recorded["check"] is True
-    assert recorded["cmd"][:4] == [recorded["cmd"][0], "-m", "verl.model_merger", "merge"]
-    assert "--target_dir" in recorded["cmd"]
-    target_dir_index = recorded["cmd"].index("--target_dir")
+    assert recorded["cmd"][:3] == [recorded["cmd"][0], "-m", "recipe.opd.export_checkpoint"]
+    assert "--target-dir" in recorded["cmd"]
+    target_dir_index = recorded["cmd"].index("--target-dir")
     assert recorded["cmd"][target_dir_index + 1] == str(tmp_path / "hf_merged")
 
 
@@ -74,3 +77,50 @@ def test_export_hf_model_non_rank0_raises_rank0_failure(monkeypatch, tmp_path):
 
     with pytest.raises(RuntimeError, match="FSDP checkpoint export failed on rank 0"):
         trainer._export_hf_model()
+
+
+def test_same_global_step_checkpoint_save_is_idempotent(tmp_path):
+    trainer = object.__new__(KLTrainer)
+    trainer.rank = 0
+    trainer.global_step = 100
+    trainer.config = SimpleNamespace(
+        model_save_dir=str(tmp_path),
+        max_ckpt_to_keep=1,
+        use_lora=False,
+    )
+    calls = []
+    trainer.student_engine = SimpleNamespace(
+        save_checkpoint=lambda **kwargs: calls.append(kwargs)
+    )
+
+    trainer._save_checkpoint()
+    trainer._save_checkpoint()
+
+    assert len(calls) == 1
+    assert calls[0]["global_step"] == 100
+    assert calls[0]["local_path"] == str(tmp_path / "global_step_100")
+
+
+@pytest.mark.parametrize(
+    ("global_step", "expected_save", "expected_milestone"),
+    [
+        (14, False, False),
+        (15, True, True),
+        (29, True, True),
+        (44, True, True),
+        (50, True, False),
+        (58, True, True),
+    ],
+)
+def test_optimizer_eval_milestones_force_exact_checkpoints(
+    global_step, expected_save, expected_milestone
+):
+    trainer = object.__new__(KLTrainer)
+    trainer.global_step = global_step
+    trainer.eval_milestones = (15, 29, 44, 58)
+    trainer.config = SimpleNamespace(save_steps=50, wandb_global_step_offset=0)
+
+    assert trainer._should_save_checkpoint_after_step() == (
+        expected_save,
+        expected_milestone,
+    )

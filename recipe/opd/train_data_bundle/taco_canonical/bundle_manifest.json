@@ -1,0 +1,120 @@
+{
+  "bundle_schema_version": "opd_taco_git_bundle/v1",
+  "chunk_bytes": 40000000,
+  "canonical_manifest": {
+    "path": "canonical_manifest.json",
+    "bytes": 3184,
+    "sha256": "63360ed67b34036e79933565d0c3b24cb76327cbd1bf8728cbab08250eabeeac"
+  },
+  "artifacts": {
+    "grpo": {
+      "target": "train_grpo.parquet",
+      "bytes": 598607450,
+      "sha256": "2573a3bfd019ac302e95d86fa60d708d34c8601bfe2f81be67f1fb1d52bc30bf",
+      "rows": 18944,
+      "chunks": [
+        {
+          "path": "chunks/train_grpo.parquet.chunk-0000.bin",
+          "bytes": 40000000,
+          "sha256": "d8b9a404c54c83dd8b2ef0aeb3c81ab02a1b51a6a1d0565fd0c328956ce34915"
+        },
+        {
+          "path": "chunks/train_grpo.parquet.chunk-0001.bin",
+          "bytes": 40000000,
+          "sha256": "4c4d214633691206e99a3d8eda3884dfd37691b5b708797c54546d7bf9c61cf1"
+        },
+        {
+          "path": "chunks/train_grpo.parquet.chunk-0002.bin",
+          "bytes": 40000000,
+          "sha256": "be536979189af92bb0c60da62ad0f9bb8d4c7aa6132fa2a22afefb797b42f644"
+        },
+        {
+          "path": "chunks/train_grpo.parquet.chunk-0003.bin",
+          "bytes": 40000000,
+          "sha256": "e5032002b943452a14f29c0dcd77ecf5c0578bb35c83d5788cefbd4b663e601d"
+        },
+        {
+          "path": "chunks/train_grpo.parquet.chunk-0004.bin",
+          "bytes": 40000000,
+          "sha256": "8bc6505a4efe1b11cb80e6c47e5b2f7863a238b44cb073fd8f6c786de9f05bfe"
+        },
+        {
+          "path": "chunks/train_grpo.parquet.chunk-0005.bin",
+          "bytes": 40000000,
+          "sha256": "af1ba805d56964732570257d04c7dd777c57fd753694ca44fa8e3904687bb5ce"
+        },
+        {
+          "path": "chunks/train_grpo.parquet.chunk-0006.bin",
+          "bytes": 40000000,
+          "sha256": "6f4611e61d011f7bd346f6eebd39720147ac0d51f05fc702e9e1f4e1a355242a"
+        },
+        {
+          "path": "chunks/train_grpo.parquet.chunk-0007.bin",
+          "bytes": 40000000,
+          "sha256": "2eeb9e6e5223fd8bfe251c1d96aac9b95cb87cdcf48ae7ed329f035494b05fac"
+        },
+        {
+          "path": "chunks/train_grpo.parquet.chunk-0008.bin",
+          "bytes": 40000000,
+          "sha256": "47b78682bf6fe311b17a456ccf2553368973abc3bcd71d12f30afd04d90f9022"
+        },
+        {
+          "path": "chunks/train_grpo.parquet.chunk-0009.bin",
+          "bytes": 40000000,
+          "sha256": "0fc2a3d4b51882e878859984b5200c5893d9adbc7df6fbcf8df53bd57a6f78dd"
+        },
+        {
+          "path": "chunks/train_grpo.parquet.chunk-0010.bin",
+          "bytes": 40000000,
+          "sha256": "cc96854c478095ea64b7272640d0bcb5e3ad0184bbf2011757865c764e029401"
+        },
+        {
+          "path": "chunks/train_grpo.parquet.chunk-0011.bin",
+          "bytes": 40000000,
+          "sha256": "432bc92b9a1f1b0be449e57c6a5f2c7094860ed4d3c79a8b1f7bbf2b669cb208"
+        },
+        {
+          "path": "chunks/train_grpo.parquet.chunk-0012.bin",
+          "bytes": 40000000,
+          "sha256": "83e96bf6bb7f5026225b31507491a542e9ea562246875b1b9a57dad6ff55505a"
+        },
+        {
+          "path": "chunks/train_grpo.parquet.chunk-0013.bin",
+          "bytes": 40000000,
+          "sha256": "a7ccf1a378524c0af7160afc1ec18711abae599cc6d965d058eaf6dd20913d98"
+        },
+        {
+          "path": "chunks/train_grpo.parquet.chunk-0014.bin",
+          "bytes": 38607450,
+          "sha256": "41b0a196ebe81e4105f904f6eca9e6a645ea67e0453ee12d9559ec6909ab76e6"
+        }
+      ]
+    },
+    "sft": {
+      "target": "train_sft.parquet",
+      "bytes": 23424613,
+      "sha256": "de879e58bbea2621253e37c8947c806433ae539a66b08934780d878078a9f12d",
+      "rows": 18944,
+      "chunks": [
+        {
+          "path": "chunks/train_sft.parquet.chunk-0000.bin",
+          "bytes": 23424613,
+          "sha256": "de879e58bbea2621253e37c8947c806433ae539a66b08934780d878078a9f12d"
+        }
+      ]
+    },
+    "distill": {
+      "target": "train_distill.parquet",
+      "bytes": 20507076,
+      "sha256": "ceb4fb3cedcdb085a3ff1de8e7df1830a532ea93136909cc08678179e348867b",
+      "rows": 18944,
+      "chunks": [
+        {
+          "path": "chunks/train_distill.parquet.chunk-0000.bin",
+          "bytes": 20507076,
+          "sha256": "ceb4fb3cedcdb085a3ff1de8e7df1830a532ea93136909cc08678179e348867b"
+        }
+      ]
+    }
+  }
+}
