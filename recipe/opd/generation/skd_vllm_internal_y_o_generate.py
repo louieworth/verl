@@ -96,6 +96,12 @@ def parse_args() -> argparse.Namespace:
 
 
 def _validate_args(args: argparse.Namespace) -> None:
+    if args.distill_mode == "opsd":
+        raise ValueError(
+            "OPSD SKD requires distinct student x and teacher x+y* prefixes. "
+            "The vLLM-internal speculative sampler supports only one shared prefix; "
+            "use Y_O_ROLLOUT_MODE=skd_vllm instead."
+        )
     if args.student_temperature != args.teacher_temperature:
         raise ValueError(
             "vLLM internal speculative decoding uses one SamplingParams object; "

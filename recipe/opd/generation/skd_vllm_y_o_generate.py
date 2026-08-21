@@ -35,6 +35,9 @@ class RowState:
     prompt_ids: list[int]
     generated: list[int]
     row_idx: int
+    # Student always drafts from x. OPSD teacher verification uses x+y*,
+    # while OPD leaves this unset and uses the exact student prefix.
+    teacher_prompt_ids: list[int] | None = None
     effective_max_tokens: int = 0
     truncated_by_budget: bool = False
 
@@ -61,6 +64,64 @@ def _prompt_token_ids(tokenizer, chat: Any, prompt_length: int) -> list[int]:
             f"Base completion prompt has {len(prompt_ids)} tokens, exceeding cap {prompt_length}"
         )
     return prompt_ids
+
+
+def _teacher_prefix_ids(state: RowState) -> list[int]:
+    return state.teacher_prompt_ids if state.teacher_prompt_ids is not None else state.prompt_ids
+
+
+def _build_teacher_prompt_ids(
+    tokenizer,
+    row: dict[str, Any],
+    student_prompt_ids: list[int],
+    *,
+    distill_mode: str,
+    task: str,
+    teacher_prompt_length: int,
+) -> list[int]:
+    """Build the SKD teacher prefix under the canonical OPD/OPSD contract."""
+    if distill_mode == "opd":
+        return list(student_prompt_ids)
+    if distill_mode != "opsd":
+        raise ValueError(f"unsupported distill_mode={distill_mode!r}")
+
+    extra_info = row.get("extra_info")
+    if hasattr(extra_info, "as_py"):
+        extra_info = extra_info.as_py()
+    if not isinstance(extra_info, dict):
+        raise ValueError("OPSD SKD requires extra_info.problem and extra_info.expert_cot")
+    problem = str(extra_info.get("problem") or "").strip()
+    expert_solution = str(extra_info.get("expert_cot") or "").strip()
+    if not problem:
+        raise ValueError("OPSD SKD requires non-empty extra_info.problem")
+    if not expert_solution:
+        raise ValueError("OPSD SKD requires non-empty extra_info.expert_cot (y*)")
+
+    # Lazy imports keep the rollout primitives usable in lightweight CPU tests.
+    from recipe.opd.dataset.data_utils import build_teacher_prompt
+    from recipe.opd.generation.y_r_prepare import _fit_rewrite_prompt
+
+    def render_prompt(expert_text: str, _initial_response: str) -> str:
+        return build_teacher_prompt(
+            problem,
+            expert_text,
+            use_initial_response=False,
+            distill_mode="opsd",
+            task=task,
+        )
+
+    teacher_prompt = _fit_rewrite_prompt(
+        render_prompt,
+        expert_solution,
+        "",
+        tokenizer,
+        teacher_prompt_length,
+    )
+    return _prompt_token_ids(
+        tokenizer,
+        [{"role": "user", "content": teacher_prompt}],
+        teacher_prompt_length,
+    )
 
 
 def _decode_response(tokenizer, token_ids: list[int], eos_ids: set[int]) -> str:
@@ -431,23 +492,30 @@ def _run_batch(*, states: list[RowState], tokenizer, student_llm, teacher_llm,
                 "parallel": int(parallel_flag),
             }, refresh=False)
 
-    def generate_gamma1(prompts):
+    def generate_gamma1(student_prompts, teacher_prompts):
         if executor is None:
             return (
-                student_llm.generate(prompts, student_params, use_tqdm=False),
-                teacher_llm.generate(prompts, teacher_params, use_tqdm=False),
+                student_llm.generate(student_prompts, student_params, use_tqdm=False),
+                teacher_llm.generate(teacher_prompts, teacher_params, use_tqdm=False),
             )
-        student_future = executor.submit(student_llm.generate, prompts, student_params, use_tqdm=False)
-        teacher_future = executor.submit(teacher_llm.generate, prompts, teacher_params, use_tqdm=False)
+        student_future = executor.submit(
+            student_llm.generate, student_prompts, student_params, use_tqdm=False
+        )
+        teacher_future = executor.submit(
+            teacher_llm.generate, teacher_prompts, teacher_params, use_tqdm=False
+        )
         return student_future.result(), teacher_future.result()
 
     def make_proposal_bundle(lane_active: list[RowState]) -> dict[str, Any] | None:
         if not lane_active:
             return None
-        prompts = [{"prompt_token_ids": state.prompt_ids + state.generated} for state in lane_active]
+        student_prompts = [
+            {"prompt_token_ids": state.prompt_ids + state.generated}
+            for state in lane_active
+        ]
         proposal_limits = []
         student_groups: dict[int, list[tuple[int, dict[str, Any]]]] = {}
-        for index, (state, prompt) in enumerate(zip(lane_active, prompts)):
+        for index, (state, prompt) in enumerate(zip(lane_active, student_prompts)):
             remaining = max(1, state.effective_max_tokens - len(state.generated))
             proposal_limit = min(gamma, remaining)
             if proposal_limit > 1 and proposal_limit == remaining:
@@ -468,22 +536,24 @@ def _run_batch(*, states: list[RowState], tokenizer, student_llm, teacher_llm,
         records = []
         single_teacher_prompts = []
         multi_teacher_prompts = []
-        for state, prompt, proposal_limit, student_output in zip(lane_active, prompts, proposal_limits, student_outputs):
+        for state, _student_prompt, proposal_limit, student_output in zip(
+            lane_active, student_prompts, proposal_limits, student_outputs
+        ):
             if student_output is None:
                 raise RuntimeError("missing SKD student proposal output")
-            prefix = prompt["prompt_token_ids"]
+            teacher_prefix = _teacher_prefix_ids(state) + state.generated
             proposed = _token_ids(student_output)[:proposal_limit] or [eos_fallback]
             if len(proposed) == 1:
                 records.append({"kind": "single", "state": state, "proposed": proposed})
-                single_teacher_prompts.append(prompt)
+                single_teacher_prompts.append({"prompt_token_ids": teacher_prefix})
             else:
                 records.append({
                     "kind": "multi",
                     "state": state,
-                    "prefix": prefix,
+                    "teacher_prefix_len": len(teacher_prefix),
                     "proposed": proposed,
                 })
-                multi_teacher_prompts.append({"prompt_token_ids": prefix + proposed})
+                multi_teacher_prompts.append({"prompt_token_ids": teacher_prefix + proposed})
         return {
             "records": records,
             "single_teacher_prompts": single_teacher_prompts,
@@ -532,12 +602,12 @@ def _run_batch(*, states: list[RowState], tokenizer, student_llm, teacher_llm,
                 continue
 
             teacher_output = next(multi_outputs)
-            prefix_len = len(record["prefix"])
+            teacher_prefix_len = int(record["teacher_prefix_len"])
             rejected = False
             finished = False
             for offset, proposed in enumerate(record["proposed"]):
                 accepted = _one_pos_accepts(
-                    _prompt_logprobs_at(teacher_output, prefix_len + offset),
+                    _prompt_logprobs_at(teacher_output, teacher_prefix_len + offset),
                     int(proposed),
                     top_k=top_k,
                     top_p=top_p,
@@ -559,7 +629,7 @@ def _run_batch(*, states: list[RowState], tokenizer, student_llm, teacher_llm,
 
         if pending_replacements:
             replacement_prompts = [
-                {"prompt_token_ids": state.prompt_ids + state.generated}
+                {"prompt_token_ids": _teacher_prefix_ids(state) + state.generated}
                 for state in pending_replacements
             ]
             replacement_outputs = teacher_llm.generate(
@@ -613,11 +683,20 @@ def _run_batch(*, states: list[RowState], tokenizer, student_llm, teacher_llm,
             return
 
         while active:
-            prompts = [{"prompt_token_ids": state.prompt_ids + state.generated} for state in active]
+            student_prompts = [
+                {"prompt_token_ids": state.prompt_ids + state.generated}
+                for state in active
+            ]
+            teacher_prompts = [
+                {"prompt_token_ids": _teacher_prefix_ids(state) + state.generated}
+                for state in active
+            ]
             next_active: list[RowState] = []
 
             if gamma == 1:
-                student_outputs, teacher_outputs = generate_gamma1(prompts)
+                student_outputs, teacher_outputs = generate_gamma1(
+                    student_prompts, teacher_prompts
+                )
                 for state, student_output, teacher_output in zip(active, student_outputs, teacher_outputs):
                     proposed = _first_token(student_output, eos_fallback)
                     replacement = _first_token(teacher_output, proposed)
@@ -674,8 +753,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--teacher_model_path", default="")
     parser.add_argument("--tokenizer_path", default="")
     parser.add_argument("--distill_mode", choices=["opd", "opsd"], default="opd")
+    parser.add_argument("--task", choices=["math", "code"], required=True)
     parser.add_argument("--max_tokens", type=int, required=True)
     parser.add_argument("--prompt_length", type=int, required=True)
+    parser.add_argument("--teacher_prompt_length", type=int, required=True)
     parser.add_argument("--max_model_len", type=int, required=True)
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--gamma", type=int, default=5)
@@ -715,6 +796,7 @@ def main() -> None:
 
     dataset = pd.read_parquet(args.input)
     chats = dataset[args.prompt_key].tolist()
+    rows = dataset.to_dict(orient="records")
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
     eos_ids = set()
     if tokenizer.eos_token_id is not None:
@@ -722,14 +804,31 @@ def main() -> None:
     if tokenizer.pad_token_id is not None:
         eos_ids.add(int(tokenizer.pad_token_id))
 
-    states = [
-        RowState(
-            prompt_ids=_prompt_token_ids(tokenizer, chat, args.prompt_length),
-            generated=[],
-            row_idx=i,
+    states = []
+    for i, (chat, row) in enumerate(zip(chats, rows)):
+        student_prompt_ids = _prompt_token_ids(tokenizer, chat, args.prompt_length)
+        teacher_prompt_ids = _build_teacher_prompt_ids(
+            tokenizer,
+            row,
+            student_prompt_ids,
+            distill_mode=args.distill_mode,
+            task=args.task,
+            teacher_prompt_length=args.teacher_prompt_length,
         )
-        for i, chat in enumerate(chats)
-    ]
+        required_context = max(len(student_prompt_ids), len(teacher_prompt_ids)) + args.max_tokens
+        if required_context > args.max_model_len:
+            raise ValueError(
+                f"row {i} requires {required_context} tokens for SKD rollout, "
+                f"exceeding max_model_len={args.max_model_len}"
+            )
+        states.append(
+            RowState(
+                prompt_ids=student_prompt_ids,
+                teacher_prompt_ids=teacher_prompt_ids,
+                generated=[],
+                row_idx=i,
+            )
+        )
     responses: list[str | None] = [None] * len(states)
 
     max_logprobs = max(20, int(args.top_k or 0))
@@ -750,7 +849,9 @@ def main() -> None:
     teacher_max_num_batched_tokens = args.teacher_max_num_batched_tokens or args.max_num_batched_tokens
     print(
         "SKD vLLM y_o rollout: "
-        f"rows={len(states)} max_tokens={args.max_tokens} prompt_length={args.prompt_length} "
+        f"rows={len(states)} task={args.task} distill_mode={args.distill_mode} "
+        f"max_tokens={args.max_tokens} prompt_length={args.prompt_length} "
+        f"teacher_prompt_length={args.teacher_prompt_length} "
         f"max_model_len={args.max_model_len} batch={args.batch_size} gamma={args.gamma} "
         f"student={args.student_model_path} teacher={teacher_model_path} "
         f"student_mem={student_gpu_memory_utilization} teacher_mem={teacher_gpu_memory_utilization} "
@@ -843,6 +944,10 @@ def main() -> None:
     manifest = {
         "mode": "skd_vllm_y_o",
         "distill_mode": args.distill_mode,
+        "task": args.task,
+        "teacher_prompt_contract": (
+            "opsd_x_y_star_v1" if args.distill_mode == "opsd" else "opd_x_only_v1"
+        ),
         "input": args.input,
         "output": args.output,
         "rows": len(dataset),
@@ -852,6 +957,10 @@ def main() -> None:
         "parallel_student_teacher": bool(args.parallel_student_teacher and not share_engine),
         "max_tokens": args.max_tokens,
         "prompt_length": args.prompt_length,
+        "teacher_prompt_length": args.teacher_prompt_length,
+        "max_observed_teacher_prompt_tokens": max(
+            (len(_teacher_prefix_ids(state)) for state in states), default=0
+        ),
         "max_model_len": args.max_model_len,
         "gamma": args.gamma,
         "top_k": args.top_k,

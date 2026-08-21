@@ -533,7 +533,13 @@ case "$Y_O_ROLLOUT_MODE" in
                 ;;
         esac
         ;;
-    skd|skd_vllm|skd_vllm_internal) ;;
+    skd|skd_vllm) ;;
+    skd_vllm_internal)
+        if [ "$DISTILL_MODE" = "opsd" ]; then
+            echo "ERROR: skd_vllm_internal cannot give student x and OPSD teacher x+y* distinct prefixes; use Y_O_ROLLOUT_MODE=skd_vllm." >&2
+            exit 1
+        fi
+        ;;
     *) echo "ERROR: Y_O_ROLLOUT_MODE must be one of: student, teacher, expert, skd, skd_vllm, skd_vllm_internal (got: $Y_O_ROLLOUT_MODE)" >&2; exit 1 ;;
 esac
 if [ "$Y_O_ROLLOUT_MODE" != "teacher" ]; then
@@ -576,6 +582,25 @@ SKD_VLLM_MAX_NUM_SEQS=${SKD_VLLM_MAX_NUM_SEQS:-$SKD_ROLLOUT_BATCH_SIZE}
 SKD_VLLM_MAX_NUM_BATCHED_TOKENS=${SKD_VLLM_MAX_NUM_BATCHED_TOKENS:-$ROLLOUT_MAX_NUM_BATCHED_TOKENS}
 SKD_PARALLEL_STUDENT_TEACHER=${SKD_PARALLEL_STUDENT_TEACHER:-true}
 SKD_PIPELINE_LANES=${SKD_PIPELINE_LANES:-2}
+if [ "$DISTILL_MODE" = "opsd" ]; then
+    SKD_TEACHER_PROMPT_CONTRACT=${SKD_TEACHER_PROMPT_CONTRACT:-"opsd_x_y_star_v1"}
+    SKD_TEACHER_PROMPT_LENGTH=${SKD_TEACHER_PROMPT_LENGTH:-$((BASE_PROMPT_LENGTH + EXPERT_SOLUTION_PROMPT_LENGTH))}
+else
+    SKD_TEACHER_PROMPT_CONTRACT=${SKD_TEACHER_PROMPT_CONTRACT:-"opd_x_only_v1"}
+    SKD_TEACHER_PROMPT_LENGTH=${SKD_TEACHER_PROMPT_LENGTH:-$BASE_PROMPT_LENGTH}
+fi
+if [ "$SKD_TEACHER_PROMPT_LENGTH" -gt "$MAX_DERIVED_PROMPT_LENGTH" ]; then
+    echo "WARNING: capping SKD teacher prompt $SKD_TEACHER_PROMPT_LENGTH -> $MAX_DERIVED_PROMPT_LENGTH to preserve the response budget." >&2
+    SKD_TEACHER_PROMPT_LENGTH=$MAX_DERIVED_PROMPT_LENGTH
+fi
+SKD_ROLLOUT_MAX_MODEL_LEN=$((SKD_TEACHER_PROMPT_LENGTH + MAX_RESPONSE_LENGTH + ROLLOUT_CHAT_TEMPLATE_TOKEN_BUFFER))
+if [ "$STAGE1_ROLLOUT_MAX_MODEL_LEN" -gt "$SKD_ROLLOUT_MAX_MODEL_LEN" ]; then
+    SKD_ROLLOUT_MAX_MODEL_LEN=$STAGE1_ROLLOUT_MAX_MODEL_LEN
+fi
+if [ "$SKD_ROLLOUT_MAX_MODEL_LEN" -gt "$MODEL_CONTEXT_LENGTH" ]; then
+    echo "ERROR: SKD_ROLLOUT_MAX_MODEL_LEN=$SKD_ROLLOUT_MAX_MODEL_LEN exceeds MODEL_CONTEXT_LENGTH=$MODEL_CONTEXT_LENGTH" >&2
+    exit 1
+fi
 # Persist the semantic SKD rollout configuration only for SKD runs. Keeping this
 # block empty for student/teacher/expert prevents operationally irrelevant SKD
 # environment variables from invalidating their gen_results identity.
@@ -593,6 +618,9 @@ skd_teacher_top_p: $SKD_TEACHER_TOP_P
 skd_rollout_batch_size: $SKD_ROLLOUT_BATCH_SIZE
 skd_pipeline_lanes: $SKD_PIPELINE_LANES
 skd_parallel_student_teacher: $SKD_PARALLEL_STUDENT_TEACHER
+skd_teacher_prompt_contract: $SKD_TEACHER_PROMPT_CONTRACT
+skd_teacher_prompt_length: $SKD_TEACHER_PROMPT_LENGTH
+skd_rollout_max_model_len: $SKD_ROLLOUT_MAX_MODEL_LEN
 EOF
 )"
         ;;
@@ -605,8 +633,8 @@ TEACHER_TRAJECTORY_MAX_NUM_BATCHED_TOKENS=$ROLLOUT_MAX_NUM_BATCHED_TOKENS
 if [ "$TEACHER_TRAJECTORY_MAX_NUM_BATCHED_TOKENS" -lt "$TEACHER_TRAJECTORY_ROLLOUT_MAX_MODEL_LEN" ]; then
     TEACHER_TRAJECTORY_MAX_NUM_BATCHED_TOKENS=$TEACHER_TRAJECTORY_ROLLOUT_MAX_MODEL_LEN
 fi
-if [ "$SKD_VLLM_MAX_NUM_BATCHED_TOKENS" -lt "$STAGE1_ROLLOUT_MAX_NUM_BATCHED_TOKENS" ]; then
-    SKD_VLLM_MAX_NUM_BATCHED_TOKENS=$STAGE1_ROLLOUT_MAX_NUM_BATCHED_TOKENS
+if [ "$SKD_VLLM_MAX_NUM_BATCHED_TOKENS" -lt "$SKD_ROLLOUT_MAX_MODEL_LEN" ]; then
+    SKD_VLLM_MAX_NUM_BATCHED_TOKENS=$SKD_ROLLOUT_MAX_MODEL_LEN
 fi
 STAGE2_ROLLOUT_MAX_NUM_BATCHED_TOKENS=$ROLLOUT_MAX_NUM_BATCHED_TOKENS
 if [ "$STAGE2_ROLLOUT_MAX_NUM_BATCHED_TOKENS" -lt "$STAGE2_ROLLOUT_MAX_MODEL_LEN" ]; then
@@ -1128,7 +1156,10 @@ skd_teacher_temperature=$SKD_TEACHER_TEMPERATURE
 skd_teacher_top_p=$SKD_TEACHER_TOP_P
 skd_rollout_batch_size=$SKD_ROLLOUT_BATCH_SIZE
 skd_pipeline_lanes=$SKD_PIPELINE_LANES
-skd_parallel_student_teacher=$SKD_PARALLEL_STUDENT_TEACHER"
+skd_parallel_student_teacher=$SKD_PARALLEL_STUDENT_TEACHER
+skd_teacher_prompt_contract=$SKD_TEACHER_PROMPT_CONTRACT
+skd_teacher_prompt_length=$SKD_TEACHER_PROMPT_LENGTH
+skd_rollout_max_model_len=$SKD_ROLLOUT_MAX_MODEL_LEN"
             ;;
     esac
     GEN_RESULTS_RUN_SIGNATURE_CONTENT="$(cat <<EOF
@@ -1233,6 +1264,11 @@ case "${KL_CONFIG_DRY_RUN:-false}" in
         echo "  eval pass_k:         $PASS_K"
         echo "  student model:       $MODEL_PATH"
         echo "  teacher model:       ${TEACHER_MODEL_PATH:-$MODEL_PATH}"
+        if [[ "$Y_O_ROLLOUT_MODE" == skd* ]]; then
+            echo "  skd teacher prompt:  $SKD_TEACHER_PROMPT_CONTRACT"
+            echo "  skd teacher length:  $SKD_TEACHER_PROMPT_LENGTH"
+            echo "  skd max model len:   $SKD_ROLLOUT_MAX_MODEL_LEN"
+        fi
         echo "  run name:            $MODEL_RUN_NAME"
         echo "  output dir:          $OUTPUT_BASE_DIR"
         echo "  model dir:           $MODEL_SAVE_BASE_DIR"
@@ -2186,9 +2222,11 @@ generate_stage1_y_o_responses() {
                 --teacher_model_path "${current_teacher_model_path:-}" \
                 --tokenizer_path "$current_model_path" \
                 --distill_mode "$DISTILL_MODE" \
+                --task "$TASK" \
                 --max_tokens "$MAX_RESPONSE_LENGTH" \
                 --prompt_length "$BASE_PROMPT_LENGTH" \
-                --max_model_len "$STAGE1_ROLLOUT_MAX_MODEL_LEN" \
+                --teacher_prompt_length "$SKD_TEACHER_PROMPT_LENGTH" \
+                --max_model_len "$SKD_ROLLOUT_MAX_MODEL_LEN" \
                 --batch_size "$SKD_ROLLOUT_BATCH_SIZE" \
                 --gamma "$SKD_GAMMA" \
                 --top_k "$SKD_ACCEPT_TOP_K" \
@@ -2357,6 +2395,12 @@ metadata_matches_step1_reuse_context() {
             [ "$value" = "$SKD_PIPELINE_LANES" ] || return 1
             value="$(gen_results_metadata_value "$meta" skd_parallel_student_teacher)"
             [ "$value" = "$SKD_PARALLEL_STUDENT_TEACHER" ] || return 1
+            value="$(gen_results_metadata_value "$meta" skd_teacher_prompt_contract)"
+            [ "$value" = "$SKD_TEACHER_PROMPT_CONTRACT" ] || return 1
+            value="$(gen_results_metadata_value "$meta" skd_teacher_prompt_length)"
+            [ "$value" = "$SKD_TEACHER_PROMPT_LENGTH" ] || return 1
+            value="$(gen_results_metadata_value "$meta" skd_rollout_max_model_len)"
+            [ "$value" = "$SKD_ROLLOUT_MAX_MODEL_LEN" ] || return 1
             ;;
     esac
     value="$(gen_results_metadata_value "$meta" train_data_path)"
@@ -3359,6 +3403,7 @@ elif [ "$Y_O_ROLLOUT_MODE" = "expert" ]; then
 fi
 if [[ "$Y_O_ROLLOUT_MODE" == skd* ]]; then
     echo "  SKD Rollout:    batch=$SKD_ROLLOUT_BATCH_SIZE max_num_seqs=$SKD_VLLM_MAX_NUM_SEQS pipeline_lanes=$SKD_PIPELINE_LANES gamma=$SKD_GAMMA top_k=$SKD_ACCEPT_TOP_K top_p=$SKD_ACCEPT_TOP_P"
+    echo "  SKD Teacher:    contract=$SKD_TEACHER_PROMPT_CONTRACT prompt=$SKD_TEACHER_PROMPT_LENGTH max_model_len=$SKD_ROLLOUT_MAX_MODEL_LEN"
 fi
     echo "  Grad Accum:     $GRADIENT_ACCUMULATION_STEPS ($GRADIENT_ACCUMULATION_SOURCE)"
     echo "  FSDP:           $FSDP_STRATEGY (size=$FSDP_SIZE, sp=$SP_SIZE)"

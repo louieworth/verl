@@ -14,7 +14,13 @@ MODULE_PATH = REPO_ROOT / "recipe" / "opd" / "generation" / "skd_vllm_y_o_genera
 
 # The helpers tested here are pure Python. Stub heavy runtime-only imports so
 # this regression test runs in CPU-only pytest environments without torch/vLLM.
-_STUBBED_MODULE_NAMES = ("vllm", "pandas", "tqdm", "transformers")
+_STUBBED_MODULE_NAMES = (
+    "vllm",
+    "pandas",
+    "tqdm",
+    "transformers",
+    "recipe.opd.base_completion",
+)
 _MISSING_MODULE = object()
 _ORIGINAL_MODULES = {
     name: sys.modules.get(name, _MISSING_MODULE) for name in _STUBBED_MODULE_NAMES
@@ -48,6 +54,20 @@ transformers_stub = types.ModuleType("transformers")
 transformers_stub.AutoTokenizer = object
 sys.modules["transformers"] = transformers_stub
 
+base_completion_stub = types.ModuleType("recipe.opd.base_completion")
+
+
+def _render_plain_prompt_for_test(messages):
+    if isinstance(messages, str):
+        text = messages
+    else:
+        text = "\n".join(message["content"] for message in messages)
+    return text.strip() + "\n"
+
+
+base_completion_stub.render_plain_prompt = _render_plain_prompt_for_test
+sys.modules["recipe.opd.base_completion"] = base_completion_stub
+
 spec = importlib.util.spec_from_file_location("skd_vllm_y_o_generate_for_test", MODULE_PATH)
 skd_module = importlib.util.module_from_spec(spec)
 assert spec.loader is not None
@@ -64,6 +84,7 @@ finally:
             sys.modules[module_name] = original_module
 
 RowState = skd_module.RowState
+_build_teacher_prompt_ids = skd_module._build_teacher_prompt_ids
 _one_pos_accepts = skd_module._one_pos_accepts
 _run_batch = skd_module._run_batch
 
@@ -90,9 +111,11 @@ class FakeLLM:
     def __init__(self, token_id: int):
         self.token_id = token_id
         self.batch_sizes: list[int] = []
+        self.prompts: list[list[dict]] = []
 
     def generate(self, prompts, params, use_tqdm=False):
         self.batch_sizes.append(len(prompts))
+        self.prompts.append(list(prompts))
         return [FakeOutput(self.token_id) for _ in prompts]
 
 
@@ -171,6 +194,72 @@ class FakeProgress:
 
     def set_postfix(self, value, refresh=True):
         self.postfixes.append(value)
+
+
+class CharacterTokenizer:
+    def encode(self, text, add_special_tokens=False):
+        del add_special_tokens
+        return [ord(char) for char in text]
+
+    def decode(self, token_ids, skip_special_tokens=True):
+        del skip_special_tokens
+        return "".join(chr(token_id) for token_id in token_ids)
+
+
+def test_opsd_teacher_prompt_reads_expert_solution(monkeypatch):
+    data_utils_stub = types.ModuleType("recipe.opd.dataset.data_utils")
+    data_utils_stub.build_teacher_prompt = lambda problem, expert, **_kwargs: (
+        f"problem={problem}\nexpert={expert}"
+    )
+    prepare_stub = types.ModuleType("recipe.opd.generation.y_r_prepare")
+    prepare_stub._fit_rewrite_prompt = (
+        lambda render, expert, initial, _tokenizer, _cap: render(expert, initial)
+    )
+    monkeypatch.setitem(sys.modules, "recipe.opd.dataset.data_utils", data_utils_stub)
+    monkeypatch.setitem(sys.modules, "recipe.opd.generation.y_r_prepare", prepare_stub)
+
+    tokenizer = CharacterTokenizer()
+    teacher_ids = _build_teacher_prompt_ids(
+        tokenizer,
+        {"extra_info": {"problem": "P", "expert_cot": "Y_STAR"}},
+        [1, 2],
+        distill_mode="opsd",
+        task="code",
+        teacher_prompt_length=128,
+    )
+
+    assert tokenizer.decode(teacher_ids) == "problem=P\nexpert=Y_STAR\n"
+    assert teacher_ids != [1, 2]
+
+
+def test_opsd_teacher_prompt_rejects_missing_expert_solution():
+    try:
+        _build_teacher_prompt_ids(
+            CharacterTokenizer(),
+            {"extra_info": {"problem": "P", "expert_cot": ""}},
+            [1, 2],
+            distill_mode="opsd",
+            task="code",
+            teacher_prompt_length=128,
+        )
+    except ValueError as exc:
+        assert "expert_cot" in str(exc)
+    else:
+        raise AssertionError("missing OPSD y* must fail closed")
+
+
+def test_opd_teacher_prompt_is_exact_student_prefix():
+    student_ids = [10, 11]
+    teacher_ids = _build_teacher_prompt_ids(
+        CharacterTokenizer(),
+        {"extra_info": {"problem": "P", "expert_cot": "must-not-be-read"}},
+        student_ids,
+        distill_mode="opd",
+        task="code",
+        teacher_prompt_length=128,
+    )
+    assert teacher_ids == student_ids
+    assert teacher_ids is not student_ids
 
 
 def test_one_pos_accepts_handles_normal_logprobs():
@@ -404,6 +493,50 @@ def test_run_batch_parallel_gamma1_keeps_shared_engine_serial():
     assert shared.intervals[0][1] <= shared.intervals[1][0]
 
 
+def test_run_batch_gamma1_uses_distinct_opsd_teacher_prefix():
+    completed = []
+    student = FakeLLM(token_id=1)
+    teacher = FakeLLM(token_id=1)
+
+    _run_batch(
+        states=[
+            RowState(
+                prompt_ids=[10, 11],
+                teacher_prompt_ids=[20, 21, 22],
+                generated=[],
+                row_idx=0,
+            )
+        ],
+        tokenizer=None,
+        student_llm=student,
+        teacher_llm=teacher,
+        eos_ids=set(),
+        max_tokens=1,
+        gamma=1,
+        top_k=25,
+        student_temperature=0.6,
+        student_top_p=0.95,
+        teacher_temperature=0.6,
+        teacher_top_p=0.95,
+        adaptive_gamma=False,
+        adaptive_gamma_low_accept=0.2,
+        adaptive_gamma_high_accept=0.6,
+        adaptive_gamma_ema_alpha=0.2,
+        parallel_gamma1=False,
+        target_rollout_seconds=0.0,
+        target_rollout_safety=0.85,
+        target_rollout_warmup_seconds=300.0,
+        total_rows_for_budget=1,
+        progress=None,
+        on_state_complete=completed.append,
+        refill_state=None,
+    )
+
+    assert student.prompts[0][0]["prompt_token_ids"] == [10, 11]
+    assert teacher.prompts[0][0]["prompt_token_ids"] == [20, 21, 22]
+    assert [state.generated for state in completed] == [[1]]
+
+
 
 def test_run_batch_gamma5_accepts_multiple_student_tokens():
     completed = []
@@ -412,7 +545,14 @@ def test_run_batch_gamma5_accepts_multiple_student_tokens():
     progress = FakeProgress()
 
     _run_batch(
-        states=[RowState(prompt_ids=[10, 11], generated=[], row_idx=0)],
+        states=[
+            RowState(
+                prompt_ids=[10, 11],
+                teacher_prompt_ids=[20, 21, 22],
+                generated=[],
+                row_idx=0,
+            )
+        ],
         tokenizer=None,
         student_llm=student,
         teacher_llm=teacher,
@@ -444,7 +584,8 @@ def test_run_batch_gamma5_accepts_multiple_student_tokens():
     assert len(teacher.calls) == 1
     verify_prompts, verify_params = teacher.calls[0]
     assert verify_params["prompt_logprobs"] == 25
-    assert verify_prompts[0]["prompt_token_ids"] == [10, 11, 1, 2, 3, 4, 5]
+    assert student.calls[0][0][0]["prompt_token_ids"] == [10, 11]
+    assert verify_prompts[0]["prompt_token_ids"] == [20, 21, 22, 1, 2, 3, 4, 5]
     assert progress.count == 1
 
 
@@ -454,7 +595,14 @@ def test_run_batch_gamma5_rejects_and_discards_remaining_proposal():
     teacher = GammaTeacherLLM({1}, replacement_token=7)
 
     _run_batch(
-        states=[RowState(prompt_ids=[10, 11], generated=[], row_idx=0)],
+        states=[
+            RowState(
+                prompt_ids=[10, 11],
+                teacher_prompt_ids=[20, 21, 22],
+                generated=[],
+                row_idx=0,
+            )
+        ],
         tokenizer=None,
         student_llm=student,
         teacher_llm=teacher,
@@ -486,10 +634,10 @@ def test_run_batch_gamma5_rejects_and_discards_remaining_proposal():
     verify_prompts, verify_params = teacher.calls[0]
     replacement_prompts, replacement_params = teacher.calls[1]
     assert verify_params["prompt_logprobs"] == 25
-    assert verify_prompts[0]["prompt_token_ids"] == [10, 11, 1, 99, 3, 4, 5]
+    assert verify_prompts[0]["prompt_token_ids"] == [20, 21, 22, 1, 99, 3, 4, 5]
     assert "prompt_logprobs" not in replacement_params
     assert replacement_params["logprobs"] is None
-    assert replacement_prompts[0]["prompt_token_ids"] == [10, 11, 1]
+    assert replacement_prompts[0]["prompt_token_ids"] == [20, 21, 22, 1]
 
 
 def test_run_batch_gamma5_caps_student_request_near_response_limit():

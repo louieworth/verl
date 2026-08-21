@@ -22,6 +22,9 @@ SKD_FIELDS = {
     "skd_rollout_batch_size": ("SKD_ROLLOUT_BATCH_SIZE", "96"),
     "skd_pipeline_lanes": ("SKD_PIPELINE_LANES", "3"),
     "skd_parallel_student_teacher": ("SKD_PARALLEL_STUDENT_TEACHER", "false"),
+    "skd_teacher_prompt_contract": ("SKD_TEACHER_PROMPT_CONTRACT", "opsd_x_y_star_v1"),
+    "skd_teacher_prompt_length": ("SKD_TEACHER_PROMPT_LENGTH", "6144"),
+    "skd_rollout_max_model_len": ("SKD_ROLLOUT_MAX_MODEL_LEN", "22528"),
 }
 
 
