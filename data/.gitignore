@@ -1,8 +1,12 @@
 # Canonical TACO artifacts remain ignored and are transported byte-for-byte
-# through the Git-safe chunk bundle under recipe/opd/train_data_bundle/.
+# through the Git-safe chunk bundle under train_dataset/taco/bundle/.
 # The two smaller canonical OpenThoughts parquets are checked into Git so a
 # fresh clone can launch math experiments without a preparation step.
 /train_dataset/*
+!/train_dataset/taco/
+/train_dataset/taco/*
+!/train_dataset/taco/bundle/
+!/train_dataset/taco/bundle/**
 !/train_dataset/deepscaler/
 !/train_dataset/deepscaler/train_grpo.parquet
 !/train_dataset/openthoughts_math_30k_opsd/

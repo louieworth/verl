@@ -27,7 +27,7 @@ experiments and may have different defaults.
 The canonical OpenThoughts Math training parquets are stored directly in Git,
 so Math launchers work on a fresh clone without a preparation step. Canonical
 TACO is stored in Git as <=40 MB byte chunks under
-`recipe/opd/train_data_bundle/taco_canonical/`. On a fresh worker, run
+`data/train_dataset/taco/bundle/`. On a fresh worker, run
 `bash recipe/opd/script_code/prepare_code.sh all`; it hash-verifies and
 atomically restores all three canonical TACO parquets, then prepares the
 machine-local EvalPlus/LiveCodeBench runtime and datasets. Every real code

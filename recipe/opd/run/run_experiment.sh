@@ -494,7 +494,7 @@ fi
 if [ "$TASK" = code ] && [ "${OPD_CODE_BOOTSTRAP_READY:-0}" != 1 ] && \
    { [ "$FAMILY" != baseline ] || [ "$VARIANT" != base ]; }; then
     "$PYTHON_BIN" recipe/opd/script_code/materialize_train_bundle.py restore \
-        --bundle-dir recipe/opd/train_data_bundle/taco_canonical \
+        --bundle-dir data/train_dataset/taco/bundle \
         --output-dir data/train_dataset/taco/canonical
 fi
 

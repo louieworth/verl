@@ -44,7 +44,7 @@ bash recipe/opd/script_code/prepare_data.sh
 ```
 
 Canonical TACO is prepared once, then transported through Git as hash-verified chunks of at most
-40 MB under `recipe/opd/train_data_bundle/taco_canonical/`. Every real code
+40 MB under `data/train_dataset/taco/bundle/`. Every real code
 training launcher atomically reconstructs the exact original files under
 `data/train_dataset/taco/canonical/`; it does not download, decode, or reprocess
 TACO. Code preparation writes three ZSTD parquets: compact

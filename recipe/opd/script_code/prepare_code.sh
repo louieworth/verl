@@ -18,7 +18,7 @@ export PYTHON_BIN PYTHONPATH="$REPO_ROOT:${PYTHONPATH:-}"
 EVALPLUS_VERSION="${EVALPLUS_VERSION:-0.3.1}"
 VLLM_VERSION="${VLLM_VERSION:-0.12.0}"
 RUNTIME_ENV="$SCRIPT_DIR/runtime.env"
-TRAIN_BUNDLE_DIR="${TRAIN_BUNDLE_DIR:-$OPD_ROOT/train_data_bundle/taco_canonical}"
+TRAIN_BUNDLE_DIR="${TRAIN_BUNDLE_DIR:-$REPO_ROOT/data/train_dataset/taco/bundle}"
 TRAIN_OUTPUT_DIR="${TRAIN_OUTPUT_DIR:-$REPO_ROOT/data/train_dataset/taco/canonical}"
 
 usage() {
@@ -35,7 +35,7 @@ Usage: bash recipe/opd/script_code/prepare_code.sh [all|train|bundle|restore-tra
   verify  offline verification of both restored train and prepared eval assets
 
 Training parquets live under data/train_dataset/taco/canonical. `all` restores
-them byte-for-byte from recipe/opd/train_data_bundle/taco_canonical; it never
+them byte-for-byte from data/train_dataset/taco/bundle; it never
 downloads or reprocesses TACO. Run `bundle` only after intentionally rebuilding
 and verifying the canonical artifacts on a preparation machine. `all` may use
 pip to install missing Python/code-evaluation dependencies; set
