@@ -65,6 +65,21 @@ def render_base_completion_prompt(messages) -> str:
     return prompt + "\n"
 
 
+def chat_template_kwargs_from_env() -> dict[str, bool]:
+    """Return an explicit thinking-mode override for chat generation."""
+    raw_value = os.environ.get("VERL_ENABLE_THINKING", "").strip().lower()
+    if not raw_value:
+        return {}
+    if raw_value in {"1", "true", "yes", "on"}:
+        return {"enable_thinking": True}
+    if raw_value in {"0", "false", "no", "off"}:
+        return {"enable_thinking": False}
+    raise ValueError(
+        "VERL_ENABLE_THINKING must be true/false when set "
+        f"(got {os.environ.get('VERL_ENABLE_THINKING')!r})"
+    )
+
+
 def read_parquet_compat(path: str) -> pd.DataFrame:
     try:
         return pd.read_parquet(path)
@@ -184,6 +199,7 @@ async def generate_per_replica(
     }
 
     chat_complete_request = []
+    env_chat_template_kwargs = chat_template_kwargs_from_env()
     for messages in chat_lst:
         request_params = dict(sampling_params)
         if base_completion:
@@ -192,10 +208,15 @@ async def generate_per_replica(
             # through chat; forwarding them to /v1/completions can make the
             # OpenAI-compatible server reject an otherwise valid request.
             request_params.pop("chat_template", None)
+            request_params.pop("chat_template_kwargs", None)
             request_params.pop("add_generation_prompt", None)
             request = {"model": model_path, **request_params}
             request.update({"prompt": render_base_completion_prompt(messages), "_base_completion": True})
         else:
+            if env_chat_template_kwargs:
+                chat_template_kwargs = dict(request_params.get("chat_template_kwargs") or {})
+                chat_template_kwargs.update(env_chat_template_kwargs)
+                request_params["chat_template_kwargs"] = chat_template_kwargs
             request = {"model": model_path, **request_params}
             request["messages"] = messages
         chat_complete_request.extend(dict(request) for _ in range(n_samples))

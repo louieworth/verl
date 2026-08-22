@@ -41,6 +41,15 @@ class _Tokenizer:
         return "x" * len(token_ids)
 
 
+class _ThinkingTokenizer(_Tokenizer):
+    def __init__(self):
+        self.chat_template_calls = []
+
+    def apply_chat_template(self, messages, **kwargs):
+        self.chat_template_calls.append((messages, kwargs))
+        return [70, 71, 72]
+
+
 def _write_eval_problem(eval_root, dataset_name, problem):
     output = eval_root / dataset_name / f"{dataset_name}_test.parquet"
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -90,6 +99,70 @@ def test_completion_endpoint_drops_chat_only_request_fields(monkeypatch):
     ]
 
 
+def test_chat_endpoint_forwards_explicit_thinking_mode(monkeypatch):
+    captured = []
+
+    async def fake_submit(request_index, server_address, **request):
+        captured.append(request)
+        return request_index, "ok"
+
+    monkeypatch.setenv("VERL_FORCE_BASE_COMPLETION", "false")
+    monkeypatch.setenv("VERL_ENABLE_THINKING", "true")
+    monkeypatch.setattr("verl.trainer.main_generation_server.submit_indexed_request", fake_submit)
+    results = asyncio.run(
+        generate_per_replica(
+            "localhost:1",
+            "Qwen/Qwen3-14B",
+            1,
+            {"max_tokens": 16},
+            [[{"role": "user", "content": "solve"}]],
+            max_concurrency=1,
+        )
+    )
+
+    assert results == ["ok"]
+    assert captured == [
+        {
+            "model": "Qwen/Qwen3-14B",
+            "max_tokens": 16,
+            "chat_template_kwargs": {"enable_thinking": True},
+            "messages": [{"role": "user", "content": "solve"}],
+        }
+    ]
+
+
+def test_chat_endpoint_forwards_explicit_nonthinking_mode(monkeypatch):
+    captured = []
+
+    async def fake_submit(request_index, server_address, **request):
+        captured.append(request)
+        return request_index, "ok"
+
+    monkeypatch.setenv("VERL_FORCE_BASE_COMPLETION", "false")
+    monkeypatch.setenv("VERL_ENABLE_THINKING", "false")
+    monkeypatch.setattr("verl.trainer.main_generation_server.submit_indexed_request", fake_submit)
+    results = asyncio.run(
+        generate_per_replica(
+            "localhost:1",
+            "Qwen/Qwen3-14B",
+            1,
+            {"max_tokens": 16},
+            [[{"role": "user", "content": "solve"}]],
+            max_concurrency=1,
+        )
+    )
+
+    assert results == ["ok"]
+    assert captured == [
+        {
+            "model": "Qwen/Qwen3-14B",
+            "max_tokens": 16,
+            "chat_template_kwargs": {"enable_thinking": False},
+            "messages": [{"role": "user", "content": "solve"}],
+        }
+    ]
+
+
 def test_rollout_sft_and_kl_use_the_same_completion_prefix(tmp_path):
     tokenizer = _Tokenizer()
     expected_prefix = tokenizer.encode(render_plain_prompt("abc"), add_special_tokens=False)
@@ -107,6 +180,89 @@ def test_rollout_sft_and_kl_use_the_same_completion_prefix(tmp_path):
     input_ids, _, prompt_len = kl_dataset._build_sequence("abc", "xy")
     assert prompt_len == len(expected_prefix)
     assert input_ids[:prompt_len].tolist() == expected_prefix
+
+
+def test_kl_opd_teacher_nonthinking_supervision_uses_plain_completion():
+    student_tokenizer = _Tokenizer()
+    teacher_tokenizer = _ThinkingTokenizer()
+    kl_dataset = object.__new__(KLTrainingDataset)
+    kl_dataset.tokenizer = student_tokenizer
+    kl_dataset.teacher_tokenizer = teacher_tokenizer
+    kl_dataset.teacher_enable_thinking = False
+    kl_dataset.distill_mode = "opd"
+    kl_dataset.prompt_truncation = False
+    kl_dataset.max_length = 32
+
+    item = kl_dataset._prepare_item("student prompt", "teacher prompt", "xy")
+
+    assert item["student_input_ids"][:3].tolist() == [1, 2, 3]
+    assert item["teacher_input_ids"][:3].tolist() == [1, 2, 3]
+    assert teacher_tokenizer.chat_template_calls == []
+
+
+def test_kl_opd_teacher_thinking_supervision_uses_chat_template():
+    student_tokenizer = _Tokenizer()
+    teacher_tokenizer = _ThinkingTokenizer()
+    kl_dataset = object.__new__(KLTrainingDataset)
+    kl_dataset.tokenizer = student_tokenizer
+    kl_dataset.teacher_tokenizer = teacher_tokenizer
+    kl_dataset.teacher_enable_thinking = True
+    kl_dataset.distill_mode = "opd"
+    kl_dataset.prompt_truncation = False
+    kl_dataset.max_length = 32
+
+    item = kl_dataset._prepare_item("student prompt", "teacher prompt", "xy")
+
+    assert item["student_input_ids"][:3].tolist() == [1, 2, 3]
+    assert item["teacher_input_ids"][:3].tolist() == [70, 71, 72]
+    assert int(item["teacher_loss_mask"].nonzero()[0]) == 2
+    assert teacher_tokenizer.chat_template_calls == [
+        (
+            [{"role": "user", "content": "teacher prompt"}],
+            {
+                "tokenize": True,
+                "add_generation_prompt": True,
+                "enable_thinking": True,
+            },
+        )
+    ]
+
+
+def test_y_r_opd_nonthinking_prompt_budget_uses_plain_completion():
+    tokenizer = _ThinkingTokenizer()
+    example = {
+        "responses": ["draft"],
+        "extra_info": {"problem": "Solve x.", "expert_cot": "unused"},
+    }
+
+    row = make_map_fn(
+        "opd",
+        tokenizer=tokenizer,
+        max_prompt_tokens=1024,
+        teacher_enable_thinking=False,
+    )(example)
+
+    assert tokenizer.chat_template_calls == []
+    assert "<think>" not in row["prompt"][0]["content"]
+    assert "</think>" not in row["prompt"][0]["content"]
+
+
+def test_y_r_opd_thinking_prompt_budget_uses_chat_template():
+    tokenizer = _ThinkingTokenizer()
+    example = {
+        "responses": ["draft"],
+        "extra_info": {"problem": "Solve x.", "expert_cot": "unused"},
+    }
+
+    make_map_fn(
+        "opd",
+        tokenizer=tokenizer,
+        max_prompt_tokens=64,
+        teacher_enable_thinking=True,
+    )(example)
+
+    assert tokenizer.chat_template_calls
+    assert all(call[1]["enable_thinking"] is True for call in tokenizer.chat_template_calls)
 
 
 def test_base_sft_masks_prompt_and_keeps_response(tmp_path):

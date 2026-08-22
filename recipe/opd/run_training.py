@@ -45,6 +45,12 @@ def parse_args():
     # Model Settings
     parser.add_argument("--student_model_path", type=str, required=True)
     parser.add_argument("--teacher_model_path", type=str, default="")
+    parser.add_argument(
+        "--teacher_enable_thinking",
+        type=lambda x: x.lower() == "true",
+        default=False,
+        help="OPD: true uses thinking chat for rollout/supervision; false uses plain completion for both, with no <think> tokens. OPSD must be false.",
+    )
     parser.add_argument("--base_model_name", type=str, default="")
     parser.add_argument("--use_lora", type=lambda x: x.lower() == "true", default=True)
     parser.add_argument("--lora_rank", type=int, default=64)
@@ -175,6 +181,9 @@ def main():
 
     args = parse_args()
 
+    if args.distill_mode == "opsd" and args.teacher_enable_thinking:
+        raise ValueError("OPSD uses a Base self-teacher and cannot enable teacher thinking mode")
+
     if not args.sync_resident_rollout_only and not args.data_path:
         raise ValueError("--data_path is required unless --sync_resident_rollout_only true")
     if args.sync_resident_rollout_only:
@@ -199,6 +208,7 @@ def main():
         # Model Settings
         student_model_path=args.student_model_path,
         teacher_model_path=args.teacher_model_path,
+        teacher_enable_thinking=args.teacher_enable_thinking,
         base_model_name=args.base_model_name,
         use_lora=args.use_lora,
         lora_rank=args.lora_rank,

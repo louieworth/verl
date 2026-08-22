@@ -44,6 +44,10 @@ class KLTrainingConfig:
     # Model Settings
     student_model_path: str = "Qwen/Qwen3-1.7B-Base"
     teacher_model_path: str = ""
+    # OPD teacher rollout and KL supervision both use the Qwen3-14B thinking
+    # chat prefix when True and a plain completion prefix when False.
+    # OPSD uses a Base self-teacher and must keep this False.
+    teacher_enable_thinking: bool = False
     base_model_name: str = ""  # Stable name used for result keys/paths across multi-epoch runs
     use_lora: bool = True
     lora_rank: int = 64

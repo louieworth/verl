@@ -78,23 +78,22 @@ def _build_teacher_prompt_ids(
     distill_mode: str,
     task: str,
     teacher_prompt_length: int,
+    teacher_enable_thinking: bool = False,
 ) -> list[int]:
     """Build the SKD teacher prefix under the canonical OPD/OPSD contract."""
-    if distill_mode == "opd":
-        return list(student_prompt_ids)
-    if distill_mode != "opsd":
+    if distill_mode not in {"opd", "opsd"}:
         raise ValueError(f"unsupported distill_mode={distill_mode!r}")
 
     extra_info = row.get("extra_info")
     if hasattr(extra_info, "as_py"):
         extra_info = extra_info.as_py()
     if not isinstance(extra_info, dict):
-        raise ValueError("OPSD SKD requires extra_info.problem and extra_info.expert_cot")
+        raise ValueError("SKD requires extra_info.problem")
     problem = str(extra_info.get("problem") or "").strip()
     expert_solution = str(extra_info.get("expert_cot") or "").strip()
     if not problem:
-        raise ValueError("OPSD SKD requires non-empty extra_info.problem")
-    if not expert_solution:
+        raise ValueError("SKD requires non-empty extra_info.problem")
+    if distill_mode == "opsd" and not expert_solution:
         raise ValueError("OPSD SKD requires non-empty extra_info.expert_cot (y*)")
 
     # Lazy imports keep the rollout primitives usable in lightweight CPU tests.
@@ -106,7 +105,7 @@ def _build_teacher_prompt_ids(
             problem,
             expert_text,
             use_initial_response=False,
-            distill_mode="opsd",
+            distill_mode=distill_mode,
             task=task,
         )
 
@@ -116,7 +115,23 @@ def _build_teacher_prompt_ids(
         "",
         tokenizer,
         teacher_prompt_length,
+        teacher_enable_thinking,
+        distill_mode == "opd" and teacher_enable_thinking,
     )
+    if distill_mode == "opd" and teacher_enable_thinking:
+        from recipe.opd.dataset.data_utils import build_teacher_chat_prompt_ids
+
+        prompt_ids = build_teacher_chat_prompt_ids(
+            tokenizer,
+            teacher_prompt,
+            enable_thinking=teacher_enable_thinking,
+        )
+        if len(prompt_ids) > teacher_prompt_length:
+            raise ValueError(
+                f"OPD teacher chat prompt has {len(prompt_ids)} tokens, "
+                f"exceeding cap {teacher_prompt_length}"
+            )
+        return prompt_ids
     return _prompt_token_ids(
         tokenizer,
         [{"role": "user", "content": teacher_prompt}],
@@ -752,6 +767,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--student_model_path", required=True)
     parser.add_argument("--teacher_model_path", default="")
     parser.add_argument("--tokenizer_path", default="")
+    parser.add_argument("--teacher_tokenizer_path", default="")
+    parser.add_argument(
+        "--teacher_enable_thinking",
+        type=lambda value: str(value).lower() in {"1", "true", "yes", "y", "on"},
+        default=False,
+    )
     parser.add_argument("--distill_mode", choices=["opd", "opsd"], default="opd")
     parser.add_argument("--task", choices=["math", "code"], required=True)
     parser.add_argument("--max_tokens", type=int, required=True)
@@ -790,14 +811,22 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if args.distill_mode == "opsd" and args.teacher_enable_thinking:
+        raise ValueError("OPSD uses a Base self-teacher and cannot enable teacher thinking mode")
     teacher_model_path = args.teacher_model_path or args.student_model_path
     tokenizer_path = args.tokenizer_path or args.student_model_path
+    teacher_tokenizer_path = args.teacher_tokenizer_path or teacher_model_path
     share_engine = args.share_engine_if_same and teacher_model_path == args.student_model_path
 
     dataset = pd.read_parquet(args.input)
     chats = dataset[args.prompt_key].tolist()
     rows = dataset.to_dict(orient="records")
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
+    teacher_tokenizer = (
+        tokenizer
+        if teacher_tokenizer_path == tokenizer_path
+        else AutoTokenizer.from_pretrained(teacher_tokenizer_path, trust_remote_code=True)
+    )
     eos_ids = set()
     if tokenizer.eos_token_id is not None:
         eos_ids.add(int(tokenizer.eos_token_id))
@@ -808,12 +837,13 @@ def main() -> None:
     for i, (chat, row) in enumerate(zip(chats, rows)):
         student_prompt_ids = _prompt_token_ids(tokenizer, chat, args.prompt_length)
         teacher_prompt_ids = _build_teacher_prompt_ids(
-            tokenizer,
+            teacher_tokenizer,
             row,
             student_prompt_ids,
             distill_mode=args.distill_mode,
             task=args.task,
             teacher_prompt_length=args.teacher_prompt_length,
+            teacher_enable_thinking=args.teacher_enable_thinking,
         )
         required_context = max(len(student_prompt_ids), len(teacher_prompt_ids)) + args.max_tokens
         if required_context > args.max_model_len:
@@ -852,6 +882,7 @@ def main() -> None:
         f"rows={len(states)} task={args.task} distill_mode={args.distill_mode} "
         f"max_tokens={args.max_tokens} prompt_length={args.prompt_length} "
         f"teacher_prompt_length={args.teacher_prompt_length} "
+        f"teacher_enable_thinking={args.teacher_enable_thinking} "
         f"max_model_len={args.max_model_len} batch={args.batch_size} gamma={args.gamma} "
         f"student={args.student_model_path} teacher={teacher_model_path} "
         f"student_mem={student_gpu_memory_utilization} teacher_mem={teacher_gpu_memory_utilization} "
@@ -882,7 +913,7 @@ def main() -> None:
                 student_max_num_seqs, student_max_num_batched_tokens, args.seed,
             )
             teacher_llm = _make_remote_llm(
-                teacher_model_path, tokenizer_path, args.teacher_gpus,
+                teacher_model_path, teacher_tokenizer_path, args.teacher_gpus,
                 args.teacher_tp or _gpu_count(args.teacher_gpus), args.dtype,
                 teacher_gpu_memory_utilization, args.max_model_len, max_logprobs,
                 teacher_max_num_seqs, teacher_max_num_batched_tokens, args.seed + 1,
@@ -946,8 +977,15 @@ def main() -> None:
         "distill_mode": args.distill_mode,
         "task": args.task,
         "teacher_prompt_contract": (
-            "opsd_x_y_star_v1" if args.distill_mode == "opsd" else "opd_x_only_v1"
+            "opsd_x_y_star_v1"
+            if args.distill_mode == "opsd"
+            else (
+                "opd_x_only_qwen3_thinking_v1"
+                if args.teacher_enable_thinking
+                else "opd_x_only_plain_completion_v1"
+            )
         ),
+        "teacher_enable_thinking": args.teacher_enable_thinking,
         "input": args.input,
         "output": args.output,
         "rows": len(dataset),

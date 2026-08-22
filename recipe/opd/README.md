@@ -104,6 +104,7 @@ TEACHER_MODEL_PATH=Qwen/Qwen3-14B bash recipe/opd/run/opd/reverse_topk_y_o.sh
 | --- | --- | --- | --- |
 | `DISTILL_MODE` | all | `opsd` | `opsd` \| `opd`. OPD requires `TEACHER_MODEL_PATH`. |
 | `TEACHER_MODEL_PATH` | all | mode-dependent | OPD uses `Qwen/Qwen3-14B`; OPSD must equal the frozen step-0 `MODEL_PATH`. |
+| `TEACHER_ENABLE_THINKING` | OPD teacher | `false` in every math/code OPD leaf launcher | With `false`, KL teacher supervision and every teacher rollout (including TRD `y_r`) use plain completion, so no `<think>` tokens are injected. With `true`, both use the Qwen thinking chat prefix. OPD result paths, model/result keys, generation IDs, evaluation names, and W&B run names/tags include `teacher-thinking-{true|false}`. OPSD remains Base completion and does not expose this naming or W&B dimension. |
 | `Y_MODE` | all | per-script | `y_o` (stage1 student rollout) or `y_r` (stage2 teacher rewrite). |
 | `BASE_PROMPT_LENGTH` | all | `1024` | Student problem prompt budget; used for y_o rollout and student-side KL prompt. |
 | `MAX_RESPONSE_LENGTH` | all | `16384` | Fixed response budget for y_o, y_r, and KL target responses. |

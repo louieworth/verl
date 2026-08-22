@@ -105,6 +105,10 @@ def _base_metadata(mode: str, *, include_skd: bool) -> dict[str, str]:
         "student_model_path": "/models/student",
         "teacher_model_name": "teacher",
         "teacher_model_path": "/models/teacher",
+        "teacher_enable_thinking": "false",
+        "teacher_supervision_render_mode": "plain_completion",
+        "teacher_rollout_render_mode": "plain_completion",
+        "teacher_prompt_render_contract": "supervision-plain_completion_rollout-plain_completion_v1",
         "y_mode": "y_o",
         "y_o_rollout_mode": mode,
         "trajectory_model_path": "",
@@ -131,6 +135,10 @@ def _metadata_matches(path: Path, mode: str) -> bool:
         "MODEL_PATH": "/models/student",
         "TEACHER_MODEL_NAME": "teacher",
         "TEACHER_MODEL_PATH": "/models/teacher",
+        "TEACHER_ENABLE_THINKING": "false",
+        "TEACHER_SUPERVISION_RENDER_MODE": "plain_completion",
+        "TEACHER_ROLLOUT_RENDER_MODE": "plain_completion",
+        "TEACHER_PROMPT_RENDER_CONTRACT": "supervision-plain_completion_rollout-plain_completion_v1",
         "Y_O_ROLLOUT_MODE": mode,
         "TRAJECTORY_MODEL_PATH": "",
         "TRAIN_DATA_PATH": "/data/train.parquet",
@@ -173,6 +181,44 @@ def test_step1_reuse_does_not_require_skd_metadata_for_non_skd_mode(tmp_path: Pa
     path = tmp_path / "run_metadata.yaml"
     _write_metadata(path, _base_metadata("student", include_skd=False))
     assert _metadata_matches(path, "student")
+
+
+def test_step1_reuse_rejects_different_teacher_thinking_mode(tmp_path: Path):
+    metadata = _base_metadata("student", include_skd=False)
+    metadata["teacher_enable_thinking"] = "true"
+    path = tmp_path / "run_metadata.yaml"
+    _write_metadata(path, metadata)
+    assert not _metadata_matches(path, "student")
+
+
+def test_step1_reuse_rejects_different_teacher_render_contract(tmp_path: Path):
+    metadata = _base_metadata("student", include_skd=False)
+    metadata["teacher_prompt_render_contract"] = "different"
+    path = tmp_path / "run_metadata.yaml"
+    _write_metadata(path, metadata)
+    assert not _metadata_matches(path, "student")
+
+
+@pytest.mark.parametrize(
+    ("distill_mode", "enable_thinking", "expected"),
+    (
+        ("opd", "false", "true,unset"),
+        ("opd", "true", "false,true"),
+        ("opsd", "false", "true,unset"),
+    ),
+)
+def test_teacher_generation_environment_contract(distill_mode: str, enable_thinking: str, expected: str):
+    result = _run_bash(
+        "\nrun_teacher_generation bash -c "
+        "'printf \"%s,%s\" \"$VERL_FORCE_BASE_COMPLETION\" \"${VERL_ENABLE_THINKING:-unset}\"'\n",
+        functions=("run_teacher_generation",),
+        env={
+            "DISTILL_MODE": distill_mode,
+            "TEACHER_ENABLE_THINKING": enable_thinking,
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == expected
 
 
 def test_skd_metadata_is_emitted_by_run_and_training_yaml():

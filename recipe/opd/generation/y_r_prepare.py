@@ -118,7 +118,15 @@ def _normalize_reward_value(val: Any) -> int:
         return 0
 
 
-def _fit_rewrite_prompt(render_prompt, expert_solution, initial_response, tokenizer, max_prompt_tokens):
+def _fit_rewrite_prompt(
+    render_prompt,
+    expert_solution,
+    initial_response,
+    tokenizer,
+    max_prompt_tokens,
+    teacher_enable_thinking: bool = False,
+    teacher_use_chat_template: bool = False,
+):
     """Trim derived fields while preserving the problem and rewrite instructions."""
     fields = {"expert": str(expert_solution), "initial": str(initial_response)}
     prompt = render_prompt(fields["expert"], fields["initial"])
@@ -129,7 +137,21 @@ def _fit_rewrite_prompt(render_prompt, expert_solution, initial_response, tokeni
         return tokenizer.encode(text, add_special_tokens=False)
 
     def prompt_size(text):
-        # Plain Base rollout appends exactly one newline separator.
+        if teacher_use_chat_template:
+            try:
+                rendered = tokenizer.apply_chat_template(
+                    [{"role": "user", "content": text}],
+                    tokenize=True,
+                    add_generation_prompt=True,
+                    enable_thinking=teacher_enable_thinking,
+                )
+            except (AttributeError, TypeError, ValueError) as exc:
+                raise RuntimeError(
+                    "OPD teacher chat mode requires a tokenizer chat template "
+                    "that supports enable_thinking."
+                ) from exc
+            return len(rendered)
+        # Plain completion appends exactly one newline separator.
         return len(token_ids(text + "\n"))
 
     truncation_marker = "\n[... truncated to fit the native context ...]"
@@ -188,6 +210,7 @@ def make_map_fn(
     *,
     tokenizer=None,
     max_prompt_tokens: int | None = None,
+    teacher_enable_thinking: bool = False,
 ):
     def process_fn(example: Dict[str, Any]):
         extra_info = (example.get("extra_info", {}) or {}).copy()
@@ -237,6 +260,8 @@ def make_map_fn(
             initial_response,
             tokenizer,
             max_prompt_tokens,
+            teacher_enable_thinking,
+            teacher_use_chat_template=(distill_mode == "opd" and teacher_enable_thinking),
         )
         # KL must condition the teacher on exactly the same (possibly
         # truncated) rewrite prompt used for y_r generation. The prompt itself
@@ -283,7 +308,15 @@ def main() -> None:
     )
     parser.add_argument("--tokenizer_path", default="")
     parser.add_argument("--max_prompt_tokens", type=int, default=None)
+    parser.add_argument(
+        "--teacher_enable_thinking",
+        type=lambda value: str(value).lower() in {"1", "true", "yes", "on"},
+        default=False,
+    )
     args = parser.parse_args()
+
+    if args.distill_mode == "opsd" and args.teacher_enable_thinking:
+        raise ValueError("OPSD uses a Base self-teacher and cannot enable teacher thinking mode")
 
     if (args.tokenizer_path and args.max_prompt_tokens is None) or (
         args.max_prompt_tokens is not None and not args.tokenizer_path
@@ -305,6 +338,7 @@ def main() -> None:
             args.task,
             tokenizer=tokenizer,
             max_prompt_tokens=args.max_prompt_tokens,
+            teacher_enable_thinking=args.teacher_enable_thinking,
         ),
         remove_columns=["responses"],
     )

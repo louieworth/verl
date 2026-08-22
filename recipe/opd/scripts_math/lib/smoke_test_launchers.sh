@@ -25,8 +25,8 @@ mapfile -t launchers < <(
     find "$OPD_ROOT/scripts_math" "$OPD_ROOT/script_code" \
         -mindepth 3 -maxdepth 3 -type f -name '*.sh' | sort
 )
-if [ "${#launchers[@]}" -ne 78 ]; then
-    echo "ERROR: expected 78 leaf launchers, found ${#launchers[@]}" >&2
+if [ "${#launchers[@]}" -ne 80 ]; then
+    echo "ERROR: expected 80 leaf launchers, found ${#launchers[@]}" >&2
     exit 1
 fi
 
@@ -59,7 +59,15 @@ for launcher in "${launchers[@]}"; do
         OPSD) expected_family=opsd ;;
         *) echo "ERROR: unexpected launcher family: $relative_launcher" >&2; exit 1 ;;
     esac
-    expected_variant="${launcher_file%.sh}"
+    launcher_stem="${launcher_file%.sh}"
+    expected_teacher_thinking=false
+    case "$launcher_stem" in
+        *_thinking)
+            expected_variant="${launcher_stem%_thinking}"
+            expected_teacher_thinking=true
+            ;;
+        *) expected_variant="$launcher_stem" ;;
+    esac
     grep -Fxq "export OPD_TASK=\"$expected_task\"" "$launcher"
     grep -Fxq "export OPD_FAMILY=\"$expected_family\"" "$launcher"
     grep -Fxq "export OPD_VARIANT=\"$expected_variant\"" "$launcher"
@@ -77,13 +85,60 @@ for launcher in "${launchers[@]}"; do
         OPD)
             grep -Fxq 'export TEACHER_MODEL_PATH="${TEACHER_MODEL_PATH:-Qwen/Qwen3-14B}"' "$launcher"
             grep -Fxq 'export DISTILL_MODE="opd"' "$launcher"
+            grep -Fxq "export TEACHER_ENABLE_THINKING=\"\${TEACHER_ENABLE_THINKING:-$expected_teacher_thinking}\"" "$launcher"
             ;;
         OPSD)
             grep -Fxq 'export TEACHER_MODEL_PATH="${TEACHER_MODEL_PATH:-$MODEL_PATH}"' "$launcher"
             grep -Fxq 'export DISTILL_MODE="opsd"' "$launcher"
+            ! grep -q '^export TEACHER_ENABLE_THINKING=' "$launcher"
             ;;
     esac
 done
+
+if opsd_thinking_output="$(
+    TEACHER_ENABLE_THINKING=true DRY_RUN=1 \
+        bash "$OPD_ROOT/scripts_math/OPSD/1B/trd.sh" 2>&1
+)"; then
+    echo "ERROR: OPSD accepted TEACHER_ENABLE_THINKING=true" >&2
+    exit 1
+fi
+grep -q 'OPSD uses a frozen Base self-teacher and cannot enable teacher thinking mode' \
+    <<<"$opsd_thinking_output"
+
+opd_nonthinking_output="$(DRY_RUN=1 bash "$OPD_ROOT/scripts_math/OPD/1B/trd.sh")"
+grep -q 'teacher thinking:    false' <<<"$opd_nonthinking_output"
+grep -q 'teacher supervision: plain_completion' <<<"$opd_nonthinking_output"
+grep -q 'teacher rollout:     plain_completion' <<<"$opd_nonthinking_output"
+grep -q 'W&B project/run:     opd-math / opd-math-trd-Qwen3-1.7B-Base-teacher-thinking-false-ms0-' <<<"$opd_nonthinking_output"
+grep -q 'run root:            .*teacher-thinking-false' <<<"$opd_nonthinking_output"
+grep -q 'results file:        .*teacher-thinking-false' <<<"$opd_nonthinking_output"
+grep -q 'eval output:         .*teacher-thinking-false' <<<"$opd_nonthinking_output"
+opd_thinking_output="$(
+    TEACHER_ENABLE_THINKING=true DRY_RUN=1 \
+        bash "$OPD_ROOT/scripts_math/OPD/1B/trd.sh"
+)"
+grep -q 'teacher thinking:    true' <<<"$opd_thinking_output"
+grep -q 'teacher supervision: qwen3_chat_thinking' <<<"$opd_thinking_output"
+grep -q 'teacher rollout:     qwen3_chat_thinking' <<<"$opd_thinking_output"
+grep -q 'teacher-supervision-render=qwen3_chat_thinking' <<<"$opd_thinking_output"
+grep -q 'teacher-rollout-render=qwen3_chat_thinking' <<<"$opd_thinking_output"
+
+vanilla_thinking_output="$(DRY_RUN=1 bash "$OPD_ROOT/scripts_math/OPD/1B/vanilla_thinking.sh")"
+grep -q 'task/family/variant: math/opd/vanilla' <<<"$vanilla_thinking_output"
+grep -q 'teacher thinking:    true' <<<"$vanilla_thinking_output"
+grep -q 'teacher supervision: qwen3_chat_thinking' <<<"$vanilla_thinking_output"
+grep -q 'teacher rollout:     qwen3_chat_thinking' <<<"$vanilla_thinking_output"
+
+trd_thinking_output="$(DRY_RUN=1 bash "$OPD_ROOT/scripts_math/OPD/1B/trd_thinking.sh")"
+grep -q 'task/family/variant: math/opd/trd' <<<"$trd_thinking_output"
+grep -q 'teacher thinking:    true' <<<"$trd_thinking_output"
+grep -q 'teacher supervision: qwen3_chat_thinking' <<<"$trd_thinking_output"
+grep -q 'teacher rollout:     qwen3_chat_thinking' <<<"$trd_thinking_output"
+grep -q 'W&B project/run:     opd-math / opd-math-trd-Qwen3-1.7B-Base-teacher-thinking-true-ms0-' <<<"$opd_thinking_output"
+grep -q 'run root:            .*teacher-thinking-true' <<<"$opd_thinking_output"
+grep -q 'results file:        .*teacher-thinking-true' <<<"$opd_thinking_output"
+grep -q 'eval output:         .*teacher-thinking-true' <<<"$opd_thinking_output"
+
 if rg -q 'basename.*caller|variant=.*basename|family_dir=' "$OPD_ROOT/scripts_math/lib/launch_common.sh"; then
     echo "ERROR: shared launcher still infers experiment identity from a path or filename" >&2
     exit 1
@@ -96,15 +151,21 @@ math_topk="$(DRY_RUN=1 bash "$OPD_ROOT/scripts_math/OPD/1B/top_k.sh")"
 grep -q 'task: math' <<<"$math_topk"
 grep -q 'model: Qwen/Qwen3-1.7B-Base' <<<"$math_topk"
 grep -q 'teacher: Qwen/Qwen3-14B' <<<"$math_topk"
+grep -q 'teacher thinking:    false' <<<"$math_topk"
+grep -q 'teacher supervision: plain_completion' <<<"$math_topk"
+grep -q 'teacher rollout:     plain_completion' <<<"$math_topk"
 grep -q 'KL objective:        reverse/full_vocab' <<<"$math_topk"
 grep -q 'rollout mode:        student' <<<"$math_topk"
 grep -q 'loss support top-k:  32' <<<"$math_topk"
 grep -q 'token KL clip:       0' <<<"$math_topk"
 grep -q 'Canonical OPD experiment' <<<"$math_topk"
 grep -q 'train/eval response: 16384/16384' <<<"$math_topk"
-grep -q 'W&B project/run:     opd-math / opd-math-top_k-Qwen3-1.7B-Base-ms0-' <<<"$math_topk"
+grep -q 'W&B project/run:     opd-math / opd-math-top_k-Qwen3-1.7B-Base-teacher-thinking-false-ms0-' <<<"$math_topk"
 grep -q 'W&B group/job:       top_k-1B / opd-top_k' <<<"$math_topk"
 grep -q 'family=opd' <<<"$math_topk"
+grep -q 'teacher-thinking=false' <<<"$math_topk"
+grep -q 'teacher-supervision-render=plain_completion' <<<"$math_topk"
+grep -q 'teacher-rollout-render=plain_completion' <<<"$math_topk"
 grep -q 'teacher-top-k=32' <<<"$math_topk"
 grep -q 'global-prompt-batch=512' <<<"$math_topk"
 if grep -q 'Preparing canonical code' <<<"$math_topk"; then
@@ -124,6 +185,10 @@ grep -q 'W&B project/run:     opsd-code / opsd-code-clip-Qwen3-4B-Base-ms0-' <<<
 grep -q 'task=code' <<<"$code_clip"
 grep -q 'family=opsd' <<<"$code_clip"
 grep -q 'token-clip=0.05' <<<"$code_clip"
+if grep -q 'teacher-thinking' <<<"$code_clip"; then
+    echo "ERROR: OPSD exposed an OPD-only teacher thinking dimension" >&2
+    exit 1
+fi
 if grep -q 'Preparing canonical code' <<<"$code_clip"; then
     echo "ERROR: a code dry-run triggered code bootstrap" >&2
     exit 1

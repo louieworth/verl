@@ -51,6 +51,31 @@ def test_wandb_metadata_is_available_from_the_installed_verl_namespace(monkeypat
     }
 
 
+def test_wandb_metadata_includes_teacher_thinking_only_for_opd(monkeypatch):
+    monkeypatch.setenv("OPD_FAMILY", "opd")
+    monkeypatch.setenv("TEACHER_ENABLE_THINKING", "false")
+    monkeypatch.setenv("TEACHER_THINKING_NAME_TAG", "teacher-thinking-false")
+    monkeypatch.setenv("TEACHER_SUPERVISION_RENDER_MODE", "plain_completion")
+    monkeypatch.setenv("TEACHER_ROLLOUT_RENDER_MODE", "plain_completion")
+    config = merge_opd_wandb_config({})["opd_experiment"]
+    assert config["teacher_enable_thinking"] is False
+    assert config["teacher_thinking_name_tag"] == "teacher-thinking-false"
+    assert config["teacher_supervision_render_mode"] == "plain_completion"
+    assert config["teacher_rollout_render_mode"] == "plain_completion"
+
+
+def test_wandb_metadata_omits_teacher_thinking_for_opsd(monkeypatch):
+    monkeypatch.setenv("OPD_FAMILY", "opsd")
+    monkeypatch.setenv("TEACHER_ENABLE_THINKING", "false")
+    monkeypatch.setenv("TEACHER_THINKING_NAME_TAG", "teacher-thinking-false")
+    monkeypatch.setenv("TEACHER_SUPERVISION_RENDER_MODE", "base_completion")
+    monkeypatch.setenv("TEACHER_ROLLOUT_RENDER_MODE", "base_completion")
+    config = merge_opd_wandb_config({})["opd_experiment"]
+    assert not any("thinking" in key for key in config)
+    assert "teacher_supervision_render_mode" not in config
+    assert "teacher_rollout_render_mode" not in config
+
+
 def test_tracking_passes_wandb_run_id_and_resume_from_environment(monkeypatch):
     fake_wandb = FakeWandb()
     monkeypatch.setitem(sys.modules, "wandb", fake_wandb)

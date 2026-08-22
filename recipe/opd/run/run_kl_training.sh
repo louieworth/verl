@@ -68,6 +68,60 @@ case "$DISTILL_MODE" in
     opsd|opd) ;;
     *) echo "ERROR: DISTILL_MODE must be opsd or opd (got: $DISTILL_MODE)" >&2; exit 1 ;;
 esac
+TEACHER_ENABLE_THINKING=${TEACHER_ENABLE_THINKING:-false}
+case "$TEACHER_ENABLE_THINKING" in
+    true|false) ;;
+    *) echo "ERROR: TEACHER_ENABLE_THINKING must be true or false (got: $TEACHER_ENABLE_THINKING)" >&2; exit 1 ;;
+esac
+if [ "$DISTILL_MODE" = "opsd" ] && [ "$TEACHER_ENABLE_THINKING" = "true" ]; then
+    echo "ERROR: OPSD uses a frozen Base self-teacher and cannot enable teacher thinking mode" >&2
+    exit 1
+fi
+if [ "$DISTILL_MODE" = "opd" ]; then
+    if [ "$TEACHER_ENABLE_THINKING" = "true" ]; then
+        TEACHER_SUPERVISION_RENDER_MODE=qwen3_chat_thinking
+        TEACHER_ROLLOUT_RENDER_MODE=qwen3_chat_thinking
+        TEACHER_CHAT_TEMPLATE_TOKEN_BUFFER=${TEACHER_CHAT_TEMPLATE_TOKEN_BUFFER:-16}
+    else
+        TEACHER_SUPERVISION_RENDER_MODE=plain_completion
+        TEACHER_ROLLOUT_RENDER_MODE=plain_completion
+        TEACHER_CHAT_TEMPLATE_TOKEN_BUFFER=0
+    fi
+else
+    TEACHER_ROLLOUT_RENDER_MODE=base_completion
+    TEACHER_SUPERVISION_RENDER_MODE=base_completion
+    TEACHER_CHAT_TEMPLATE_TOKEN_BUFFER=0
+fi
+if [ "$DISTILL_MODE" = "opd" ]; then
+    TEACHER_THINKING_NAME_TAG="teacher-thinking-${TEACHER_ENABLE_THINKING}"
+    TEACHER_THINKING_FILE_SUFFIX="_${TEACHER_THINKING_NAME_TAG}"
+    TEACHER_THINKING_RUN_SEGMENT="${TEACHER_THINKING_NAME_TAG}_"
+else
+    TEACHER_THINKING_NAME_TAG=""
+    TEACHER_THINKING_FILE_SUFFIX=""
+    TEACHER_THINKING_RUN_SEGMENT=""
+fi
+TEACHER_PROMPT_RENDER_CONTRACT="supervision-${TEACHER_SUPERVISION_RENDER_MODE}_rollout-${TEACHER_ROLLOUT_RENDER_MODE}_v1"
+if ! [[ "$TEACHER_CHAT_TEMPLATE_TOKEN_BUFFER" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: TEACHER_CHAT_TEMPLATE_TOKEN_BUFFER must be a non-negative integer" >&2
+    exit 1
+fi
+export TEACHER_ENABLE_THINKING TEACHER_THINKING_NAME_TAG
+export TEACHER_SUPERVISION_RENDER_MODE TEACHER_ROLLOUT_RENDER_MODE
+export TEACHER_PROMPT_RENDER_CONTRACT TEACHER_CHAT_TEMPLATE_TOKEN_BUFFER
+
+run_teacher_generation() {
+    if [ "$DISTILL_MODE" = "opd" ] && [ "$TEACHER_ENABLE_THINKING" = "true" ]; then
+        env -u PYTORCH_CUDA_ALLOC_CONF \
+            VERL_FORCE_BASE_COMPLETION=false \
+            VERL_ENABLE_THINKING=true \
+            "$@"
+    else
+        env -u PYTORCH_CUDA_ALLOC_CONF -u VERL_ENABLE_THINKING \
+            VERL_FORCE_BASE_COMPLETION=true \
+            "$@"
+    fi
+}
 
 # KL Training Settings
 KL_TYPE=${KL_TYPE:-"reverse"}          # reverse | forward | jsd (OPSD generalized JSD)
@@ -426,7 +480,11 @@ if [ "$MAX_RESPONSE_LENGTH" -ge "$MODEL_CONTEXT_LENGTH" ]; then
     echo "ERROR: MAX_RESPONSE_LENGTH=$MAX_RESPONSE_LENGTH must be below MODEL_CONTEXT_LENGTH=$MODEL_CONTEXT_LENGTH" >&2
     exit 1
 fi
-MAX_DERIVED_PROMPT_LENGTH=$((MODEL_CONTEXT_LENGTH - MAX_RESPONSE_LENGTH))
+MAX_DERIVED_PROMPT_LENGTH=$((MODEL_CONTEXT_LENGTH - MAX_RESPONSE_LENGTH - TEACHER_CHAT_TEMPLATE_TOKEN_BUFFER))
+if [ "$MAX_DERIVED_PROMPT_LENGTH" -le 0 ]; then
+    echo "ERROR: teacher chat-template buffer leaves no prompt budget" >&2
+    exit 1
+fi
 
 if [ "$DISTILL_MODE" = "opsd" ]; then
     if [ "$USE_INITIAL_RESPONSE" = "true" ]; then
@@ -466,7 +524,7 @@ TRAIN_MAX_PROMPT_LENGTH=$MAX_PROMPT_LENGTH
 if [ "$BASE_PROMPT_LENGTH" -gt "$TRAIN_MAX_PROMPT_LENGTH" ]; then
     TRAIN_MAX_PROMPT_LENGTH=$BASE_PROMPT_LENGTH
 fi
-DERIVED_MAX_LENGTH=$((TRAIN_MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH))
+DERIVED_MAX_LENGTH=$((TRAIN_MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH + TEACHER_CHAT_TEMPLATE_TOKEN_BUFFER))
 if [ -z "$MAX_LENGTH" ]; then
     MAX_LENGTH=$DERIVED_MAX_LENGTH
 elif [ "$MAX_LENGTH" -lt "$DERIVED_MAX_LENGTH" ]; then
@@ -586,8 +644,12 @@ if [ "$DISTILL_MODE" = "opsd" ]; then
     SKD_TEACHER_PROMPT_CONTRACT=${SKD_TEACHER_PROMPT_CONTRACT:-"opsd_x_y_star_v1"}
     SKD_TEACHER_PROMPT_LENGTH=${SKD_TEACHER_PROMPT_LENGTH:-$((BASE_PROMPT_LENGTH + EXPERT_SOLUTION_PROMPT_LENGTH))}
 else
-    SKD_TEACHER_PROMPT_CONTRACT=${SKD_TEACHER_PROMPT_CONTRACT:-"opd_x_only_v1"}
-    SKD_TEACHER_PROMPT_LENGTH=${SKD_TEACHER_PROMPT_LENGTH:-$BASE_PROMPT_LENGTH}
+    if [ "$TEACHER_ENABLE_THINKING" = "true" ]; then
+        SKD_TEACHER_PROMPT_CONTRACT=${SKD_TEACHER_PROMPT_CONTRACT:-"opd_x_only_qwen3_thinking_v1"}
+    else
+        SKD_TEACHER_PROMPT_CONTRACT=${SKD_TEACHER_PROMPT_CONTRACT:-"opd_x_only_plain_completion_v1"}
+    fi
+    SKD_TEACHER_PROMPT_LENGTH=${SKD_TEACHER_PROMPT_LENGTH:-$((BASE_PROMPT_LENGTH + TEACHER_CHAT_TEMPLATE_TOKEN_BUFFER))}
 fi
 if [ "$SKD_TEACHER_PROMPT_LENGTH" -gt "$MAX_DERIVED_PROMPT_LENGTH" ]; then
     echo "WARNING: capping SKD teacher prompt $SKD_TEACHER_PROMPT_LENGTH -> $MAX_DERIVED_PROMPT_LENGTH to preserve the response budget." >&2
@@ -619,6 +681,7 @@ skd_rollout_batch_size: $SKD_ROLLOUT_BATCH_SIZE
 skd_pipeline_lanes: $SKD_PIPELINE_LANES
 skd_parallel_student_teacher: $SKD_PARALLEL_STUDENT_TEACHER
 skd_teacher_prompt_contract: $SKD_TEACHER_PROMPT_CONTRACT
+skd_teacher_enable_thinking: $TEACHER_ENABLE_THINKING
 skd_teacher_prompt_length: $SKD_TEACHER_PROMPT_LENGTH
 skd_rollout_max_model_len: $SKD_ROLLOUT_MAX_MODEL_LEN
 EOF
@@ -677,7 +740,7 @@ else
 fi
 
 EXPERIMENT_TAG="kl_${KL_TYPE}_${KL_METHOD}_${PROMPT_MODE_TAG}_${CLIP_TAG}${BETA_TAG}${TOPK_TAG}${Y_O_FILTER_TAG}_${DISTILL_MODE}_${TEACHER_TRAINING_PROMPT}"
-EXPERIMENT_TAG="${EXPERIMENT_TAG}_teacher${TEACHER_MODEL_NAME}"
+EXPERIMENT_TAG="${EXPERIMENT_TAG}_teacher${TEACHER_MODEL_NAME}${TEACHER_THINKING_FILE_SUFFIX}"
 
 # y_r path no longer reads FORWARD_STAGE2_MODE — y_r_prepare.py always processes
 # every stage1 row. Reward-based filtering of y_r happens post-generation via
@@ -1020,7 +1083,7 @@ case "$Y_O_ROLLOUT_MODE" in
     skd|skd_vllm) Y_O_ROLLOUT_TAG="_skd" ;;
     skd_vllm_internal) Y_O_ROLLOUT_TAG="_skd_internal" ;;
 esac
-RUN_DESCRIPTOR="${PROMPT_MODE_TAG}${Y_O_ROLLOUT_TAG}_kl_${KL_TYPE}_${KL_METHOD}_${CLIP_TAG}${BETA_TAG}${TOPK_TAG}${Y_O_FILTER_TAG}_${TEACHER_TRAINING_PROMPT}_${OPTIMIZATION_STEP_TAG}_${RUN_DATE}"
+RUN_DESCRIPTOR="${PROMPT_MODE_TAG}${Y_O_ROLLOUT_TAG}_kl_${KL_TYPE}_${KL_METHOD}_${CLIP_TAG}${BETA_TAG}${TOPK_TAG}${Y_O_FILTER_TAG}_${TEACHER_TRAINING_PROMPT}${TEACHER_THINKING_FILE_SUFFIX}_${OPTIMIZATION_STEP_TAG}_${RUN_DATE}"
 if [ "$DISTILL_MODE" = "opd" ]; then
     MODEL_RUN_NAME="teacher${TEACHER_MODEL_NAME}_${RUN_DESCRIPTOR}"
 else
@@ -1043,7 +1106,7 @@ case "$USE_LORA" in
 esac
 RESULTS_MODEL_KEY="${RESULTS_MODEL_KEY:-${MODEL_NAME}_${DISTILL_FAMILY}${TASK_RESULT_SUFFIX}_${MODEL_RUN_NAME}${RESULTS_TUNING_SUFFIX}}"
 RESULTS_BASE_MODEL_NAME="${DISTILL_FAMILY}${TASK_PATH_SUFFIX}/${MODEL_NAME}"
-RESULTS_FILE="${RESULTS_FILE:-results/${DISTILL_FAMILY}${TASK_PATH_SUFFIX}/${MODEL_NAME}${TASK_FILE_SUFFIX}.json}"
+RESULTS_FILE="${RESULTS_FILE:-results/${DISTILL_FAMILY}${TASK_PATH_SUFFIX}/${MODEL_NAME}${TASK_FILE_SUFFIX}${TEACHER_THINKING_FILE_SUFFIX}.json}"
 
 if [ -z "$OUTPUT_DIR" ]; then
     OUTPUT_BASE_DIR="outputs/${DISTILL_FAMILY}${TASK_PATH_SUFFIX}/${MODEL_NAME}/${MODEL_RUN_NAME}"
@@ -1170,6 +1233,12 @@ model_name=$MODEL_NAME
 model_path=$MODEL_PATH
 teacher_model_name=$TEACHER_MODEL_NAME
 teacher_model_path=${TEACHER_MODEL_PATH:-$MODEL_PATH}
+teacher_enable_thinking=$TEACHER_ENABLE_THINKING
+teacher_thinking_name_tag=$TEACHER_THINKING_NAME_TAG
+teacher_supervision_render_mode=$TEACHER_SUPERVISION_RENDER_MODE
+teacher_rollout_render_mode=$TEACHER_ROLLOUT_RENDER_MODE
+teacher_prompt_render_contract=$TEACHER_PROMPT_RENDER_CONTRACT
+teacher_chat_template_token_buffer=$TEACHER_CHAT_TEMPLATE_TOKEN_BUFFER
 tuning_mode=$TUNING_MODE_TAG
 use_lora=$USE_LORA
 lora_rank=$SIGNATURE_LORA_RANK
@@ -1264,6 +1333,12 @@ case "${KL_CONFIG_DRY_RUN:-false}" in
         echo "  eval pass_k:         $PASS_K"
         echo "  student model:       $MODEL_PATH"
         echo "  teacher model:       ${TEACHER_MODEL_PATH:-$MODEL_PATH}"
+        if [ "$DISTILL_MODE" = "opd" ]; then
+            echo "  teacher thinking:    $TEACHER_ENABLE_THINKING"
+        fi
+        echo "  teacher supervision: $TEACHER_SUPERVISION_RENDER_MODE"
+        echo "  teacher rollout:     $TEACHER_ROLLOUT_RENDER_MODE"
+        echo "  teacher prompt/max:  $MAX_PROMPT_LENGTH/$MAX_LENGTH (rollout chat buffer=$TEACHER_CHAT_TEMPLATE_TOKEN_BUFFER)"
         if [[ "$Y_O_ROLLOUT_MODE" == skd* ]]; then
             echo "  skd teacher prompt:  $SKD_TEACHER_PROMPT_CONTRACT"
             echo "  skd teacher length:  $SKD_TEACHER_PROMPT_LENGTH"
@@ -1273,6 +1348,8 @@ case "${KL_CONFIG_DRY_RUN:-false}" in
         echo "  output dir:          $OUTPUT_BASE_DIR"
         echo "  model dir:           $MODEL_SAVE_BASE_DIR"
         echo "  results key:         $RESULTS_MODEL_KEY"
+        echo "  results file:        $RESULTS_FILE"
+        echo "  gen results prefix:  gen_${TASK}_${TEACHER_THINKING_RUN_SEGMENT}${OPTIMIZATION_STEP_TAG:-ms1}"
         exit 0
         ;;
     false) ;;
@@ -1352,7 +1429,7 @@ elif [ "$PIPELINE_RESUME_MODE" = "fresh" ]; then
     echo ""
 fi
 
-GEN_RESULTS_RUN_PREFIX_DEFAULT="gen_${TASK}_${OPTIMIZATION_STEP_TAG:-ms1}"
+GEN_RESULTS_RUN_PREFIX_DEFAULT="gen_${TASK}_${TEACHER_THINKING_RUN_SEGMENT}${OPTIMIZATION_STEP_TAG:-ms1}"
 GEN_RESULTS_RUN_PREFIX="$(sanitize_path_component "${GEN_RESULTS_RUN_PREFIX:-$GEN_RESULTS_RUN_PREFIX_DEFAULT}")"
 GEN_RESULTS_RUN_ID_FILE="${GEN_RESULTS_RUN_ID_FILE_USER_VALUE:-$MODEL_SAVE_BASE_DIR/gen_results_run_id.txt}"
 
@@ -1509,7 +1586,7 @@ resolve_data_path_in_dir() {
     # y_o: train on stage1 rollouts. SKD y_o is path-qualified to avoid
     #      accidentally reusing ordinary student rollout parquet.
     if [ "$Y_MODE" = "y_r" ]; then
-        echo "$data_dir/${TASK_INTERMEDIATE_PREFIX}2_${PROMPT_MODE_TAG}_${DISTILL_MODE}_${TEACHER_MODEL_NAME}_responses.parquet"
+        echo "$data_dir/${TASK_INTERMEDIATE_PREFIX}2_${PROMPT_MODE_TAG}_${DISTILL_MODE}_${TEACHER_MODEL_NAME}${TEACHER_THINKING_FILE_SUFFIX}_responses.parquet"
     else
         local stage1_response_stem="${TASK_INTERMEDIATE_PREFIX}1${Y_O_ROLLOUT_TAG}_responses"
         case "${FORWARD_STAGE2_MODE:-}" in
@@ -1751,6 +1828,7 @@ sync_resident_y_o_from_checkpoint() {
         --temperature $TEMPERATURE \
         --student_model_path $MODEL_PATH \
         ${TEACHER_MODEL_PATH:+--teacher_model_path $TEACHER_MODEL_PATH} \
+        --teacher_enable_thinking $TEACHER_ENABLE_THINKING \
         --base_model_name $MODEL_NAME \
         --use_lora $USE_LORA \
         --lora_rank $LORA_RANK \
@@ -2185,7 +2263,7 @@ generate_stage1_y_o_responses() {
             fi
 
             echo "  [Stage 1] Generating y_t ~ $trajectory_distribution with fixed trajectory model: $TRAJECTORY_MODEL_PATH"
-            env -u PYTORCH_CUDA_ALLOC_CONF "$PYTHON_BIN" -m verl.trainer.main_generation_server \
+            run_teacher_generation "$PYTHON_BIN" -m verl.trainer.main_generation_server \
                 trainer.nnodes="${NNODES}" \
                 trainer.n_gpus_per_node="${NGPUS_PER_NODE}" \
                 actor_rollout_ref.model.path="${TRAJECTORY_MODEL_PATH}" \
@@ -2221,6 +2299,8 @@ generate_stage1_y_o_responses() {
                 --student_model_path "$current_model_path" \
                 --teacher_model_path "${current_teacher_model_path:-}" \
                 --tokenizer_path "$current_model_path" \
+                --teacher_tokenizer_path "${current_teacher_model_path:-$current_model_path}" \
+                --teacher_enable_thinking "$TEACHER_ENABLE_THINKING" \
                 --distill_mode "$DISTILL_MODE" \
                 --task "$TASK" \
                 --max_tokens "$MAX_RESPONSE_LENGTH" \
@@ -2360,6 +2440,14 @@ metadata_matches_step1_reuse_context() {
     [ "$value" = "$TEACHER_MODEL_NAME" ] || return 1
     value="$(gen_results_metadata_value "$meta" teacher_model_path)"
     [ "$value" = "${TEACHER_MODEL_PATH:-$MODEL_PATH}" ] || return 1
+    value="$(gen_results_metadata_value "$meta" teacher_enable_thinking)"
+    [ "$value" = "$TEACHER_ENABLE_THINKING" ] || return 1
+    value="$(gen_results_metadata_value "$meta" teacher_supervision_render_mode)"
+    [ "$value" = "$TEACHER_SUPERVISION_RENDER_MODE" ] || return 1
+    value="$(gen_results_metadata_value "$meta" teacher_rollout_render_mode)"
+    [ "$value" = "$TEACHER_ROLLOUT_RENDER_MODE" ] || return 1
+    value="$(gen_results_metadata_value "$meta" teacher_prompt_render_contract)"
+    [ "$value" = "$TEACHER_PROMPT_RENDER_CONTRACT" ] || return 1
     value="$(gen_results_metadata_value "$meta" y_mode)"
     [ "$value" = "$expected_y_mode" ] || return 1
     value="$(gen_results_metadata_value "$meta" y_o_rollout_mode)"
@@ -3345,7 +3433,7 @@ print_base_configuration() {
     echo "  Temp:     $TEMPERATURE"
     echo "  Clip:     $KL_TOKEN_CLIP"
     echo "  Y Mode:   $Y_MODE  (prompt_tag=$PROMPT_MODE_TAG)"
-    echo "  Distill:  $DISTILL_MODE  (teacher_training_prompt=$TEACHER_TRAINING_PROMPT, use_initial_response=$USE_INITIAL_RESPONSE)"
+    echo "  Distill:  $DISTILL_MODE  (teacher_training_prompt=$TEACHER_TRAINING_PROMPT, use_initial_response=$USE_INITIAL_RESPONSE, teacher_thinking=$TEACHER_ENABLE_THINKING)"
     if [ "$KL_TYPE" = "jsd" ]; then
         echo "  Beta:     $BETA"
     fi
@@ -3613,7 +3701,7 @@ run_epoch() {
                 echo "  [Stage 1 score] Skipping; no enabled downstream feature needs extra_info.reward."
             fi
 
-            local stage2_prompts="$current_gen_results_dir/${TASK_INTERMEDIATE_PREFIX}2_${PROMPT_MODE_TAG}_${DISTILL_MODE}_${TEACHER_MODEL_NAME}_prompts.parquet"
+            local stage2_prompts="$current_gen_results_dir/${TASK_INTERMEDIATE_PREFIX}2_${PROMPT_MODE_TAG}_${DISTILL_MODE}_${TEACHER_MODEL_NAME}${TEACHER_THINKING_FILE_SUFFIX}_prompts.parquet"
             if file_exists_and_nonempty "$stage2_prompts"; then
                 echo "  Stage 2 prompts already prepared: $stage2_prompts"
             else
@@ -3628,6 +3716,7 @@ run_epoch() {
                     --distill_mode "$DISTILL_MODE" \
                     --tokenizer_path "${current_teacher_model_path:-$current_model_path}" \
                     --max_prompt_tokens "$STAGE2_PROMPT_LENGTH" \
+                    --teacher_enable_thinking "$TEACHER_ENABLE_THINKING" \
                     --output_file "$stage2_prompts"
             fi
 
@@ -3650,7 +3739,7 @@ run_epoch() {
                         --max_tokens "$MAX_RESPONSE_LENGTH"
                     sleep_resident_y_o_server
                 else
-                    env -u PYTORCH_CUDA_ALLOC_CONF "$PYTHON_BIN" -m verl.trainer.main_generation_server \
+                    run_teacher_generation "$PYTHON_BIN" -m verl.trainer.main_generation_server \
                     trainer.nnodes="${NNODES}" \
                     trainer.n_gpus_per_node="${NGPUS_PER_NODE}" \
                     actor_rollout_ref.model.path="${stage2_gen_model_path}" \
@@ -3836,6 +3925,12 @@ gen_results_base_dir: $GEN_RESULTS_BASE_DIR
 gen_results_metadata_file: $GEN_RESULTS_METADATA_FILE
 student_model_path: $current_model_path
 teacher_model_path: ${current_teacher_model_path:-$current_model_path}
+teacher_enable_thinking: $TEACHER_ENABLE_THINKING
+teacher_thinking_name_tag: $TEACHER_THINKING_NAME_TAG
+teacher_supervision_render_mode: $TEACHER_SUPERVISION_RENDER_MODE
+teacher_rollout_render_mode: $TEACHER_ROLLOUT_RENDER_MODE
+teacher_prompt_render_contract: $TEACHER_PROMPT_RENDER_CONTRACT
+teacher_chat_template_token_buffer: $TEACHER_CHAT_TEMPLATE_TOKEN_BUFFER
 tuning_mode: $TUNING_MODE_TAG
 use_lora: $USE_LORA
 lora_rank: $LORA_RANK
@@ -3909,6 +4004,7 @@ EOF
         --temperature $TEMPERATURE \
         --student_model_path $student_model_path_for_train \
         ${current_teacher_model_path:+--teacher_model_path $current_teacher_model_path} \
+        --teacher_enable_thinking $TEACHER_ENABLE_THINKING \
         --base_model_name $MODEL_NAME \
         --use_lora $USE_LORA \
         --lora_rank $LORA_RANK \
@@ -4631,6 +4727,12 @@ student_model_name: $MODEL_NAME
 student_model_path: $MODEL_PATH
 teacher_model_name: $TEACHER_MODEL_NAME
 teacher_model_path: ${TEACHER_MODEL_PATH:-$MODEL_PATH}
+teacher_enable_thinking: $TEACHER_ENABLE_THINKING
+teacher_thinking_name_tag: $TEACHER_THINKING_NAME_TAG
+teacher_supervision_render_mode: $TEACHER_SUPERVISION_RENDER_MODE
+teacher_rollout_render_mode: $TEACHER_ROLLOUT_RENDER_MODE
+teacher_prompt_render_contract: $TEACHER_PROMPT_RENDER_CONTRACT
+teacher_chat_template_token_buffer: $TEACHER_CHAT_TEMPLATE_TOKEN_BUFFER
 distill_mode: $DISTILL_MODE
 prompt_mode: $PROMPT_MODE_TAG
 y_mode: $Y_MODE

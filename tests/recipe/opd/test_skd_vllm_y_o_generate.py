@@ -213,7 +213,7 @@ def test_opsd_teacher_prompt_reads_expert_solution(monkeypatch):
     )
     prepare_stub = types.ModuleType("recipe.opd.generation.y_r_prepare")
     prepare_stub._fit_rewrite_prompt = (
-        lambda render, expert, initial, _tokenizer, _cap: render(expert, initial)
+        lambda render, expert, initial, _tokenizer, _cap, *_args: render(expert, initial)
     )
     monkeypatch.setitem(sys.modules, "recipe.opd.dataset.data_utils", data_utils_stub)
     monkeypatch.setitem(sys.modules, "recipe.opd.generation.y_r_prepare", prepare_stub)
@@ -248,18 +248,68 @@ def test_opsd_teacher_prompt_rejects_missing_expert_solution():
         raise AssertionError("missing OPSD y* must fail closed")
 
 
-def test_opd_teacher_prompt_is_exact_student_prefix():
-    student_ids = [10, 11]
+def test_opd_nonthinking_teacher_uses_plain_completion(monkeypatch):
+    data_utils_stub = types.ModuleType("recipe.opd.dataset.data_utils")
+    data_utils_stub.build_teacher_prompt = lambda problem, _expert, **_kwargs: f"solve={problem}"
+    prepare_stub = types.ModuleType("recipe.opd.generation.y_r_prepare")
+    prepare_stub._fit_rewrite_prompt = (
+        lambda render, expert, initial, _tokenizer, _cap, *_args: render(expert, initial)
+    )
+    monkeypatch.setitem(sys.modules, "recipe.opd.dataset.data_utils", data_utils_stub)
+    monkeypatch.setitem(sys.modules, "recipe.opd.generation.y_r_prepare", prepare_stub)
+
     teacher_ids = _build_teacher_prompt_ids(
         CharacterTokenizer(),
         {"extra_info": {"problem": "P", "expert_cot": "must-not-be-read"}},
-        student_ids,
+        [10, 11],
         distill_mode="opd",
         task="code",
         teacher_prompt_length=128,
     )
-    assert teacher_ids == student_ids
-    assert teacher_ids is not student_ids
+    assert CharacterTokenizer().decode(teacher_ids) == "solve=P\n"
+    assert teacher_ids != [10, 11]
+
+
+def test_opd_thinking_teacher_uses_chat_prefix(monkeypatch):
+    data_utils_stub = types.ModuleType("recipe.opd.dataset.data_utils")
+    data_utils_stub.build_teacher_prompt = lambda problem, _expert, **_kwargs: f"solve={problem}"
+    data_utils_stub.build_teacher_chat_prompt_ids = (
+        lambda tokenizer, prompt, **_kwargs: tokenizer.apply_chat_template(
+            [{"role": "user", "content": prompt}],
+            tokenize=True,
+            add_generation_prompt=True,
+            enable_thinking=True,
+        )
+    )
+    prepare_stub = types.ModuleType("recipe.opd.generation.y_r_prepare")
+    prepare_stub._fit_rewrite_prompt = (
+        lambda render, expert, initial, _tokenizer, _cap, *_args: render(expert, initial)
+    )
+    monkeypatch.setitem(sys.modules, "recipe.opd.dataset.data_utils", data_utils_stub)
+    monkeypatch.setitem(sys.modules, "recipe.opd.generation.y_r_prepare", prepare_stub)
+
+    class ThinkingTokenizer(CharacterTokenizer):
+        def apply_chat_template(self, messages, **kwargs):
+            assert kwargs == {
+                "tokenize": True,
+                "add_generation_prompt": True,
+                "enable_thinking": True,
+            }
+            return [900, *self.encode(messages[0]["content"]), 901]
+
+    teacher_ids = _build_teacher_prompt_ids(
+        ThinkingTokenizer(),
+        {"extra_info": {"problem": "P", "expert_cot": "must-not-be-read"}},
+        [10, 11],
+        distill_mode="opd",
+        task="math",
+        teacher_prompt_length=128,
+        teacher_enable_thinking=True,
+    )
+
+    assert teacher_ids[0] == 900
+    assert teacher_ids[-1] == 901
+    assert teacher_ids != [10, 11]
 
 
 def test_one_pos_accepts_handles_normal_logprobs():

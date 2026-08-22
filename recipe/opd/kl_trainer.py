@@ -86,10 +86,12 @@ class KLTrainer:
 
         if self.sync_only:
             self.tokenizer = None
+            self.teacher_tokenizer = None
             self.train_dataloader = None
             self.total_training_steps = 1
         else:
             self.tokenizer = self._load_tokenizer()
+            self.teacher_tokenizer = self._load_teacher_tokenizer()
             self.train_dataloader = self._create_dataloader()
             self.total_training_steps = (
                 math.ceil(len(self.train_dataloader) / self.config.gradient_accumulation_steps)
@@ -131,6 +133,16 @@ class KLTrainer:
         logger.info("  KL Method: %s", self.config.kl_method)
         logger.info("  Student Model: %s", self.config.student_model_path)
         logger.info("  Teacher Model: %s", self.config.teacher_model_path or self.config.student_model_path)
+        logger.info(
+            "  Teacher Supervision Render: %s",
+            (
+                ("qwen3_chat_thinking" if self.config.teacher_enable_thinking else "plain_completion")
+                if self.config.distill_mode == "opd"
+                else "base_completion"
+            ),
+        )
+        if self.config.distill_mode == "opd":
+            logger.info("  Teacher Thinking: %s", self.config.teacher_enable_thinking)
         logger.info("  World Size: %s", self.world_size)
         logger.info("  FSDP Strategy: %s", self.config.fsdp_strategy)
         logger.info("  FSDP Size: %s", self.config.fsdp_size)
@@ -168,6 +180,26 @@ class KLTrainer:
                 "student_model": self.config.student_model_path.rstrip("/").split("/")[-1],
                 "teacher_model_path": effective_teacher_path,
                 "teacher_model": effective_teacher_path.rstrip("/").split("/")[-1],
+                **(
+                    {
+                        "teacher_thinking_name_tag": (
+                            f"teacher-thinking-{str(self.config.teacher_enable_thinking).lower()}"
+                        ),
+                        "teacher_supervision_render_mode": (
+                            "qwen3_chat_thinking"
+                            if self.config.teacher_enable_thinking
+                            else "plain_completion"
+                        ),
+                        "teacher_rollout_render_mode": (
+                            "qwen3_chat_thinking"
+                            if self.config.teacher_enable_thinking
+                            else "plain_completion"
+                        ),
+                        "teacher_enable_thinking": self.config.teacher_enable_thinking,
+                    }
+                    if self.config.distill_mode == "opd"
+                    else {}
+                ),
                 "use_lora": self.config.use_lora,
                 "lora_rank": self.config.lora_rank,
                 "lora_alpha": self.config.lora_alpha,
@@ -204,6 +236,15 @@ class KLTrainer:
             tokenizer.pad_token = tokenizer.eos_token
         return tokenizer
 
+    def _load_teacher_tokenizer(self) -> AutoTokenizer:
+        if self.config.distill_mode != "opd":
+            return self.tokenizer
+        teacher_path = self.config.teacher_model_path or self.config.student_model_path
+        tokenizer = AutoTokenizer.from_pretrained(teacher_path, trust_remote_code=True)
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+        return tokenizer
+
     def _create_dataloader(self):
         # Shard data by DP rank, not global rank: under Ulysses SP, ranks in
         # the same SP group must see identical inputs, otherwise the SP
@@ -215,6 +256,8 @@ class KLTrainer:
         return create_kl_dataloader(
             data_path=self.config.data_path,
             tokenizer=self.tokenizer,
+            teacher_tokenizer=self.teacher_tokenizer,
+            teacher_enable_thinking=self.config.teacher_enable_thinking,
             kl_type=self.config.kl_type,
             batch_size=self.config.train_batch_size,
             max_length=self.config.max_length,

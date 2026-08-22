@@ -250,6 +250,40 @@ else
     export TEACHER_MODEL="$MODEL_ALIAS"
 fi
 
+if [ "$FAMILY" = baseline ]; then
+    TEACHER_ENABLE_THINKING=false
+else
+    TEACHER_ENABLE_THINKING="${TEACHER_ENABLE_THINKING:-false}"
+fi
+case "$TEACHER_ENABLE_THINKING" in
+    true|false) ;;
+    *) contract_error "TEACHER_ENABLE_THINKING must be true or false (got $TEACHER_ENABLE_THINKING)" ;;
+esac
+if [ "$FAMILY" = opsd ] && [ "$TEACHER_ENABLE_THINKING" = true ]; then
+    contract_error "OPSD uses a frozen Base self-teacher and cannot enable teacher thinking mode"
+fi
+if [ "$FAMILY" = opd ]; then
+    if [ "$TEACHER_ENABLE_THINKING" = true ]; then
+        TEACHER_SUPERVISION_RENDER_MODE=qwen3_chat_thinking
+        TEACHER_ROLLOUT_RENDER_MODE=qwen3_chat_thinking
+        TEACHER_CHAT_TEMPLATE_TOKEN_BUFFER="${TEACHER_CHAT_TEMPLATE_TOKEN_BUFFER:-16}"
+    else
+        TEACHER_SUPERVISION_RENDER_MODE=plain_completion
+        TEACHER_ROLLOUT_RENDER_MODE=plain_completion
+        TEACHER_CHAT_TEMPLATE_TOKEN_BUFFER=0
+    fi
+else
+    TEACHER_ROLLOUT_RENDER_MODE=base_completion
+    TEACHER_SUPERVISION_RENDER_MODE=base_completion
+    TEACHER_CHAT_TEMPLATE_TOKEN_BUFFER=0
+fi
+TEACHER_PROMPT_RENDER_CONTRACT="supervision-${TEACHER_SUPERVISION_RENDER_MODE}_rollout-${TEACHER_ROLLOUT_RENDER_MODE}_v1"
+if ! [[ "$TEACHER_CHAT_TEMPLATE_TOKEN_BUFFER" =~ ^[0-9]+$ ]]; then
+    contract_error "TEACHER_CHAT_TEMPLATE_TOKEN_BUFFER must be a non-negative integer"
+fi
+export TEACHER_ENABLE_THINKING TEACHER_SUPERVISION_RENDER_MODE TEACHER_ROLLOUT_RENDER_MODE
+export TEACHER_PROMPT_RENDER_CONTRACT TEACHER_CHAT_TEMPLATE_TOKEN_BUFFER
+
 # Shared profile from arXiv:2607.04751 Table 5. These values are intentionally
 # common to the distillation variants; do not substitute variant-specific
 # optimizer settings from unrelated distillation recipes.
@@ -336,7 +370,15 @@ fi
 export PRECOMPUTED_STAGE1_PROMPTS_PATH="${PRECOMPUTED_STAGE1_PROMPTS_PATH:-$TRAIN_DATA_PATH}"
 
 RUN_STAMP="${RUN_STAMP:-$(date +%Y%m%d-%H%M%S)}"
-EXPERIMENT_ID="${EXPERIMENT_ID:-${FAMILY}-${TASK}-${VARIANT}-${MODEL_ALIAS}-ms${MULTI_STEP}-${RUN_STAMP}}"
+if [ "$FAMILY" != opd ]; then
+    TEACHER_THINKING_NAME_TAG=""
+    EXPERIMENT_TEACHER_SUFFIX=""
+else
+    TEACHER_THINKING_NAME_TAG="teacher-thinking-${TEACHER_ENABLE_THINKING}"
+    EXPERIMENT_TEACHER_SUFFIX="-${TEACHER_THINKING_NAME_TAG}"
+fi
+export TEACHER_THINKING_NAME_TAG
+EXPERIMENT_ID="${EXPERIMENT_ID:-${FAMILY}-${TASK}-${VARIANT}-${MODEL_ALIAS}${EXPERIMENT_TEACHER_SUFFIX}-ms${MULTI_STEP}-${RUN_STAMP}}"
 export EXPERIMENT_NAME="${EXPERIMENT_NAME:-$EXPERIMENT_ID}"
 export WANDB_RUN_NAME="${WANDB_RUN_NAME:-$EXPERIMENT_ID}"
 export WANDB_GROUP="${WANDB_GROUP:-${VARIANT}-${MODEL_SIZE}}"
@@ -383,6 +425,13 @@ else
         "requested-ms=$MULTI_STEP"
         "global-prompt-batch=$GLOBAL_PROMPT_BATCH_SIZE"
     )
+    if [ "$FAMILY" = opd ]; then
+        canonical_wandb_tags+=(
+            "teacher-thinking=$TEACHER_ENABLE_THINKING"
+            "teacher-supervision-render=$TEACHER_SUPERVISION_RENDER_MODE"
+            "teacher-rollout-render=$TEACHER_ROLLOUT_RENDER_MODE"
+        )
+    fi
     if [ "$VARIANT" = skd ]; then
         canonical_wandb_tags+=(
             "skd-gamma=$SKD_GAMMA"
@@ -398,10 +447,17 @@ WANDB_TAGS="$(IFS=,; printf '%s' "${canonical_wandb_tags[*]}")"
 export WANDB_TAGS WANDB_GROUP WANDB_JOB_TYPE
 unset canonical_wandb_tags
 
-export RUN_ROOT="${RUN_ROOT:-outputs/$WANDB_PROJECT/$TASK/$FAMILY/$VARIANT/$MODEL_ALIAS/$RUN_STAMP}"
+if [ -n "$TEACHER_THINKING_NAME_TAG" ]; then
+    DEFAULT_RUN_ROOT="outputs/$WANDB_PROJECT/$TASK/$FAMILY/$VARIANT/$MODEL_ALIAS/$TEACHER_THINKING_NAME_TAG/$RUN_STAMP"
+    DEFAULT_RESULTS_FILE="results/$WANDB_PROJECT/$TASK/$FAMILY/$VARIANT/$MODEL_ALIAS/$TEACHER_THINKING_NAME_TAG/$RUN_STAMP/results.json"
+else
+    DEFAULT_RUN_ROOT="outputs/$WANDB_PROJECT/$TASK/$FAMILY/$VARIANT/$MODEL_ALIAS/$RUN_STAMP"
+    DEFAULT_RESULTS_FILE="results/$WANDB_PROJECT/$TASK/$FAMILY/$VARIANT/$MODEL_ALIAS/$RUN_STAMP/results.json"
+fi
+export RUN_ROOT="${RUN_ROOT:-$DEFAULT_RUN_ROOT}"
 export WANDB_RUN_ID_FILE="${WANDB_RUN_ID_FILE:-$RUN_ROOT/wandb_run.json}"
 export WANDB_RUN_IDENTITY="${WANDB_RUN_IDENTITY:-$EXPERIMENT_ID}"
-export RESULTS_FILE="${RESULTS_FILE:-results/$WANDB_PROJECT/$TASK/$FAMILY/$VARIANT/$MODEL_ALIAS/$RUN_STAMP/results.json}"
+export RESULTS_FILE="${RESULTS_FILE:-$DEFAULT_RESULTS_FILE}"
 export EVAL_RESULTS_FILE="${EVAL_RESULTS_FILE:-$RESULTS_FILE}"
 export EVAL_OUTPUT_DIR="${EVAL_OUTPUT_DIR:-gen_results/eval/$TASK/$EXPERIMENT_ID}"
 
@@ -453,16 +509,24 @@ Canonical OPD experiment
   W&B project/run:     $WANDB_PROJECT / $WANDB_RUN_NAME
   W&B group/job:       $WANDB_GROUP / $WANDB_JOB_TYPE
   W&B tags:            $WANDB_TAGS
+  run root:            $RUN_ROOT
+  results file:        $RESULTS_FILE
+  eval output:         $EVAL_OUTPUT_DIR
 EOF
     if [ "$FAMILY" != baseline ]; then
         cat <<EOF
   distill mode:        $DISTILL_MODE
   KL objective:        $KL_TYPE/$KL_METHOD (beta=$BETA)
   y/teacher prompt:    $Y_MODE/$TEACHER_TRAINING_PROMPT
+  teacher supervision: $TEACHER_SUPERVISION_RENDER_MODE
+  teacher rollout:     $TEACHER_ROLLOUT_RENDER_MODE (chat-template buffer=$TEACHER_CHAT_TEMPLATE_TOKEN_BUFFER)
   rollout mode:        $Y_O_ROLLOUT_MODE
   loss support top-k:  $TOP_K
   token KL clip:       $KL_TOKEN_CLIP
 EOF
+        if [ "$FAMILY" = opd ]; then
+            echo "  teacher thinking:    $TEACHER_ENABLE_THINKING"
+        fi
         if [ "$VARIANT" = skd ]; then
             cat <<EOF
   SKD draft/accept:    gamma=$SKD_GAMMA top_k=$SKD_ACCEPT_TOP_K top_p=$SKD_ACCEPT_TOP_P
@@ -676,16 +740,20 @@ if [ "$Y_MODE" = y_r ]; then
     # Qwen3 Base checkpoints expose a 32K native context. Reserve the full
     # 16K target response and truncate the derived rewrite prompt to the
     # remaining context instead of requesting an invalid 38K/43K sequence.
-    export MAX_PROMPT_LENGTH="$((MODEL_CONTEXT_LENGTH - MAX_RESPONSE_LENGTH))"
+    export MAX_PROMPT_LENGTH="$((MODEL_CONTEXT_LENGTH - MAX_RESPONSE_LENGTH - TEACHER_CHAT_TEMPLATE_TOKEN_BUFFER))"
+    if [ "$MAX_PROMPT_LENGTH" -le 0 ]; then
+        echo "ERROR: teacher chat-template buffer leaves no y_r prompt budget" >&2
+        exit 2
+    fi
     export MAX_LENGTH="$MODEL_CONTEXT_LENGTH"
     export STAGE2_PROMPT_LENGTH="$MAX_PROMPT_LENGTH"
 else
     if [ "$FAMILY" = opd ]; then
         export MAX_PROMPT_LENGTH="$BASE_PROMPT_LENGTH"
-        export MAX_LENGTH="$((BASE_PROMPT_LENGTH + MAX_RESPONSE_LENGTH))"
+        export MAX_LENGTH="$((BASE_PROMPT_LENGTH + MAX_RESPONSE_LENGTH + TEACHER_CHAT_TEMPLATE_TOKEN_BUFFER))"
     else
         export MAX_PROMPT_LENGTH="$((BASE_PROMPT_LENGTH + EXPERT_SOLUTION_PROMPT_LENGTH))"
-        export MAX_LENGTH="$((BASE_PROMPT_LENGTH + EXPERT_SOLUTION_PROMPT_LENGTH + MAX_RESPONSE_LENGTH))"
+        export MAX_LENGTH="$((BASE_PROMPT_LENGTH + EXPERT_SOLUTION_PROMPT_LENGTH + MAX_RESPONSE_LENGTH + TEACHER_CHAT_TEMPLATE_TOKEN_BUFFER))"
     fi
     export STAGE2_PROMPT_LENGTH="$((BASE_PROMPT_LENGTH + EXPERT_SOLUTION_PROMPT_LENGTH + MAX_RESPONSE_LENGTH))"
 fi

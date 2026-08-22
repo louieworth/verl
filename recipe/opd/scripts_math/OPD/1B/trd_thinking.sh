@@ -1,22 +1,22 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Explicit math OPD vanilla: reverse full-vocab KL on student rollouts.
+# Math OPD TRD with Qwen3-14B teacher thinking enabled by default.
 export OPD_TASK="math"
 export OPD_FAMILY="opd"
-export OPD_VARIANT="vanilla"
-export OPD_MODEL_SIZE="8B"
-export MODEL_PATH="${MODEL_PATH:-Qwen/Qwen3-8B-Base}"
+export OPD_VARIANT="trd"
+export OPD_MODEL_SIZE="1B"
+export MODEL_PATH="${MODEL_PATH:-Qwen/Qwen3-1.7B-Base}"
 export TEACHER_MODEL_PATH="${TEACHER_MODEL_PATH:-Qwen/Qwen3-14B}"
-export TEACHER_ENABLE_THINKING="${TEACHER_ENABLE_THINKING:-false}"
+export TEACHER_ENABLE_THINKING="${TEACHER_ENABLE_THINKING:-true}"
 export MULTI_STEP="${MULTI_STEP:-0}"
 
 export DISTILL_MODE="opd"
 export KL_METHOD="full_vocab"
 export BETA=0
-export KL_TYPE="reverse"
-export Y_MODE="y_o"
-export TEACHER_TRAINING_PROMPT="vanilla"
+export KL_TYPE="forward"
+export Y_MODE="y_r"
+export TEACHER_TRAINING_PROMPT="refine"
 export Y_O_ROLLOUT_MODE="student"
 export TOP_K=0
 export KL_TOKEN_CLIP=0

@@ -26,6 +26,38 @@ def build_student_prompt(problem: str, task: str = "math") -> str:
     return f"{problem}\n\n{suffix}"
 
 
+def build_teacher_chat_prompt_ids(
+    tokenizer: PreTrainedTokenizer,
+    prompt: str,
+    *,
+    enable_thinking: bool,
+) -> list[int]:
+    """Render an OPD teacher prefix through its Qwen3 chat template.
+
+    Canonical OPD calls this helper only in thinking mode. Non-thinking OPD
+    supervision and rollout are plain completions so their prefixes contain no
+    empty ``<think></think>`` block. OPSD Base self-teachers also do not call it.
+    """
+    try:
+        token_ids = tokenizer.apply_chat_template(
+            [{"role": "user", "content": prompt}],
+            tokenize=True,
+            add_generation_prompt=True,
+            enable_thinking=enable_thinking,
+        )
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise RuntimeError(
+            "OPD teacher chat mode requires a tokenizer chat template that "
+            "supports enable_thinking (use the tokenizer "
+            "shipped with Qwen/Qwen3-14B)."
+        ) from exc
+
+    if hasattr(token_ids, "tolist"):
+        token_ids = token_ids.tolist()
+    if not isinstance(token_ids, list) or not token_ids:
+        raise RuntimeError("Teacher chat template returned no prompt token ids.")
+    return [int(token_id) for token_id in token_ids]
+
 
 # =============================================================================
 # Teacher / student prompt templates (training-time)
@@ -263,8 +295,14 @@ class KLTrainingDataset(Dataset):
         log_difficulty_buckets: bool = False,
         distill_mode: str = "opsd",
         task: str = "math",
+        teacher_tokenizer: PreTrainedTokenizer | None = None,
+        teacher_enable_thinking: bool = False,
     ):
         self.tokenizer = tokenizer
+        self.teacher_tokenizer = teacher_tokenizer or tokenizer
+        self.teacher_enable_thinking = teacher_enable_thinking
+        if distill_mode == "opsd" and teacher_enable_thinking:
+            raise ValueError("OPSD uses a Base self-teacher and cannot enable teacher thinking mode")
         self.kl_type = kl_type
         self.max_length = max_length
         self.use_initial_response = use_initial_response
@@ -412,12 +450,28 @@ class KLTrainingDataset(Dataset):
             _REF_TRUNC_NOTICE,
         )
 
-    def _build_sequence(self, prompt: str, response: str) -> tuple[torch.Tensor, torch.Tensor, int]:
+    def _build_sequence(
+        self,
+        prompt: str,
+        response: str,
+        *,
+        tokenizer: PreTrainedTokenizer | None = None,
+        use_teacher_chat_template: bool = False,
+        teacher_enable_thinking: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor, int]:
         if self.prompt_truncation:
             prompt = self._truncate_initial_response(prompt, response)
             prompt = self._truncate_reference_solution(prompt, response)
-        prompt_ids = self._encode_text(prompt + "\n")
-        response_ids = self._encode_text(response)
+        tokenizer = tokenizer or self.tokenizer
+        if use_teacher_chat_template:
+            prompt_ids = build_teacher_chat_prompt_ids(
+                tokenizer,
+                prompt,
+                enable_thinking=teacher_enable_thinking,
+            )
+        else:
+            prompt_ids = tokenizer.encode(prompt + "\n", add_special_tokens=False)
+        response_ids = tokenizer.encode(response, add_special_tokens=False)
         full_ids = (prompt_ids + response_ids)[: self.max_length]
         prompt_len = min(len(prompt_ids), len(full_ids))
         input_ids = torch.tensor(full_ids, dtype=torch.long)
@@ -452,7 +506,16 @@ class KLTrainingDataset(Dataset):
 
     def _prepare_item(self, student_prompt: str, teacher_prompt: str, response: str) -> dict[str, torch.Tensor]:
         student_input_ids, student_position_ids, student_prompt_len = self._build_sequence(student_prompt, response)
-        teacher_input_ids, teacher_position_ids, teacher_prompt_len = self._build_sequence(teacher_prompt, response)
+        teacher_input_ids, teacher_position_ids, teacher_prompt_len = self._build_sequence(
+            teacher_prompt,
+            response,
+            tokenizer=getattr(self, "teacher_tokenizer", self.tokenizer),
+            use_teacher_chat_template=(
+                getattr(self, "distill_mode", "opsd") == "opd"
+                and getattr(self, "teacher_enable_thinking", False)
+            ),
+            teacher_enable_thinking=getattr(self, "teacher_enable_thinking", False),
+        )
 
         student_response = student_input_ids[student_prompt_len:]
         teacher_response = teacher_input_ids[teacher_prompt_len:]
@@ -591,10 +654,14 @@ def create_kl_dataloader(
     log_difficulty_buckets: bool = False,
     distill_mode: str = "opsd",
     task: str = "math",
+    teacher_tokenizer: PreTrainedTokenizer | None = None,
+    teacher_enable_thinking: bool = False,
 ) -> DataLoader:
     dataset = KLTrainingDataset(
         data_path=data_path,
         tokenizer=tokenizer,
+        teacher_tokenizer=teacher_tokenizer,
+        teacher_enable_thinking=teacher_enable_thinking,
         kl_type=kl_type,
         max_length=max_length,
         max_samples=max_samples,

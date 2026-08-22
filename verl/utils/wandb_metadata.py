@@ -26,6 +26,11 @@ _CONFIG_ENV_FIELDS = {
     "KL_METHOD": "kl_method",
     "Y_MODE": "y_mode",
     "TEACHER_TRAINING_PROMPT": "teacher_prompt",
+    "TEACHER_ENABLE_THINKING": "teacher_enable_thinking",
+    "TEACHER_THINKING_NAME_TAG": "teacher_thinking_name_tag",
+    "TEACHER_SUPERVISION_RENDER_MODE": "teacher_supervision_render_mode",
+    "TEACHER_ROLLOUT_RENDER_MODE": "teacher_rollout_render_mode",
+    "TEACHER_PROMPT_RENDER_CONTRACT": "teacher_prompt_render_contract",
     "Y_O_ROLLOUT_MODE": "rollout_mode",
     "TOP_K": "teacher_loss_top_k",
     "KL_TOKEN_CLIP": "kl_token_clip",
@@ -55,6 +60,14 @@ _CONFIG_ENV_FIELDS = {
     "SKD_ACCEPT_TOP_P": "skd_accept_top_p",
     "SKD_TEACHER_TEMPERATURE": "skd_teacher_temperature",
     "SEED": "seed",
+}
+
+_OPD_TEACHER_THINKING_ENV_FIELDS = {
+    "TEACHER_ENABLE_THINKING",
+    "TEACHER_THINKING_NAME_TAG",
+    "TEACHER_SUPERVISION_RENDER_MODE",
+    "TEACHER_ROLLOUT_RENDER_MODE",
+    "TEACHER_PROMPT_RENDER_CONTRACT",
 }
 
 
@@ -100,7 +113,10 @@ def wandb_init_metadata_from_env() -> dict[str, Any]:
 def opd_experiment_config_from_env() -> dict[str, Any]:
     """Return the compact, queryable canonical experiment configuration."""
     result: dict[str, Any] = {}
+    family = os.environ.get("OPD_FAMILY", os.environ.get("DISTILL_MODE", "")).strip().lower()
     for env_name, config_name in _CONFIG_ENV_FIELDS.items():
+        if env_name in _OPD_TEACHER_THINKING_ENV_FIELDS and family != "opd":
+            continue
         if (raw_value := os.environ.get(env_name, "").strip()) != "":
             result[config_name] = _typed_value(raw_value)
     return result

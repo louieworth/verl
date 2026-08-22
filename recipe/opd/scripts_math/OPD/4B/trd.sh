@@ -8,6 +8,7 @@ export OPD_VARIANT="trd"
 export OPD_MODEL_SIZE="4B"
 export MODEL_PATH="${MODEL_PATH:-Qwen/Qwen3-4B-Base}"
 export TEACHER_MODEL_PATH="${TEACHER_MODEL_PATH:-Qwen/Qwen3-14B}"
+export TEACHER_ENABLE_THINKING="${TEACHER_ENABLE_THINKING:-false}"
 export MULTI_STEP="${MULTI_STEP:-0}"
 
 export DISTILL_MODE="opd"
