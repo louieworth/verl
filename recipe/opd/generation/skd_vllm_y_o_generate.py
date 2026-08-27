@@ -15,6 +15,7 @@ import json
 import math
 import multiprocessing as mp
 import os
+from pathlib import Path
 import queue
 import sys
 import time
@@ -44,6 +45,21 @@ class RowState:
 
 def _gpu_count(gpus: str) -> int:
     return len([part for part in str(gpus).split(',') if part.strip()])
+
+
+def _load_lora_rank(adapter_path: str) -> int:
+    if not adapter_path:
+        return 0
+    config_path = Path(adapter_path) / "adapter_config.json"
+    weights_path = Path(adapter_path) / "adapter_model.safetensors"
+    if not config_path.is_file() or not weights_path.is_file():
+        raise FileNotFoundError(f"incomplete student LoRA adapter: {adapter_path}")
+    with config_path.open(encoding="utf-8") as f:
+        config = json.load(f)
+    rank = int(config.get("r") or 0)
+    if rank <= 0:
+        raise ValueError(f"invalid LoRA rank in {config_path}: {rank}")
+    return rank
 
 
 def _normalize_chat(chat: Any) -> list[dict[str, str]]:
@@ -284,7 +300,8 @@ def _llm_worker_main(request_q, response_q, *, model_path: str, tokenizer_path: 
                      gpus: str, tensor_parallel_size: int, dtype: str,
                      gpu_memory_utilization: float, max_model_len: int,
                      max_logprobs: int, max_num_seqs: int,
-                     max_num_batched_tokens: int, seed: int) -> None:
+                     max_num_batched_tokens: int, seed: int,
+                     lora_adapter_path: str = "", lora_rank: int = 0) -> None:
     os.environ["CUDA_VISIBLE_DEVICES"] = gpus
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
     try:
@@ -319,6 +336,20 @@ def _llm_worker_main(request_q, response_q, *, model_path: str, tokenizer_path: 
             kwargs["max_num_seqs"] = max_num_seqs
         if max_num_batched_tokens > 0:
             kwargs["max_num_batched_tokens"] = max_num_batched_tokens
+        lora_request = None
+        if lora_adapter_path:
+            from vllm.lora.request import LoRARequest
+
+            kwargs.update(
+                enable_lora=True,
+                max_loras=1,
+                max_lora_rank=lora_rank,
+            )
+            lora_request = LoRARequest(
+                lora_name="pipeline_student",
+                lora_int_id=1,
+                lora_path=lora_adapter_path,
+            )
         llm = LLM(**kwargs)
         response_q.put(("ready", None))
         while True:
@@ -329,7 +360,12 @@ def _llm_worker_main(request_q, response_q, *, model_path: str, tokenizer_path: 
             try:
                 params = dict(params)
                 prompt_logprobs_tail = params.pop("_prompt_logprobs_tail", None)
-                outputs = llm.generate(prompts, SamplingParams(**params), use_tqdm=False)
+                outputs = llm.generate(
+                    prompts,
+                    SamplingParams(**params),
+                    use_tqdm=False,
+                    lora_request=lora_request,
+                )
                 response_q.put((request_id, _simplify_outputs(outputs, prompt_logprobs_tail, prompts)))
             except Exception as exc:  # pylint: disable=broad-exception-caught
                 response_q.put((request_id, {"error": repr(exc), "traceback": traceback.format_exc()}))
@@ -342,7 +378,8 @@ class RemoteVLLM:
                  tensor_parallel_size: int, dtype: str,
                  gpu_memory_utilization: float, max_model_len: int,
                  max_logprobs: int, max_num_seqs: int,
-                 max_num_batched_tokens: int, seed: int):
+                 max_num_batched_tokens: int, seed: int,
+                 lora_adapter_path: str = "", lora_rank: int = 0):
         ctx = mp.get_context("spawn")
         self._request_q = ctx.Queue(maxsize=2)
         self._response_q = ctx.Queue(maxsize=2)
@@ -363,6 +400,8 @@ class RemoteVLLM:
                 "max_num_seqs": max_num_seqs,
                 "max_num_batched_tokens": max_num_batched_tokens,
                 "seed": seed,
+                "lora_adapter_path": lora_adapter_path,
+                "lora_rank": lora_rank,
             },
         )
         self._process.start()
@@ -741,7 +780,8 @@ def _make_remote_llm(model_path: str, tokenizer_path: str, gpus: str, tp: int,
                      dtype: str, gpu_memory_utilization: float,
                      max_model_len: int, max_logprobs: int,
                      max_num_seqs: int, max_num_batched_tokens: int,
-                     seed: int) -> RemoteVLLM:
+                     seed: int, lora_adapter_path: str = "",
+                     lora_rank: int = 0) -> RemoteVLLM:
     if tp <= 0:
         tp = _gpu_count(gpus)
     return RemoteVLLM(
@@ -756,6 +796,8 @@ def _make_remote_llm(model_path: str, tokenizer_path: str, gpus: str, tp: int,
         max_num_seqs=max_num_seqs,
         max_num_batched_tokens=max_num_batched_tokens,
         seed=seed,
+        lora_adapter_path=lora_adapter_path,
+        lora_rank=lora_rank,
     )
 
 
@@ -765,6 +807,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", required=True)
     parser.add_argument("--prompt_key", default="prompt")
     parser.add_argument("--student_model_path", required=True)
+    parser.add_argument("--student_lora_adapter_path", default="")
     parser.add_argument("--teacher_model_path", default="")
     parser.add_argument("--tokenizer_path", default="")
     parser.add_argument("--teacher_tokenizer_path", default="")
@@ -816,7 +859,12 @@ def main() -> None:
     teacher_model_path = args.teacher_model_path or args.student_model_path
     tokenizer_path = args.tokenizer_path or args.student_model_path
     teacher_tokenizer_path = args.teacher_tokenizer_path or teacher_model_path
-    share_engine = args.share_engine_if_same and teacher_model_path == args.student_model_path
+    student_lora_rank = _load_lora_rank(args.student_lora_adapter_path)
+    share_engine = (
+        args.share_engine_if_same
+        and not args.student_lora_adapter_path
+        and teacher_model_path == args.student_model_path
+    )
 
     dataset = pd.read_parquet(args.input)
     chats = dataset[args.prompt_key].tolist()
@@ -885,6 +933,7 @@ def main() -> None:
         f"teacher_enable_thinking={args.teacher_enable_thinking} "
         f"max_model_len={args.max_model_len} batch={args.batch_size} gamma={args.gamma} "
         f"student={args.student_model_path} teacher={teacher_model_path} "
+        f"student_lora_adapter={args.student_lora_adapter_path or 'none'} "
         f"student_mem={student_gpu_memory_utilization} teacher_mem={teacher_gpu_memory_utilization} "
         f"student_max_num_seqs={student_max_num_seqs} teacher_max_num_seqs={teacher_max_num_seqs} "
         f"share_engine={share_engine} parallel_student_teacher={args.parallel_student_teacher and not share_engine} "
@@ -903,6 +952,7 @@ def main() -> None:
                 args.student_tp or _gpu_count(args.shared_gpus), args.dtype,
                 student_gpu_memory_utilization, args.max_model_len, max_logprobs,
                 student_max_num_seqs, student_max_num_batched_tokens, args.seed,
+                args.student_lora_adapter_path, student_lora_rank,
             )
             teacher_llm = student_llm
         else:
@@ -911,6 +961,7 @@ def main() -> None:
                 args.student_tp or _gpu_count(args.student_gpus), args.dtype,
                 student_gpu_memory_utilization, args.max_model_len, max_logprobs,
                 student_max_num_seqs, student_max_num_batched_tokens, args.seed,
+                args.student_lora_adapter_path, student_lora_rank,
             )
             teacher_llm = _make_remote_llm(
                 teacher_model_path, teacher_tokenizer_path, args.teacher_gpus,
@@ -990,6 +1041,7 @@ def main() -> None:
         "output": args.output,
         "rows": len(dataset),
         "student_model_path": args.student_model_path,
+        "student_lora_adapter_path": args.student_lora_adapter_path,
         "teacher_model_path": teacher_model_path,
         "share_engine": share_engine,
         "parallel_student_teacher": bool(args.parallel_student_teacher and not share_engine),

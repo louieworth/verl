@@ -3,6 +3,7 @@
 #
 # KL divergence trainer backed by verl FSDP TrainingWorker engines.
 
+import gc
 import glob
 import json
 import logging
@@ -1096,6 +1097,7 @@ class KLTrainer:
             for batch_idx, batch in enumerate(progress_bar):
                 if batch_idx < skip_batches:
                     continue
+                checkpoint_after_batch = False
                 teacher_batch = self._make_teacher_batch(batch)
                 with self.teacher_engine.eval_mode():
                     teacher_output = self.teacher_engine.forward_backward_batch(
@@ -1213,7 +1215,7 @@ class KLTrainer:
                                 "Saving optimizer-step evaluation milestone %s",
                                 self._wandb_global_step(),
                             )
-                        self._save_checkpoint()
+                        checkpoint_after_batch = True
 
                 progress_bar.set_postfix(
                     {
@@ -1224,8 +1226,13 @@ class KLTrainer:
                     }
                 )
 
-                del teacher_output
-                del train_output
+                # Full-vocabulary OPD keeps large teacher logits and student
+                # outputs alive through this point. Release every batch-owned
+                # reference before FSDP materializes CPU checkpoint shards.
+                del batch, student_batch, teacher_batch, teacher_output, train_output
+                if checkpoint_after_batch:
+                    gc.collect()
+                    self._save_checkpoint()
 
         return {
             "kl_loss": running_kl / max(num_batches, 1),

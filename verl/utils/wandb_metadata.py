@@ -42,6 +42,7 @@ _CONFIG_ENV_FIELDS = {
     "EVAL_PROMPT_LENGTH": "eval_prompt_length",
     "EVAL_RESPONSE_LENGTH": "eval_response_length",
     "PASS_K": "eval_pass_k",
+    "EVAL_DATASETS": "eval_datasets",
     "EVAL_FRACTIONS": "eval_fractions",
     "LEARNING_RATE": "learning_rate",
     "USE_LORA": "use_lora",
@@ -49,6 +50,7 @@ _CONFIG_ENV_FIELDS = {
     "LORA_ALPHA": "lora_alpha",
     "MICRO_BATCH_SIZE_PER_GPU": "micro_batch_size_per_gpu",
     "USE_DYNAMIC_BSZ": "use_dynamic_batching",
+    "ROLLOUT_N": "rollout_n",
     "ROLLOUT_TEMPERATURE": "rollout_temperature",
     "ROLLOUT_TOP_P": "rollout_top_p",
     "EVAL_TEMPERATURE": "eval_temperature",
@@ -59,6 +61,9 @@ _CONFIG_ENV_FIELDS = {
     "SKD_ACCEPT_TOP_K": "skd_accept_top_k",
     "SKD_ACCEPT_TOP_P": "skd_accept_top_p",
     "SKD_TEACHER_TEMPERATURE": "skd_teacher_temperature",
+    "MODEL_ARTIFACT_POLICY": "model_artifact_policy",
+    "PIPELINE_EPHEMERAL_MODELS": "pipeline_ephemeral_models",
+    "RESIDENT_STUDENT_ROLLOUT": "resident_student_rollout",
     "SEED": "seed",
 }
 
@@ -85,24 +90,9 @@ def _typed_value(value: str) -> Any:
     return parsed if isinstance(parsed, (int, float)) else value
 
 
-def wandb_tags_from_env() -> list[str]:
-    """Return de-duplicated W&B tags in their declared order."""
-    tags: list[str] = []
-    seen: set[str] = set()
-    for raw_tag in os.environ.get("WANDB_TAGS", "").split(","):
-        tag = raw_tag.strip()
-        if tag and tag not in seen:
-            tags.append(tag)
-            seen.add(tag)
-    return tags
-
-
 def wandb_init_metadata_from_env() -> dict[str, Any]:
-    """Build optional ``wandb.init`` grouping fields from the environment."""
+    """Build optional ``wandb.init`` grouping fields without W&B tags."""
     metadata: dict[str, Any] = {}
-    tags = wandb_tags_from_env()
-    if tags:
-        metadata["tags"] = tags
     if group := os.environ.get("WANDB_GROUP", "").strip():
         metadata["group"] = group
     if job_type := os.environ.get("WANDB_JOB_TYPE", "").strip():

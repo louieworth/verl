@@ -264,6 +264,7 @@ PIPELINE_CLEANUP_BATCH_DATA=${PIPELINE_CLEANUP_BATCH_DATA:-"true"}
 PIPELINE_STORE_RESUME_MODEL_IN_GEN_RESULTS=${PIPELINE_STORE_RESUME_MODEL_IN_GEN_RESULTS:-"true"}
 PIPELINE_CLEANUP_GEN_RESULTS_ON_COMPLETE=${PIPELINE_CLEANUP_GEN_RESULTS_ON_COMPLETE:-"true"}
 PIPELINE_TEMP_MODEL_DIR=${PIPELINE_TEMP_MODEL_DIR:-""}
+PIPELINE_EPHEMERAL_MODELS=${PIPELINE_EPHEMERAL_MODELS:-"false"}  # Eval consumes and deletes all model artifacts.
 PIPELINE_DONE_MARKER_SCHEMA="opd_pipeline_update/v1"
 # Resume behavior:
 #   resume_matching : default; find an older gen_results run with the same semantic signature,
@@ -330,31 +331,14 @@ SAVE_MERGED_MODEL=${SAVE_MERGED_MODEL:-"true"}  # Merge LoRA after training
 SAVE_STEPS=${SAVE_STEPS:-100}                   # FSDP ckpt every N optimizer steps (crash recovery)
 KEEP_LAST_N_CHECKPOINTS=${KEEP_LAST_N_CHECKPOINTS:-1}  # Rolling window; per-epoch hf_merged is always preserved
 
-# Experimental resident student rollout path. When enabled, y_o generation is served
-# by a long-lived student vLLM server and KL training syncs updated LoRA/student
-# weights back into it, so intermediate batches no longer need blocking HF merge.
-USER_RESIDENT_STUDENT_ROLLOUT="${RESIDENT_STUDENT_ROLLOUT:-}"
-RESIDENT_STUDENT_ROLLOUT=${RESIDENT_STUDENT_ROLLOUT:-"false"}
+# Resident student rollout keeps ordinary pipeline updates on rolling FSDP
+# state, so they do not need a merged Hugging Face export.
+RESIDENT_STUDENT_ROLLOUT=${RESIDENT_STUDENT_ROLLOUT:-""}
 RESIDENT_YO_MANIFEST=${RESIDENT_YO_MANIFEST:-""}
 RESIDENT_YO_AUTOSTART=${RESIDENT_YO_AUTOSTART:-"true"}
 RESIDENT_YO_LOAD_FORMAT=${RESIDENT_YO_LOAD_FORMAT:-"auto"}
 ASYNC_HF_EXPORT=${ASYNC_HF_EXPORT:-"false"}
-
-# Ray GPU resources are scheduler leases, not CUDA memory. A sleeping resident
-# y_o vLLM releases memory but still holds its Ray GPU actors, which prevents
-# the OPD y_r teacher standalone vLLM from scheduling on the same allocation.
-if [ "$RESIDENT_STUDENT_ROLLOUT" = "true" ] && [ "$Y_MODE" = "y_r" ] && [ "$DISTILL_MODE" = "opd" ]; then
-    if [ -n "$USER_RESIDENT_STUDENT_ROLLOUT" ]; then
-        echo "ERROR: RESIDENT_STUDENT_ROLLOUT=true is incompatible with Y_MODE=y_r + DISTILL_MODE=opd." >&2
-        echo "       The resident student y_o vLLM keeps Ray GPU resources while sleeping," >&2
-        echo "       so the teacher y_r standalone vLLM cannot acquire GPUs." >&2
-        echo "       Use RESIDENT_STUDENT_ROLLOUT=false for this path." >&2
-        exit 1
-    fi
-    echo "WARNING: disabling RESIDENT_STUDENT_ROLLOUT for Y_MODE=y_r + DISTILL_MODE=opd;" >&2
-    echo "         teacher y_r generation needs standalone Ray GPU resources." >&2
-    RESIDENT_STUDENT_ROLLOUT="false"
-fi
+RESIDENT_YO_RELEASE_AFTER_STAGE1="false"
 
 # Evaluation Settings
 RUN_EVAL_AFTER_TRAINING=${RUN_EVAL_AFTER_TRAINING:-"true"}
@@ -600,6 +584,70 @@ case "$Y_O_ROLLOUT_MODE" in
         ;;
     *) echo "ERROR: Y_O_ROLLOUT_MODE must be one of: student, teacher, expert, skd, skd_vllm, skd_vllm_internal (got: $Y_O_ROLLOUT_MODE)" >&2; exit 1 ;;
 esac
+
+case "$PIPELINE_EPHEMERAL_MODELS" in
+    true|false) ;;
+    *) echo "ERROR: PIPELINE_EPHEMERAL_MODELS must be true or false (got: $PIPELINE_EPHEMERAL_MODELS)." >&2; exit 1 ;;
+esac
+
+if [ -z "$RESIDENT_STUDENT_ROLLOUT" ]; then
+    if [ "$PIPELINE_EPHEMERAL_MODELS" = "true" ] && [ "$Y_O_ROLLOUT_MODE" = "student" ]; then
+        RESIDENT_STUDENT_ROLLOUT="true"
+    else
+        RESIDENT_STUDENT_ROLLOUT="false"
+    fi
+fi
+case "$RESIDENT_STUDENT_ROLLOUT" in
+    true|false) ;;
+    *) echo "ERROR: RESIDENT_STUDENT_ROLLOUT must be true or false (got: $RESIDENT_STUDENT_ROLLOUT)." >&2; exit 1 ;;
+esac
+
+if [ "$PIPELINE_EPHEMERAL_MODELS" = "true" ]; then
+    SAVE_MERGED_MODEL="false"
+    if [ "$PIPELINE_ARCHIVE_KEEP_MODE" != "off" ]; then
+        echo "ERROR: ephemeral model mode is incompatible with PIPELINE_ARCHIVE_KEEP_MODE=$PIPELINE_ARCHIVE_KEEP_MODE." >&2
+        exit 1
+    fi
+    case "$Y_O_ROLLOUT_MODE" in
+        student)
+            if [ "$RESIDENT_STUDENT_ROLLOUT" != "true" ]; then
+                echo "ERROR: student rollout needs RESIDENT_STUDENT_ROLLOUT=true in ephemeral model mode." >&2
+                exit 1
+            fi
+            ;;
+        skd|skd_vllm)
+            if [ "$USE_LORA" != "true" ]; then
+                echo "ERROR: SKD ephemeral model mode requires USE_LORA=true for adapter rollout." >&2
+                exit 1
+            fi
+            RESIDENT_STUDENT_ROLLOUT="false"
+            ;;
+        teacher|expert)
+            RESIDENT_STUDENT_ROLLOUT="false"
+            ;;
+        skd_vllm_internal)
+            echo "ERROR: skd_vllm_internal cannot consume a rolling LoRA adapter; use skd_vllm." >&2
+            exit 1
+            ;;
+    esac
+fi
+
+# A y_r teacher rollout needs all Ray GPU leases. In ephemeral mode the
+# managed student server is stopped after stage 1 and restarted from the next
+# rolling FSDP checkpoint. An externally managed server cannot be stopped here.
+if [ "$RESIDENT_STUDENT_ROLLOUT" = "true" ] && [ "$Y_MODE" = "y_r" ]; then
+    if [ "$PIPELINE_EPHEMERAL_MODELS" != "true" ]; then
+        echo "ERROR: resident y_r rollout requires PIPELINE_EPHEMERAL_MODELS=true." >&2
+        exit 1
+    fi
+    if [ -n "$RESIDENT_YO_MANIFEST" ]; then
+        echo "ERROR: ephemeral y_r rollout requires a runner-managed resident server." >&2
+        exit 1
+    fi
+    RESIDENT_YO_RELEASE_AFTER_STAGE1="true"
+fi
+export PIPELINE_EPHEMERAL_MODELS SAVE_MERGED_MODEL RESIDENT_STUDENT_ROLLOUT
+
 if [ "$Y_O_ROLLOUT_MODE" != "teacher" ]; then
     TEACHER_TRAJECTORY_CONDITIONING=""
 elif [ "$TEACHER_TRAJECTORY_CONDITIONING" = "pi_T_x_only_v1" ]; then
@@ -861,7 +909,7 @@ pipeline_partition_start_size() {
 }
 
 if [ "$MULTI_STEP" -gt 0 ]; then
-    if [ "$SAVE_MERGED_MODEL" != "true" ]; then
+    if [ "$SAVE_MERGED_MODEL" != "true" ] && [ "$PIPELINE_EPHEMERAL_MODELS" != "true" ]; then
         echo "ERROR: MULTI_STEP>0 requires SAVE_MERGED_MODEL=true so the next chunk can load the updated policy."
         exit 1
     fi
@@ -1269,6 +1317,8 @@ pipeline_balanced_remainder=$PIPELINE_BALANCED_REMAINDER
 pipeline_balanced_increment=$PIPELINE_BALANCED_INCREMENT
 pipeline_total_steps=${PIPELINE_TOTAL_STEPS:-0}
 pipeline_batches_per_epoch=${PIPELINE_BATCHES_PER_EPOCH:-$TOTAL_EPOCHS}
+resident_student_rollout=$RESIDENT_STUDENT_ROLLOUT
+pipeline_ephemeral_models=$PIPELINE_EPHEMERAL_MODELS
 base_prompt_length=$BASE_PROMPT_LENGTH
 max_prompt_length=$MAX_PROMPT_LENGTH
 expert_solution_prompt_length=$EXPERT_SOLUTION_PROMPT_LENGTH
@@ -1326,6 +1376,8 @@ case "${KL_CONFIG_DRY_RUN:-false}" in
         echo "  pipeline milestones: ${PIPELINE_KEEP_STEPS:-none}"
         echo "  optimizer eval ckpt: ${OPTIMIZER_MILESTONE_STEPS:-none}"
         echo "  checkpoint policy:   $PIPELINE_LOCAL_KEEP_POLICY"
+        echo "  ephemeral models:    $PIPELINE_EPHEMERAL_MODELS"
+        echo "  resident rollout:    $RESIDENT_STUDENT_ROLLOUT"
         echo "  eval fractions:      $EVAL_FRACTIONS"
         echo "  eval root:           $EVAL_DATASETS_DIR"
         echo "  hf cache:            $HF_HOME"
@@ -1981,6 +2033,39 @@ sleep_resident_y_o_server() {
         --action sleep
 }
 
+stop_managed_resident_y_o_server() {
+    local pid attempt
+
+    [ "$RESIDENT_STUDENT_ROLLOUT" = "true" ] || return 0
+    # A caller-provided manifest denotes an externally managed server.
+    [ -z "$RESIDENT_YO_MANIFEST_USER_VALUE" ] || return 0
+    if [ -s "$RESIDENT_YO_PID_FILE" ]; then
+        pid="$(cat "$RESIDENT_YO_PID_FILE" 2>/dev/null || true)"
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            echo "Stopping managed resident y_o server: pid=$pid"
+            kill "$pid" 2>/dev/null || true
+            for attempt in $(seq 1 30); do
+                kill -0 "$pid" 2>/dev/null || break
+                sleep 1
+            done
+            if kill -0 "$pid" 2>/dev/null; then
+                echo "WARNING: resident y_o server did not stop gracefully; terminating pid=$pid" >&2
+                kill -9 "$pid" 2>/dev/null || true
+            fi
+        fi
+    fi
+    rm -f "$RESIDENT_YO_MANIFEST" "$RESIDENT_YO_PID_FILE" "$RESIDENT_YO_SYNC_MARKER"
+}
+
+release_resident_y_o_after_generation() {
+    [ "$RESIDENT_STUDENT_ROLLOUT" = "true" ] || return 0
+    if [ "$RESIDENT_YO_RELEASE_AFTER_STAGE1" = "true" ]; then
+        stop_managed_resident_y_o_server
+    else
+        sleep_resident_y_o_server
+    fi
+}
+
 ensure_full_stage1_prompts() {
     if file_exists_and_nonempty "$FULL_STAGE1_PROMPTS"; then
         echo "  Full Stage 1 prompts already prepared: $FULL_STAGE1_PROMPTS"
@@ -2212,6 +2297,7 @@ generate_stage1_y_o_responses() {
     local current_teacher_model_path="${4:-}"
     local batch_start="${5:-}"
     local batch_size="${6:-}"
+    local student_lora_adapter_path="${7:-}"
     local teacher_cache_path=""
     local expert_trajectory_input=""
     local -a expert_slice_args=()
@@ -2297,6 +2383,7 @@ generate_stage1_y_o_responses() {
                 --output "$stage1_output" \
                 --prompt_key prompt \
                 --student_model_path "$current_model_path" \
+                --student_lora_adapter_path "$student_lora_adapter_path" \
                 --teacher_model_path "${current_teacher_model_path:-}" \
                 --tokenizer_path "$current_model_path" \
                 --teacher_tokenizer_path "${current_teacher_model_path:-$current_model_path}" \
@@ -2953,7 +3040,7 @@ pipeline_done_marker_structurally_valid() {
     [ "$marker_step" = "$expected_step" ] || return 1
     [[ "$marker_step" =~ ^[1-9][0-9]*$ ]] || return 1
     case "$status" in
-        rolling_temp|prunable|kept|gen_results_resume) ;;
+        rolling_temp|consumed_ephemeral|prunable|kept|gen_results_resume) ;;
         *) return 1 ;;
     esac
     [ -n "$model_path" ] || return 1
@@ -3002,6 +3089,9 @@ pipeline_done_model_artifact_complete() {
 
     case "$status" in
         rolling_temp) pipeline_fsdp_checkpoint_complete "$model_path" ;;
+        consumed_ephemeral)
+            [ "$PIPELINE_EPHEMERAL_MODELS" = "true" ] && [ "$model_path" = "none" ]
+            ;;
         prunable|kept|gen_results_resume) hf_export_complete "$model_path" ;;
         *) return 1 ;;
     esac
@@ -3032,7 +3122,7 @@ pipeline_done_marker_semantically_valid() {
 
 pipeline_done_marker_can_use_frontier() {
     case "$1" in
-        rolling_temp|prunable|gen_results_resume) return 0 ;;
+        rolling_temp|consumed_ephemeral|prunable|gen_results_resume) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -3071,6 +3161,17 @@ write_pipeline_checkpoint_plan() {
         printf "0\tbase_policy\t%s\n" "$MODEL_PATH"
         local update dir
         for update in $(seq 1 "$total_updates"); do
+            if [ "$PIPELINE_EPHEMERAL_MODELS" = "true" ]; then
+                if pipeline_should_keep_update "$update" "$total_updates" && \
+                   [ "$RUN_EVAL_AFTER_TRAINING" = "true" ]; then
+                    dir="$(pipeline_temp_model_save_dir "$update")/hf_merged"
+                    printf "%s\ttransient_eval\t%s\n" "$update" "$dir"
+                elif [ "$update" -eq 1 ]; then
+                    dir="$(pipeline_temp_model_save_dir "$update")/global_step_*"
+                    printf "%s\trolling_temp\t%s\n" "$update" "$dir"
+                fi
+                continue
+            fi
             if [ "$RESIDENT_STUDENT_ROLLOUT" = "true" ] && [ "$update" -lt "$total_updates" ] && \
                ! pipeline_should_keep_update "$update" "$total_updates"; then
                 if [ "$update" -eq 1 ]; then
@@ -3105,7 +3206,16 @@ mark_pipeline_update_done() {
     fi
     global_optimizer_step=$((optimizer_offset + checkpoint_step))
 
-    if [ "$RESIDENT_STUDENT_ROLLOUT" = "true" ] && [ "$update" -lt "$total_updates" ] && \
+    if [ "$PIPELINE_EPHEMERAL_MODELS" = "true" ]; then
+        if [ "$update" -eq "$total_updates" ] || \
+           { [ "$RUN_EVAL_AFTER_TRAINING" = "true" ] && pipeline_should_keep_update "$update" "$total_updates"; }; then
+            model_dir="none"
+            keep_status="consumed_ephemeral"
+        else
+            model_dir="$checkpoint"
+            keep_status="rolling_temp"
+        fi
+    elif [ "$RESIDENT_STUDENT_ROLLOUT" = "true" ] && [ "$update" -lt "$total_updates" ] && \
        ! pipeline_should_keep_update "$update" "$total_updates"; then
         model_dir="$(find_latest_fsdp_checkpoint "$(pipeline_temp_model_save_dir "$update")")"
         [ -z "$model_dir" ] && model_dir="$(pipeline_temp_model_save_dir "$update")"
@@ -3301,7 +3411,10 @@ prune_pipeline_temp_checkpoints() {
     local total_updates="$2"
     local dir dir_name dir_step
 
-    [ "$RESIDENT_STUDENT_ROLLOUT" = "true" ] || return 0
+    if [ "$RESIDENT_STUDENT_ROLLOUT" != "true" ] && \
+       [ "$PIPELINE_EPHEMERAL_MODELS" != "true" ]; then
+        return 0
+    fi
     [ -n "$PIPELINE_TEMP_MODEL_DIR" ] || return 0
     [ -d "$PIPELINE_TEMP_MODEL_DIR" ] || return 0
 
@@ -3354,6 +3467,58 @@ cleanup_pipeline_batch_data() {
             echo "WARNING: refusing to clean unexpected gen dir: $data_dir" >&2
             ;;
     esac
+}
+
+cleanup_ephemeral_hf_export() {
+    local export_dir="$1"
+
+    [ "$PIPELINE_EPHEMERAL_MODELS" = "true" ] || return 0
+    [ -e "$export_dir" ] || return 0
+    case "$export_dir" in
+        "$PIPELINE_TEMP_MODEL_DIR"/step*/hf_merged|\
+        "$PIPELINE_TEMP_MODEL_DIR"/step*/optimizer_eval/step*/hf_merged) ;;
+        *)
+            echo "ERROR: refusing to delete unexpected ephemeral HF export: $export_dir" >&2
+            return 1
+            ;;
+    esac
+    echo "Deleting consumed temporary HF export: $export_dir"
+    rm -rf -- "$export_dir"
+}
+
+export_latest_fsdp_checkpoint_after_training() {
+    local model_save_dir="$1"
+    local target_dir="$model_save_dir/hf_merged"
+    local checkpoint_path export_lora_rank=0 export_lora_alpha=0
+
+    hf_export_complete "$target_dir" && return 0
+    checkpoint_path="$(find_latest_fsdp_checkpoint "$model_save_dir")"
+    if [ -z "$checkpoint_path" ] || ! pipeline_fsdp_checkpoint_complete "$checkpoint_path"; then
+        echo "ERROR: cannot export an incomplete FSDP checkpoint under $model_save_dir" >&2
+        return 1
+    fi
+    if [ "$USE_LORA" = "true" ]; then
+        export_lora_rank="$LORA_RANK"
+        export_lora_alpha="$LORA_ALPHA"
+    fi
+
+    echo "Exporting HF model after all training ranks have exited"
+    echo "  Checkpoint: $checkpoint_path"
+    echo "  Target:     $target_dir"
+    if command -v free >/dev/null 2>&1; then
+        free -h
+    fi
+    "$PYTHON_BIN" -m recipe.opd.export_checkpoint \
+        --local-dir "$checkpoint_path" \
+        --base-model "$MODEL_PATH" \
+        --target-dir "$target_dir" \
+        --lora-rank "$export_lora_rank" \
+        --lora-alpha "$export_lora_alpha" \
+        --trust-remote-code
+    if ! hf_export_complete "$target_dir"; then
+        echo "ERROR: post-training HF export is incomplete: $target_dir" >&2
+        return 1
+    fi
 }
 
 resolve_update_model_path() {
@@ -3461,7 +3626,11 @@ print_base_configuration() {
         echo "  Multi-step Tag:  $MULTISTEP_TAG"
         echo "  Auto Resume:     $PIPELINE_AUTO_RESUME"
         echo "  Resume Mode:     $PIPELINE_RESUME_MODE"
-        echo "  Keep Models:     local=${PIPELINE_LOCAL_KEEP_POLICY}, planned=${PIPELINE_KEEP_STEPS:-every ${PIPELINE_KEEP_INTERVAL} plus final} (base step 0 is recorded, not copied)"
+        if [ "$PIPELINE_EPHEMERAL_MODELS" = "true" ]; then
+            echo "  Model Retention: temporary FSDP only; HF exports deleted after milestone eval"
+        else
+            echo "  Keep Models:     local=${PIPELINE_LOCAL_KEEP_POLICY}, planned=${PIPELINE_KEEP_STEPS:-every ${PIPELINE_KEEP_INTERVAL} plus final} (base step 0 is recorded, not copied)"
+        fi
     else
         echo "  Multi-step:      disabled; all samples (one-step)"
     fi
@@ -3592,10 +3761,10 @@ run_epoch() {
     fi
 
     local save_merged_this_update="$SAVE_MERGED_MODEL"
-    local async_hf_export_this_update="$ASYNC_HF_EXPORT"
     local sync_resident_rollout_this_update="false"
     local resume_checkpoint_arg=""
     local prev_ckpt=""
+    local rollout_lora_adapter_path=""
     local student_model_path_for_train="$current_model_path"
     if [ -n "$pipeline_batch_index" ]; then
         # Every rollout chunk is one segment of the same optimizer schedule.
@@ -3612,10 +3781,32 @@ run_epoch() {
             resume_checkpoint_arg="--resume_checkpoint_path $prev_ckpt --resume_checkpoint_mode initialize"
         fi
     fi
+    if [ -n "$pipeline_batch_index" ] && [ "$PIPELINE_EPHEMERAL_MODELS" = "true" ]; then
+        current_model_save_dir="$(pipeline_temp_model_save_dir "$update_index")"
+        save_merged_this_update="false"
+        if [ "$run_eval_this_update" = "true" ]; then
+            save_merged_this_update="true"
+        fi
+        case "$Y_O_ROLLOUT_MODE" in
+            skd|skd_vllm)
+                if [ "$update_index" -gt 1 ]; then
+                    rollout_lora_adapter_path="$prev_ckpt/lora_adapter"
+                    if [ ! -s "$rollout_lora_adapter_path/adapter_model.safetensors" ] || \
+                       [ ! -s "$rollout_lora_adapter_path/adapter_config.json" ]; then
+                        echo "ERROR: rolling SKD LoRA adapter is incomplete: $rollout_lora_adapter_path" >&2
+                        exit 1
+                    fi
+                fi
+                ;;
+        esac
+    fi
     if [ "$RESIDENT_STUDENT_ROLLOUT" = "true" ]; then
         student_model_path_for_train="$MODEL_PATH"
         sync_resident_rollout_this_update="true"
-        if [ -n "$pipeline_batch_index" ] && [ "$is_milestone_update" != "true" ]; then
+        if [ "$Y_MODE" = "y_r" ] && [ "$RESIDENT_YO_RELEASE_AFTER_STAGE1" = "true" ]; then
+            sync_resident_rollout_this_update="false"
+        elif [ -n "$pipeline_batch_index" ] && [ "$PIPELINE_EPHEMERAL_MODELS" != "true" ] && \
+             [ "$is_milestone_update" != "true" ]; then
             save_merged_this_update="false"
             current_model_save_dir="$(pipeline_temp_model_save_dir "$update_index")"
         fi
@@ -3684,10 +3875,11 @@ run_epoch() {
                         "$current_model_path" \
                         "${current_teacher_model_path:-}" \
                         "$pipeline_batch_start" \
-                        "$pipeline_current_batch_size"
+                        "$pipeline_current_batch_size" \
+                        "$rollout_lora_adapter_path"
                 fi
 
-                sleep_resident_y_o_server
+                release_resident_y_o_after_generation
 
 
             # Score stage1 responses only when a downstream feature needs
@@ -3737,7 +3929,7 @@ run_epoch() {
                         --temperature "$ROLLOUT_TEMPERATURE" \
                         --top_p "$ROLLOUT_TOP_P" \
                         --max_tokens "$MAX_RESPONSE_LENGTH"
-                    sleep_resident_y_o_server
+                    release_resident_y_o_after_generation
                 else
                     run_teacher_generation "$PYTHON_BIN" -m verl.trainer.main_generation_server \
                     trainer.nnodes="${NNODES}" \
@@ -3763,6 +3955,12 @@ run_epoch() {
             fi
         fi
 
+        # Cached y_r data can bypass stage 1 generation. Ensure the managed
+        # student server still releases its Ray GPU actors before teacher
+        # scoring or KL training starts.
+        if [ "$RESIDENT_YO_RELEASE_AFTER_STAGE1" = "true" ]; then
+            stop_managed_resident_y_o_server
+        fi
 
         # ---- P1.1: score y_1 and keep reward>=threshold (optionally also stage1_reward==0) ----
         # Runs for forward KL regardless of whether data was just generated, found on disk,
@@ -3829,10 +4027,11 @@ run_epoch() {
                 "$current_model_path" \
                 "${current_teacher_model_path:-}" \
                 "$pipeline_batch_start" \
-                "$pipeline_current_batch_size"
+                "$pipeline_current_batch_size" \
+                "$rollout_lora_adapter_path"
         fi
 
-        sleep_resident_y_o_server
+        release_resident_y_o_after_generation
 
 
         # Score stage1 responses only when a downstream feature needs
@@ -3879,6 +4078,8 @@ pipeline_archive_keep_mode: ${PIPELINE_ARCHIVE_KEEP_MODE}
 pipeline_cleanup_batch_data: $PIPELINE_CLEANUP_BATCH_DATA
 pipeline_store_resume_model_in_gen_results: $PIPELINE_STORE_RESUME_MODEL_IN_GEN_RESULTS
 pipeline_cleanup_gen_results_on_complete: $PIPELINE_CLEANUP_GEN_RESULTS_ON_COMPLETE
+pipeline_ephemeral_models: $PIPELINE_EPHEMERAL_MODELS
+resident_student_rollout: $RESIDENT_STUDENT_ROLLOUT
 pipeline_auto_resume: $PIPELINE_AUTO_RESUME
 pipeline_resume_mode: $PIPELINE_RESUME_MODE
 full_stage1_prompts: ${FULL_STAGE1_PROMPTS:-null}
@@ -4041,14 +4242,14 @@ EOF
         --wandb_run_identity $WANDB_RUN_IDENTITY \
         --wandb_global_step_offset $wandb_global_step_offset \
         $wandb_total_training_steps_arg \
-        --save_merged_model $save_merged_this_update \
+        --save_merged_model false \
         --save_steps $SAVE_STEPS \
         --max_ckpt_to_keep $KEEP_LAST_N_CHECKPOINTS \
         $resume_checkpoint_arg \
         --resident_rollout_manifest $RESIDENT_YO_MANIFEST \
         --sync_resident_rollout $sync_resident_rollout_this_update \
-        --async_hf_export $async_hf_export_this_update \
-        --run_eval_after_training $run_eval_this_update \
+        --async_hf_export false \
+        --run_eval_after_training false \
         --eval_datasets $EVAL_DATASETS \
         --eval_datasets_dir $EVAL_DATASETS_DIR \
         --eval_fractions $EVAL_FRACTIONS \
@@ -4112,6 +4313,23 @@ EOF_TORCHRUN
         ) 2>&1 | tee "$current_output_dir/logs/training_$(date +%Y%m%d_%H%M%S).log"
     fi
 
+    # The torchrun process, all FSDP ranks, the teacher, and optimizer must be
+    # gone before a full-model merge starts. The trainer only writes the FSDP
+    # checkpoint; this parent shell owns every HF export.
+    if [ "$save_merged_this_update" = "true" ] || [ "$run_eval_this_update" = "true" ]; then
+        if [ "$RESIDENT_STUDENT_ROLLOUT" = "true" ]; then
+            if [ -z "$RESIDENT_YO_MANIFEST_USER_VALUE" ]; then
+                # Sleep mode releases GPU memory but can retain a full model in
+                # host RAM. Stop the managed server before loading merge inputs.
+                stop_managed_resident_y_o_server
+            else
+                echo "WARNING: externally managed resident rollout remains alive during HF export." >&2
+                echo "         Stop it externally if host RAM is constrained." >&2
+            fi
+        fi
+        export_latest_fsdp_checkpoint_after_training "$current_model_save_dir"
+    fi
+
     if [ "$RESIDENT_STUDENT_ROLLOUT" = "true" ] && [ "$sync_resident_rollout_this_update" = "true" ]; then
         latest_resident_ckpt="$(find_latest_fsdp_checkpoint "$current_model_save_dir")"
         if [ -n "$latest_resident_ckpt" ]; then
@@ -4135,6 +4353,7 @@ EOF_TORCHRUN
         else
             run_post_training_eval_if_needed "$current_model_save_dir" "$current_output_dir" "$update_index" "$total_updates"
         fi
+        cleanup_ephemeral_hf_export "$current_model_save_dir/hf_merged"
     fi
 
     echo ""
@@ -4145,10 +4364,14 @@ EOF_TORCHRUN
     if [ "$run_eval_this_update" = "true" ]; then
         echo "  Eval Results: $RESULTS_FILE"
     fi
-    if [ "$SAVE_MERGED_MODEL" = "true" ]; then
-        echo "  Merged Model: $current_model_save_dir/hf_merged"
+    if [ "$save_merged_this_update" = "true" ]; then
+        if [ "$PIPELINE_EPHEMERAL_MODELS" = "true" ]; then
+            echo "  Merged Model: consumed by eval and deleted"
+        else
+            echo "  Merged Model: $current_model_save_dir/hf_merged"
+        fi
     else
-        echo "  FSDP Checkpoints: $current_model_save_dir/global_step_*"
+        echo "  Temporary FSDP Checkpoint: $current_model_save_dir/global_step_*"
     fi
 }
 
@@ -4359,6 +4582,9 @@ run_post_training_eval_if_needed() {
     [ "$RUN_EVAL_AFTER_TRAINING" = "true" ] || return 0
 
     local eval_model_path="${eval_model_path_override:-$final_model_save_dir/hf_merged}"
+    if [ "$eval_model_path" = "$final_model_save_dir/hf_merged" ] && ! hf_export_complete "$eval_model_path"; then
+        export_latest_fsdp_checkpoint_after_training "$final_model_save_dir"
+    fi
     if ! hf_export_complete "$eval_model_path"; then
         echo "ERROR: eval requested but merged model is missing or incomplete at $eval_model_path"
         exit 1
@@ -4555,6 +4781,7 @@ run_single_rollout_optimizer_milestone_evals() {
             "$eval_model_path" \
             "$eval_model_name" \
             "$eval_output_dir"
+        cleanup_ephemeral_hf_export "$eval_model_path"
     done
 }
 
@@ -4566,6 +4793,25 @@ backfill_completed_pipeline_milestone_eval() {
 
     [ "$RUN_EVAL_AFTER_TRAINING" = "true" ] || return 0
     pipeline_should_keep_update "$update" "$total_updates" || return 0
+
+    if [ "$PIPELINE_EPHEMERAL_MODELS" = "true" ]; then
+        local padded_update padded_total eval_model_name eval_output_dir eval_global_step milestone_fraction
+        printf -v padded_update '%05d' "$update"
+        printf -v padded_total '%05d' "$total_updates"
+        eval_model_name="${RESULTS_MODEL_KEY}_step${padded_update}of${padded_total}"
+        eval_output_dir="gen_results/eval/${TASK}/${eval_model_name}"
+        eval_global_step="$(pipeline_optimizer_global_step_after_update "$update" "$total_updates")"
+        milestone_fraction="$(pipeline_milestone_fraction "$update" "$total_updates")"
+        if eval_results_complete "$eval_model_name" "$eval_output_dir" && \
+           log_existing_eval_metrics_to_wandb \
+               "$eval_output_dir" "$eval_global_step" "$milestone_fraction"; then
+            echo "Ephemeral milestone step $update evaluation already complete"
+            return 0
+        fi
+        echo "ERROR: ephemeral milestone step $update is committed but its evaluation results are incomplete." >&2
+        echo "       Its temporary model was intentionally deleted after evaluation." >&2
+        return 1
+    fi
 
     position="$(update_position_from_global_step "$update" "$batches_per_epoch")"
     epoch="${position%% *}"
@@ -4684,6 +4930,7 @@ EOF
 
 on_training_exit() {
     local status="$?"
+    stop_managed_resident_y_o_server || true
     notify_training_exit "$status"
     exit "$status"
 }
@@ -4780,6 +5027,8 @@ pipeline_archive_model_dir: ${PIPELINE_ARCHIVE_MODEL_DIR}
 pipeline_archive_keep_mode: ${PIPELINE_ARCHIVE_KEEP_MODE}
 pipeline_cleanup_batch_data: $PIPELINE_CLEANUP_BATCH_DATA
 pipeline_temp_model_dir: $PIPELINE_TEMP_MODEL_DIR
+pipeline_ephemeral_models: $PIPELINE_EPHEMERAL_MODELS
+resident_student_rollout: $RESIDENT_STUDENT_ROLLOUT
 pipeline_final_alias_dir: $(pipeline_final_alias_dir)
 total_train_samples: ${TOTAL_TRAIN_SAMPLES:-}
 pipeline_dropped_samples: ${PIPELINE_DROPPED_SAMPLES:-0}
@@ -4883,7 +5132,11 @@ if [ "$MULTI_STEP" -gt 0 ]; then
     echo "Multi-step tag:       $MULTISTEP_TAG"
     echo "Auto resume:          $PIPELINE_AUTO_RESUME"
     echo "Resume mode:          $PIPELINE_RESUME_MODE"
-    echo "Model keep policy:    local=${PIPELINE_LOCAL_KEEP_POLICY}, planned=${PIPELINE_KEEP_STEPS:-every ${PIPELINE_KEEP_INTERVAL} plus final}, archive=${PIPELINE_ARCHIVE_PRUNED_MODE}:${PIPELINE_ARCHIVE_MODEL_DIR}"
+    if [ "$PIPELINE_EPHEMERAL_MODELS" = "true" ]; then
+        echo "Model retention:      ephemeral, eval exports are deleted after use"
+    else
+        echo "Model keep policy:    local=${PIPELINE_LOCAL_KEEP_POLICY}, planned=${PIPELINE_KEEP_STEPS:-every ${PIPELINE_KEEP_INTERVAL} plus final}, archive=${PIPELINE_ARCHIVE_PRUNED_MODE}:${PIPELINE_ARCHIVE_MODEL_DIR}"
+    fi
     echo "=========================================="
 
     if [ -z "$DATA_PATH" ]; then
@@ -5015,7 +5268,8 @@ if [ "$MULTI_STEP" -gt 0 ]; then
                 exit 1
             fi
 
-            if [ "$RESIDENT_STUDENT_ROLLOUT" = "true" ]; then
+            if [ "$PIPELINE_EPHEMERAL_MODELS" = "true" ] || \
+               [ "$RESIDENT_STUDENT_ROLLOUT" = "true" ]; then
                 CURRENT_MODEL_PATH="$MODEL_PATH"
             else
                 CURRENT_MODEL_PATH="$(resolve_update_model_path "$EPOCH" "$PIPELINE_BATCH_INDEX" "$PIPELINE_BATCHES_PER_EPOCH")"
@@ -5053,7 +5307,9 @@ if [ "$MULTI_STEP" -gt 0 ]; then
     else
         FINAL_OUTPUT_DIR="$(update_output_dir "$TOTAL_EPOCHS" "$PIPELINE_BATCHES_PER_EPOCH")"
         FINAL_MODEL_SAVE_DIR="$(update_model_save_dir "$TOTAL_EPOCHS" "$PIPELINE_BATCHES_PER_EPOCH")"
-        link_pipeline_final_model_alias "$FINAL_MODEL_SAVE_DIR"
+        if [ "$PIPELINE_EPHEMERAL_MODELS" != "true" ]; then
+            link_pipeline_final_model_alias "$FINAL_MODEL_SAVE_DIR"
+        fi
         cleanup_pipeline_gen_results_after_complete
     fi
 else
@@ -5086,7 +5342,8 @@ fi
 
 if [ "$RUN_EVAL_AFTER_TRAINING" = "true" ]; then
     if [ "$MULTI_STEP" -gt 0 ]; then
-        if [ -z "${PIPELINE_STOPPED_EARLY_UPDATE:-}" ] && [ "$TOTAL_PIPELINE_UPDATES" -gt 1 ]; then
+        if [ "$PIPELINE_EPHEMERAL_MODELS" != "true" ] && \
+           [ -z "${PIPELINE_STOPPED_EARLY_UPDATE:-}" ] && [ "$TOTAL_PIPELINE_UPDATES" -gt 1 ]; then
             run_post_training_eval_if_needed "$FINAL_MODEL_SAVE_DIR" "$FINAL_OUTPUT_DIR" "$TOTAL_PIPELINE_UPDATES" "$TOTAL_PIPELINE_UPDATES"
         fi
     else
@@ -5107,13 +5364,19 @@ echo "Result Key: $RESULTS_MODEL_KEY"
 echo "Gen Results ID: $GEN_RESULTS_RUN_ID"
 echo "Gen ID File: $GEN_RESULTS_RUN_ID_FILE"
 echo "Logs & Config: $FINAL_OUTPUT_DIR"
-echo "Model Checkpoints: $FINAL_MODEL_SAVE_DIR"
+if [ "$PIPELINE_EPHEMERAL_MODELS" = "true" ]; then
+    echo "Model Artifacts: deleted after evaluation"
+else
+    echo "Model Checkpoints: $FINAL_MODEL_SAVE_DIR"
+fi
 echo "Gen Results Base: $GEN_RESULTS_BASE_DIR"
 echo "Gen Metadata: $GEN_RESULTS_METADATA_FILE"
 if [ "$RUN_EVAL_AFTER_TRAINING" = "true" ]; then
     echo "Eval Results: $RESULTS_FILE"
 fi
-if [ "$SAVE_MERGED_MODEL" = "true" ]; then
+if [ "$PIPELINE_EPHEMERAL_MODELS" = "true" ]; then
+    echo "Merged Model: temporary eval exports consumed and deleted"
+elif [ "$SAVE_MERGED_MODEL" = "true" ]; then
     echo "Merged Model: $FINAL_MODEL_SAVE_DIR/hf_merged"
     if [ -e "$(pipeline_final_alias_dir)/hf_merged" ]; then
         echo "Final Alias: $(pipeline_final_alias_dir)/hf_merged"

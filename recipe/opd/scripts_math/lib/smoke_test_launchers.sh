@@ -21,7 +21,10 @@ write_qwen3_config() {
     : > "$output_dir/tokenizer.json"
 }
 
-mapfile -t launchers < <(
+launchers=()
+while IFS= read -r launcher; do
+    launchers+=("$launcher")
+done < <(
     find "$OPD_ROOT/scripts_math" "$OPD_ROOT/script_code" \
         -mindepth 3 -maxdepth 3 -type f -name '*.sh' | sort
 )
@@ -30,7 +33,10 @@ if [ "${#launchers[@]}" -ne 80 ]; then
     exit 1
 fi
 
-mapfile -t shell_files < <(
+shell_files=()
+while IFS= read -r shell_file; do
+    shell_files+=("$shell_file")
+done < <(
     find "$OPD_ROOT/scripts_math/Baselines" "$OPD_ROOT/scripts_math/OPD" "$OPD_ROOT/scripts_math/OPSD" \
          "$OPD_ROOT/script_code" "$OPD_ROOT/scripts_math/lib" \
          -type f -name '*.sh' | sort
@@ -38,6 +44,33 @@ mapfile -t shell_files < <(
 for shell_file in "${shell_files[@]}" "$OPD_ROOT/scripts_math/run_matrix.sh"; do
     bash -n "$shell_file"
 done
+
+grep -Fxq 'export MODEL_ARTIFACT_POLICY="ephemeral_eval_only"' \
+    "$REPO_ROOT/recipe/opd/run/run_experiment.sh"
+grep -Fxq 'export PIPELINE_EPHEMERAL_MODELS="true"' \
+    "$REPO_ROOT/recipe/opd/run/run_experiment.sh"
+grep -Fxq 'export SAVE_MERGED_MODEL="false"' \
+    "$REPO_ROOT/recipe/opd/run/run_experiment.sh"
+grep -Fq 'export SAVE_FREQ=-1' "$REPO_ROOT/recipe/opd/run/run_experiment.sh"
+grep -Fq 'export SAVE_AT_END=false' "$REPO_ROOT/recipe/opd/run/run_experiment.sh"
+grep -Fxq 'unset WANDB_TAGS' "$REPO_ROOT/recipe/opd/run/run_experiment.sh"
+grep -Fq -- '--save_merged_model false' "$REPO_ROOT/recipe/opd/run/run_kl_training.sh"
+grep -Fq -- '--async_hf_export false' "$REPO_ROOT/recipe/opd/run/run_kl_training.sh"
+grep -Fq -- '--run_eval_after_training false' "$REPO_ROOT/recipe/opd/run/run_kl_training.sh"
+grep -Fq 'export_latest_fsdp_checkpoint_after_training "$current_model_save_dir"' \
+    "$REPO_ROOT/recipe/opd/run/run_kl_training.sh"
+grep -Fq 'stop_managed_resident_y_o_server' "$REPO_ROOT/recipe/opd/run/run_kl_training.sh"
+if grep -Fq -- '--save_merged_model $save_merged_this_update' \
+    "$REPO_ROOT/recipe/opd/run/run_kl_training.sh"; then
+    echo "ERROR: OPD still launches HF export inside live training ranks" >&2
+    exit 1
+fi
+if rg -q 'canonical_wandb_tags|metadata\["tags"\]' \
+    "$REPO_ROOT/recipe/opd/run/run_experiment.sh" \
+    "$REPO_ROOT/verl/utils/wandb_metadata.py"; then
+    echo "ERROR: W&B tag construction is still enabled" >&2
+    exit 1
+fi
 
 for launcher in "${launchers[@]}"; do
     grep -q '^export OPD_TASK=' "$launcher"
@@ -120,8 +153,6 @@ opd_thinking_output="$(
 grep -q 'teacher thinking:    true' <<<"$opd_thinking_output"
 grep -q 'teacher supervision: qwen3_chat_thinking' <<<"$opd_thinking_output"
 grep -q 'teacher rollout:     qwen3_chat_thinking' <<<"$opd_thinking_output"
-grep -q 'teacher-supervision-render=qwen3_chat_thinking' <<<"$opd_thinking_output"
-grep -q 'teacher-rollout-render=qwen3_chat_thinking' <<<"$opd_thinking_output"
 
 vanilla_thinking_output="$(DRY_RUN=1 bash "$OPD_ROOT/scripts_math/OPD/1B/vanilla_thinking.sh")"
 grep -q 'task/family/variant: math/opd/vanilla' <<<"$vanilla_thinking_output"
@@ -162,12 +193,8 @@ grep -q 'Canonical OPD experiment' <<<"$math_topk"
 grep -q 'train/eval response: 16384/16384' <<<"$math_topk"
 grep -q 'W&B project/run:     opd-math / opd-math-top_k-Qwen3-1.7B-Base-teacher-thinking-false-ms0-' <<<"$math_topk"
 grep -q 'W&B group/job:       top_k-1B / opd-top_k' <<<"$math_topk"
-grep -q 'family=opd' <<<"$math_topk"
-grep -q 'teacher-thinking=false' <<<"$math_topk"
-grep -q 'teacher-supervision-render=plain_completion' <<<"$math_topk"
-grep -q 'teacher-rollout-render=plain_completion' <<<"$math_topk"
-grep -q 'teacher-top-k=32' <<<"$math_topk"
-grep -q 'global-prompt-batch=512' <<<"$math_topk"
+grep -q 'W&B tags:            disabled' <<<"$math_topk"
+grep -q 'model artifacts:     ephemeral_eval_only' <<<"$math_topk"
 if grep -q 'Preparing canonical code' <<<"$math_topk"; then
     echo "ERROR: a math dry-run triggered code bootstrap" >&2
     exit 1
@@ -182,9 +209,6 @@ grep -q 'loss support top-k:  0' <<<"$code_clip"
 grep -q 'token KL clip:       0.05' <<<"$code_clip"
 grep -q 'Canonical OPD experiment' <<<"$code_clip"
 grep -q 'W&B project/run:     opsd-code / opsd-code-clip-Qwen3-4B-Base-ms0-' <<<"$code_clip"
-grep -q 'task=code' <<<"$code_clip"
-grep -q 'family=opsd' <<<"$code_clip"
-grep -q 'token-clip=0.05' <<<"$code_clip"
 if grep -q 'teacher-thinking' <<<"$code_clip"; then
     echo "ERROR: OPSD exposed an OPD-only teacher thinking dimension" >&2
     exit 1
@@ -196,11 +220,10 @@ fi
 
 code_grpo="$(DRY_RUN=1 bash "$OPD_ROOT/script_code/Baselines/1B/grpo.sh")"
 grep -q 'GRPO group size:     8 responses/prompt' <<<"$code_grpo"
-grep -q 'grpo-group-size=8' <<<"$code_grpo"
 grep -q 'code reward:         deepcoder_binary_15_longest_v1' <<<"$code_grpo"
 grep -q 'reward test suite:   top 15 by input length; binary all-pass; timeout=10s' <<<"$code_grpo"
 grep -q 'W&B project/run:     opd-code / baseline-code-grpo-Qwen3-1.7B-Base-ms0-' <<<"$code_grpo"
-grep -q 'family=baseline' <<<"$code_grpo"
+grep -q 'W&B tags:            disabled' <<<"$code_grpo"
 
 math_skd="$(DRY_RUN=1 bash "$OPD_ROOT/scripts_math/OPD/1B/skd.sh")"
 grep -q 'task/family/variant: math/opd/skd' <<<"$math_skd"
@@ -250,6 +273,11 @@ write_qwen3_config "$local_4b" 2560 36 Qwen/Qwen3-4B-Base
 write_qwen3_config "$local_8b" 4096 36 Qwen/Qwen3-8B-Base
 write_qwen3_config "$local_teacher_14b" 5120 40 Qwen/Qwen3-14B
 write_qwen3_config "$local_instruct" 2048 28 Qwen/Qwen3-1.7B-Instruct
+local_1b="$(cd "$local_1b" && pwd -P)"
+local_4b="$(cd "$local_4b" && pwd -P)"
+local_8b="$(cd "$local_8b" && pwd -P)"
+local_teacher_14b="$(cd "$local_teacher_14b" && pwd -P)"
+local_instruct="$(cd "$local_instruct" && pwd -P)"
 
 local_opd_paths="$({
     MODEL_PATH="$local_1b" \

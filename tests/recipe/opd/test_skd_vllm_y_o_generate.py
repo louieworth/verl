@@ -85,6 +85,8 @@ finally:
 
 RowState = skd_module.RowState
 _build_teacher_prompt_ids = skd_module._build_teacher_prompt_ids
+_llm_worker_main = skd_module._llm_worker_main
+_load_lora_rank = skd_module._load_lora_rank
 _one_pos_accepts = skd_module._one_pos_accepts
 _run_batch = skd_module._run_batch
 
@@ -204,6 +206,91 @@ class CharacterTokenizer:
     def decode(self, token_ids, skip_special_tokens=True):
         del skip_special_tokens
         return "".join(chr(token_id) for token_id in token_ids)
+
+
+def test_load_lora_rank_requires_complete_adapter(tmp_path):
+    adapter = tmp_path / "lora_adapter"
+    adapter.mkdir()
+    (adapter / "adapter_config.json").write_text('{"r": 64}', encoding="utf-8")
+    (adapter / "adapter_model.safetensors").write_bytes(b"weights")
+
+    assert _load_lora_rank(str(adapter)) == 64
+    assert _load_lora_rank("") == 0
+
+    (adapter / "adapter_model.safetensors").unlink()
+    try:
+        _load_lora_rank(str(adapter))
+    except FileNotFoundError as exc:
+        assert "incomplete" in str(exc)
+    else:
+        raise AssertionError("an incomplete rolling adapter must fail closed")
+
+
+def test_llm_worker_applies_rolling_student_lora(monkeypatch):
+    captured = {"init": None, "generate": None}
+
+    class RecordingLLM:
+        def __init__(self, **kwargs):
+            captured["init"] = kwargs
+
+        def generate(self, prompts, params, **kwargs):
+            captured["generate"] = (prompts, params, kwargs)
+            return []
+
+    class RecordingLoRARequest:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class RequestQueue:
+        def __init__(self):
+            self.items = iter([(7, [], {}), None])
+
+        def get(self):
+            return next(self.items)
+
+    class ResponseQueue:
+        def __init__(self):
+            self.items = []
+
+        def put(self, item):
+            self.items.append(item)
+
+    runtime_vllm = types.ModuleType("vllm")
+    runtime_vllm.LLM = RecordingLLM
+    runtime_vllm.SamplingParams = DummySamplingParams
+    runtime_lora = types.ModuleType("vllm.lora")
+    runtime_lora_request = types.ModuleType("vllm.lora.request")
+    runtime_lora_request.LoRARequest = RecordingLoRARequest
+    monkeypatch.setitem(sys.modules, "vllm", runtime_vllm)
+    monkeypatch.setitem(sys.modules, "vllm.lora", runtime_lora)
+    monkeypatch.setitem(sys.modules, "vllm.lora.request", runtime_lora_request)
+
+    responses = ResponseQueue()
+    _llm_worker_main(
+        RequestQueue(),
+        responses,
+        model_path="base-model",
+        tokenizer_path="base-model",
+        gpus="0",
+        tensor_parallel_size=1,
+        dtype="bfloat16",
+        gpu_memory_utilization=0.8,
+        max_model_len=2048,
+        max_logprobs=25,
+        max_num_seqs=8,
+        max_num_batched_tokens=4096,
+        seed=20,
+        lora_adapter_path="/tmp/rolling/lora_adapter",
+        lora_rank=64,
+    )
+
+    assert captured["init"]["model"] == "base-model"
+    assert captured["init"]["enable_lora"] is True
+    assert captured["init"]["max_lora_rank"] == 64
+    request = captured["generate"][2]["lora_request"]
+    assert request.kwargs["lora_path"] == "/tmp/rolling/lora_adapter"
+    assert responses.items[0] == ("ready", None)
+    assert responses.items[1] == (7, [])
 
 
 def test_opsd_teacher_prompt_reads_expert_solution(monkeypatch):

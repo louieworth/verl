@@ -76,7 +76,7 @@ def test_wandb_metadata_omits_teacher_thinking_for_opsd(monkeypatch):
     assert "teacher_rollout_render_mode" not in config
 
 
-def test_tracking_passes_wandb_run_id_and_resume_from_environment(monkeypatch):
+def test_tracking_passes_resume_metadata_but_ignores_wandb_tags(monkeypatch):
     fake_wandb = FakeWandb()
     monkeypatch.setitem(sys.modules, "wandb", fake_wandb)
     monkeypatch.setenv("WANDB_RUN_ID", "shared_run_123")
@@ -91,7 +91,7 @@ def test_tracking_passes_wandb_run_id_and_resume_from_environment(monkeypatch):
 
     assert fake_wandb.init_kwargs["id"] == "shared_run_123"
     assert fake_wandb.init_kwargs["resume"] == "allow"
-    assert fake_wandb.init_kwargs["tags"] == ["task=math", "family=opd", "variant=clip"]
+    assert "tags" not in fake_wandb.init_kwargs
     assert fake_wandb.init_kwargs["group"] == "clip-1B"
     assert fake_wandb.init_kwargs["job_type"] == "opd-clip"
     assert fake_wandb.init_kwargs["config"]["opd_experiment"] == {

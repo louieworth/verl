@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import inspect
 import subprocess
 from types import SimpleNamespace
 
@@ -124,3 +125,13 @@ def test_optimizer_eval_milestones_force_exact_checkpoints(
         expected_save,
         expected_milestone,
     )
+
+
+def test_checkpoint_releases_full_vocab_batch_before_fsdp_save():
+    source = inspect.getsource(KLTrainer.train_epoch)
+
+    schedule_save = source.index("checkpoint_after_batch = True")
+    release_batch = source.index("del batch, student_batch, teacher_batch, teacher_output, train_output")
+    fsdp_save = source.index("self._save_checkpoint()", release_batch)
+
+    assert schedule_save < release_batch < fsdp_save

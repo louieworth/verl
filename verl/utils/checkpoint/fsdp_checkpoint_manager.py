@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import ctypes
+import gc
 import json
 import logging
 import os
@@ -39,6 +41,42 @@ from .checkpoint_manager import BaseCheckpointManager
 # Setup logging
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
+
+
+def _proc_memory_summary() -> str:
+    """Return a small Linux process/system memory snapshot for checkpoint diagnostics."""
+    values: dict[str, int] = {}
+    paths = (("/proc/self/status", ("VmRSS", "VmHWM")), ("/proc/meminfo", ("MemAvailable",)))
+    try:
+        for path, wanted in paths:
+            with open(path, encoding="utf-8") as f:
+                for line in f:
+                    key, separator, raw_value = line.partition(":")
+                    if separator and key in wanted:
+                        values[key] = int(raw_value.strip().split()[0])
+    except (OSError, ValueError, IndexError):
+        return "unavailable"
+
+    def gib(key: str) -> str:
+        value = values.get(key)
+        return "unknown" if value is None else f"{value / 1024 / 1024:.2f} GiB"
+
+    return f"rss={gib('VmRSS')}, peak_rss={gib('VmHWM')}, system_available={gib('MemAvailable')}"
+
+
+def _release_cpu_allocator() -> None:
+    """Release unreachable checkpoint tensors and trim free glibc arenas."""
+    gc.collect()
+    if os.name != "posix":
+        return
+    try:
+        libc = ctypes.CDLL(None)
+        malloc_trim = libc.malloc_trim
+        malloc_trim.argtypes = [ctypes.c_size_t]
+        malloc_trim.restype = ctypes.c_int
+        malloc_trim(0)
+    except (AttributeError, OSError):
+        pass
 
 
 @dataclass
@@ -99,6 +137,15 @@ class FSDPCheckpointManager(BaseCheckpointManager):
         )
         self.trust_remote_code = trust_remote_code
 
+    def _log_memory(self, phase: str) -> None:
+        if os.getenv("VERL_CHECKPOINT_MEMORY_LOG", "false").strip().lower() not in {"1", "true", "yes"}:
+            return
+        log_with_rank(
+            f"Checkpoint memory [{phase}]: {_proc_memory_summary()}",
+            rank=self.rank,
+            logger=logger,
+        )
+
     def load_checkpoint(self, local_path: str, hdfs_path: str = None, del_local_after_load=False):
         """
         Load an FSDP checkpoint for this rank.
@@ -134,19 +181,30 @@ class FSDPCheckpointManager(BaseCheckpointManager):
             if self.should_load_optimizer
             else None
         )
+        self._log_memory("before load")
         with get_fsdp_state_ctx(self.model, StateDictType.SHARDED_STATE_DICT, state_dict_cfg, optim_cfg):
             if self.should_load_model:
                 remote_model_path = os.path.join(local_path, f"model_world_size_{self.world_size}_rank_{self.rank}.pt")
                 local_model_path = copy_to_local(remote_model_path)
                 model_state_dict = torch.load(local_model_path, weights_only=False)
-                self.model.load_state_dict(model_state_dict)
+                try:
+                    self.model.load_state_dict(model_state_dict)
+                finally:
+                    # load_state_dict is synchronous. Drop the deserialized CPU
+                    # shard before allocating the optimizer shard.
+                    del model_state_dict
+                    _release_cpu_allocator()
                 log_with_rank(f"Loaded model from {remote_model_path}", rank=self.rank, logger=logger)
 
             if self.should_load_optimizer:
                 remote_optim_path = os.path.join(local_path, f"optim_world_size_{self.world_size}_rank_{self.rank}.pt")
                 local_optim_path = copy_to_local(remote_optim_path)
                 optimizer_state_dict = torch.load(local_optim_path, weights_only=False)
-                self.optimizer.load_state_dict(optimizer_state_dict)
+                try:
+                    self.optimizer.load_state_dict(optimizer_state_dict)
+                finally:
+                    del optimizer_state_dict
+                    _release_cpu_allocator()
                 log_with_rank(f"Loaded optimizer from {remote_optim_path}", rank=self.rank, logger=logger)
 
         if self.should_load_extra:
@@ -155,16 +213,20 @@ class FSDPCheckpointManager(BaseCheckpointManager):
             )
             local_extra_state_path = copy_to_local(remote_extra_state_path)
             extra_state_dict = torch.load(local_extra_state_path, weights_only=False)
-            # recover random state
-            if "rng" in extra_state_dict:
-                # 'rng' may not exist for backward compatibility
-                self.load_rng_state(extra_state_dict["rng"])
-                log_with_rank(f"Loaded rng from {remote_extra_state_path}", rank=self.rank, logger=logger)
+            try:
+                # recover random state
+                if "rng" in extra_state_dict:
+                    # 'rng' may not exist for backward compatibility
+                    self.load_rng_state(extra_state_dict["rng"])
+                    log_with_rank(f"Loaded rng from {remote_extra_state_path}", rank=self.rank, logger=logger)
 
-            lr_scheduler_state_dict = extra_state_dict["lr_scheduler"]
-            if lr_scheduler_state_dict is not None and self.lr_scheduler is not None:
-                self.lr_scheduler.load_state_dict(lr_scheduler_state_dict)
-                log_with_rank(f"Loaded lr_scheduler from {remote_extra_state_path}", rank=self.rank, logger=logger)
+                lr_scheduler_state_dict = extra_state_dict["lr_scheduler"]
+                if lr_scheduler_state_dict is not None and self.lr_scheduler is not None:
+                    self.lr_scheduler.load_state_dict(lr_scheduler_state_dict)
+                    log_with_rank(f"Loaded lr_scheduler from {remote_extra_state_path}", rank=self.rank, logger=logger)
+            finally:
+                del extra_state_dict
+                _release_cpu_allocator()
 
         if self.rank == 0 and del_local_after_load:
             try:
@@ -177,6 +239,11 @@ class FSDPCheckpointManager(BaseCheckpointManager):
                     rank=self.rank,
                     logger=logger,
                 )
+
+        # Resolve any container cycles before all ranks wait at the barrier.
+        # Large tensor storage is already released by the explicit deletions.
+        _release_cpu_allocator()
+        self._log_memory("after load release, before barrier")
 
         # wait for everyone to load checkpoints
         torch.distributed.barrier()
@@ -222,6 +289,8 @@ class FSDPCheckpointManager(BaseCheckpointManager):
         # every rank will save its own model and optim shard
         state_dict_cfg = ShardedStateDictConfig(offload_to_cpu=True if is_cuda_available else False)
         optim_cfg = ShardedOptimStateDictConfig(offload_to_cpu=True if is_cuda_available else False)
+        _release_cpu_allocator()
+        self._log_memory("before save")
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             with get_fsdp_state_ctx(self.model, StateDictType.SHARDED_STATE_DICT, state_dict_cfg, optim_cfg):
@@ -231,12 +300,22 @@ class FSDPCheckpointManager(BaseCheckpointManager):
 
                 if self.should_save_model:
                     model_state_dict = self.model.state_dict()
-                    torch.save(model_state_dict, model_path)
+                    try:
+                        torch.save(model_state_dict, model_path)
+                    finally:
+                        # torch.save is synchronous. Do not retain this CPU
+                        # shard while materializing the optimizer state below.
+                        del model_state_dict
+                        _release_cpu_allocator()
                     log_with_rank(f"Saved model to {os.path.abspath(model_path)}", rank=self.rank, logger=logger)
 
                 if self.should_save_optimizer:
                     optimizer_state_dict = self.optimizer.state_dict()
-                    torch.save(optimizer_state_dict, optim_path)
+                    try:
+                        torch.save(optimizer_state_dict, optim_path)
+                    finally:
+                        del optimizer_state_dict
+                        _release_cpu_allocator()
                     log_with_rank(f"Saved optim to {os.path.abspath(optim_path)}", rank=self.rank, logger=logger)
 
                 if self.should_save_extra:
@@ -245,8 +324,15 @@ class FSDPCheckpointManager(BaseCheckpointManager):
                         "lr_scheduler": lr_scheduler_state_dict,
                         "rng": self.get_rng_state(),
                     }
-                    torch.save(extra_state_dict, extra_path)
+                    try:
+                        torch.save(extra_state_dict, extra_path)
+                    finally:
+                        del extra_state_dict
+                        _release_cpu_allocator()
                     log_with_rank(f"Saved extra_state to {os.path.abspath(extra_path)}", rank=self.rank, logger=logger)
+
+        _release_cpu_allocator()
+        self._log_memory("after shard release, before barrier")
 
         if self.rank == 0:
             # Save HF tokenizer/processor and model config on rank 0 to huggingface/ directory, no matter whether

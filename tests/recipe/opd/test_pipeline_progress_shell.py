@@ -28,6 +28,7 @@ def _run_shell(functions: tuple[str, ...], body: str, env: dict[str, str]) -> su
 set -euo pipefail
 source {HF_VALIDATION}
 PIPELINE_DONE_MARKER_SCHEMA=opd_pipeline_update/v1
+PIPELINE_EPHEMERAL_MODELS=${{PIPELINE_EPHEMERAL_MODELS:-false}}
 PYTHON_BIN={sys.executable}
 pipeline_progress_dir() {{ printf '%s\\n' "$TEST_PROGRESS_DIR"; }}
 format_pipeline_batch_id() {{ printf '%05d' "$1"; }}
@@ -179,6 +180,34 @@ def test_kept_marker_requires_strict_hf_artifact_and_cannot_use_frontier(tmp_pat
     assert result.returncode == 0, result.stderr
 
 
+def test_consumed_ephemeral_marker_is_valid_only_in_ephemeral_mode(tmp_path: Path):
+    progress = tmp_path / "progress"
+    progress.mkdir()
+    marker = progress / "step00001.done"
+    _write_marker(marker, status="consumed_ephemeral", model_path="none")
+
+    result = _run_shell(
+        MARKER_VALIDATORS + ("pipeline_done_marker_can_use_frontier",),
+        "pipeline_done_marker_semantically_valid 1; "
+        "pipeline_done_marker_can_use_frontier consumed_ephemeral",
+        {
+            "TEST_PROGRESS_DIR": str(progress),
+            "PIPELINE_EPHEMERAL_MODELS": "true",
+        },
+    )
+    assert result.returncode == 0, result.stderr
+
+    result = _run_shell(
+        MARKER_VALIDATORS,
+        "! pipeline_done_marker_semantically_valid 1",
+        {
+            "TEST_PROGRESS_DIR": str(progress),
+            "PIPELINE_EPHEMERAL_MODELS": "false",
+        },
+    )
+    assert result.returncode == 0, result.stderr
+
+
 def test_marker_commit_uses_atomic_temp_rename_and_preserves_old_marker_on_failure(tmp_path: Path):
     progress = tmp_path / "progress"
     progress.mkdir()
@@ -217,6 +246,67 @@ write_pipeline_latest_model_state() { :; }
     assert result.returncode == 0, result.stderr
     assert marker.read_text(encoding="utf-8") == "old-committed-marker\n"
     assert not list(progress.glob("*.tmp.*"))
+
+
+def test_ephemeral_eval_marker_does_not_require_persisted_model(tmp_path: Path):
+    progress = tmp_path / "progress"
+    progress.mkdir()
+    checkpoint = tmp_path / "global_step_2"
+    checkpoint.mkdir()
+    result = _run_shell(
+        ("pipeline_done_marker", "mark_pipeline_update_done"),
+        f"""
+PIPELINE_EPHEMERAL_MODELS=true
+RUN_EVAL_AFTER_TRAINING=true
+RESIDENT_STUDENT_ROLLOUT=true
+PIPELINE_FULL_BATCH_OPTIMIZER_STEPS=2
+PIPELINE_TAIL_OPTIMIZER_STEPS=2
+pipeline_optimizer_step_offset() {{ echo 2; }}
+pipeline_checkpoint_for_update() {{ echo {checkpoint}; }}
+pipeline_should_keep_update() {{ return 0; }}
+pipeline_done_model_artifact_complete() {{ [ "$1" = consumed_ephemeral ] && [ "$2" = none ]; }}
+pipeline_update_resume_checkpoint_complete() {{ return 0; }}
+write_pipeline_latest_model_state() {{ :; }}
+mark_pipeline_update_done 2 4 4
+""",
+        {"TEST_PROGRESS_DIR": str(progress)},
+    )
+    assert result.returncode == 0, result.stderr
+    marker = (progress / "step00002.done").read_text(encoding="utf-8")
+    assert "status=consumed_ephemeral\n" in marker
+    assert "model_path=none\n" in marker
+
+
+def test_ephemeral_hf_export_is_deleted_only_from_temp_root(tmp_path: Path):
+    temp_root = tmp_path / "pipeline_tmp"
+    export_dir = temp_root / "step00015" / "hf_merged"
+    export_dir.mkdir(parents=True)
+    (export_dir / "model.safetensors").write_bytes(b"weights")
+    result = _run_shell(
+        ("cleanup_ephemeral_hf_export",),
+        f"cleanup_ephemeral_hf_export {export_dir}",
+        {
+            "TEST_PROGRESS_DIR": str(tmp_path / "unused"),
+            "PIPELINE_EPHEMERAL_MODELS": "true",
+            "PIPELINE_TEMP_MODEL_DIR": str(temp_root),
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    assert not export_dir.exists()
+
+    unexpected = tmp_path / "durable" / "hf_merged"
+    unexpected.mkdir(parents=True)
+    result = _run_shell(
+        ("cleanup_ephemeral_hf_export",),
+        f"cleanup_ephemeral_hf_export {unexpected}",
+        {
+            "TEST_PROGRESS_DIR": str(tmp_path / "unused"),
+            "PIPELINE_EPHEMERAL_MODELS": "true",
+            "PIPELINE_TEMP_MODEL_DIR": str(temp_root),
+        },
+    )
+    assert result.returncode != 0
+    assert unexpected.is_dir()
 
 
 def test_resident_temp_prune_never_deletes_future_frontier(tmp_path: Path):

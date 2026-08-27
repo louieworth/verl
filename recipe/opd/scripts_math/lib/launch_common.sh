@@ -188,8 +188,13 @@ launch_experiment() {
         if [ -n "$teacher_model_path" ]; then
             echo "  teacher: $teacher_model_path"
         fi
-        launcher_print_command bash "$runner" "${forwarded_args[@]}"
-        DRY_RUN=1 bash "$runner" "${forwarded_args[@]}"
+        if [ "${#forwarded_args[@]}" -gt 0 ]; then
+            launcher_print_command bash "$runner" "${forwarded_args[@]}"
+            DRY_RUN=1 bash "$runner" "${forwarded_args[@]}"
+        else
+            launcher_print_command bash "$runner"
+            DRY_RUN=1 bash "$runner"
+        fi
         return 0
     fi
 
@@ -198,7 +203,10 @@ launch_experiment() {
         prepare_code_experiment "$repo_root"
     fi
 
-    exec bash "$runner" "${forwarded_args[@]}"
+    if [ "${#forwarded_args[@]}" -gt 0 ]; then
+        exec bash "$runner" "${forwarded_args[@]}"
+    fi
+    exec bash "$runner"
 }
 
 launch_experiment "$@"

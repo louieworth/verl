@@ -12,11 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import inspect
 from types import SimpleNamespace
 
 import pytest
 from omegaconf import OmegaConf
 
+from verl.trainer.ppo.ray_trainer import RayPPOTrainer
 from verl.trainer.ppo.ray_trainer import _validate_stop_at_step as validate_ppo_stop
 from verl.trainer.sft_trainer import SFTTrainer
 from verl.trainer.sft_trainer import _validate_stop_at_step as validate_sft_stop
@@ -134,3 +136,16 @@ def test_sft_resume_at_segment_endpoint_is_a_noop(monkeypatch):
 
     assert trainer.training_client.trained_batches == 0
     assert trainer.ckpt_handler.saved_steps == []
+
+
+def test_ppo_segment_checkpoint_releases_rollout_after_metrics():
+    source = inspect.getsource(RayPPOTrainer.fit)
+
+    collect_metrics = source.index("metrics.update(compute_data_metrics")
+    release_batch = source.index("del batch, batch_dict")
+    terminal_save = source.index(
+        'with marked_timer("save_checkpoint", timing_raw, color="green"):',
+        release_batch,
+    )
+
+    assert collect_metrics < release_batch < terminal_save

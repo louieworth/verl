@@ -31,7 +31,7 @@ contract_error() {
 
 require_setting() {
     local name="$1"
-    if [ ! -v "$name" ] || [ -z "${!name}" ]; then
+    if [ -z "${!name+x}" ] || [ -z "${!name}" ]; then
         contract_error "$name must be declared by the leaf launcher"
     fi
 }
@@ -312,6 +312,12 @@ export MICRO_BATCH_SIZE_PER_GPU="${MICRO_BATCH_SIZE_PER_GPU:-1}"
 export PPO_MICRO_BATCH_SIZE_PER_GPU="${PPO_MICRO_BATCH_SIZE_PER_GPU:-1}"
 export USE_DYNAMIC_BSZ="${USE_DYNAMIC_BSZ:-false}"
 export EVAL_FRACTIONS="${EVAL_FRACTIONS:-0.25,0.5,0.75,1.0}"
+# All launchers under scripts_math and script_code share one artifact policy.
+# Training checkpoints are rolling state, milestone HF exports exist only for
+# evaluation, and no model artifact is retained after the run completes.
+export MODEL_ARTIFACT_POLICY="ephemeral_eval_only"
+export PIPELINE_EPHEMERAL_MODELS="true"
+export SAVE_MERGED_MODEL="false"
 case "$TASK/$FAMILY" in
     math/opd) DEFAULT_WANDB_PROJECT="opd-math" ;;
     math/opsd) DEFAULT_WANDB_PROJECT="opsd-math" ;;
@@ -383,69 +389,10 @@ export EXPERIMENT_NAME="${EXPERIMENT_NAME:-$EXPERIMENT_ID}"
 export WANDB_RUN_NAME="${WANDB_RUN_NAME:-$EXPERIMENT_ID}"
 export WANDB_GROUP="${WANDB_GROUP:-${VARIANT}-${MODEL_SIZE}}"
 export WANDB_JOB_TYPE="${WANDB_JOB_TYPE:-${FAMILY}-${VARIANT}}"
-
-declare -a canonical_wandb_tags=(
-    "task=$TASK"
-    "family=$FAMILY"
-    "variant=$VARIANT"
-    "model=$MODEL_ALIAS"
-    "model-size=$MODEL_SIZE"
-    "model-kind=base"
-    "train-response=$MAX_RESPONSE_LENGTH"
-    "eval-response=$EVAL_RESPONSE_LENGTH"
-    "eval-pass-k=$PASS_K"
-    "eval-fractions=${EVAL_FRACTIONS//,/-}"
-    "lr=$LEARNING_RATE"
-    "lora=$USE_LORA"
-    "lora-rank=$LORA_RANK"
-    "micro-batch=$MICRO_BATCH_SIZE_PER_GPU"
-    "dynamic-batch=$USE_DYNAMIC_BSZ"
-    "seed=$SEED"
-)
-if [ "$TASK" = math ]; then
-    canonical_wandb_tags+=("eval-suite=aime25+aime26+hmmt26+amobench")
-else
-    canonical_wandb_tags+=("eval-suite=humaneval-plus+mbpp-plus+lcb-v6")
-fi
-if [ "$FAMILY" = baseline ]; then
-    canonical_wandb_tags+=("teacher=none")
-    if [ "$VARIANT" = grpo ]; then
-        canonical_wandb_tags+=("grpo-group-size=$ROLLOUT_N")
-    fi
-else
-    canonical_wandb_tags+=(
-        "teacher=$TEACHER_MODEL"
-        "distill=$DISTILL_MODE"
-        "kl=$KL_TYPE"
-        "kl-support=$KL_METHOD"
-        "y-mode=$Y_MODE"
-        "rollout=$Y_O_ROLLOUT_MODE"
-        "teacher-top-k=$TOP_K"
-        "token-clip=$KL_TOKEN_CLIP"
-        "requested-ms=$MULTI_STEP"
-        "global-prompt-batch=$GLOBAL_PROMPT_BATCH_SIZE"
-    )
-    if [ "$FAMILY" = opd ]; then
-        canonical_wandb_tags+=(
-            "teacher-thinking=$TEACHER_ENABLE_THINKING"
-            "teacher-supervision-render=$TEACHER_SUPERVISION_RENDER_MODE"
-            "teacher-rollout-render=$TEACHER_ROLLOUT_RENDER_MODE"
-        )
-    fi
-    if [ "$VARIANT" = skd ]; then
-        canonical_wandb_tags+=(
-            "skd-gamma=$SKD_GAMMA"
-            "skd-accept-k=$SKD_ACCEPT_TOP_K"
-            "skd-teacher-t=$SKD_TEACHER_TEMPERATURE"
-        )
-    fi
-fi
-if [ -n "${WANDB_TAGS:-}" ]; then
-    canonical_wandb_tags+=("$WANDB_TAGS")
-fi
-WANDB_TAGS="$(IFS=,; printf '%s' "${canonical_wandb_tags[*]}")"
-export WANDB_TAGS WANDB_GROUP WANDB_JOB_TYPE
-unset canonical_wandb_tags
+# Canonical experiment attributes are recorded under config.opd_experiment.
+# Ignore inherited WANDB_TAGS so these launchers never create W&B tags.
+unset WANDB_TAGS
+export WANDB_GROUP WANDB_JOB_TYPE
 
 if [ -n "$TEACHER_THINKING_NAME_TAG" ]; then
     DEFAULT_RUN_ROOT="outputs/$WANDB_PROJECT/$TASK/$FAMILY/$VARIANT/$MODEL_ALIAS/$TEACHER_THINKING_NAME_TAG/$RUN_STAMP"
@@ -469,7 +416,11 @@ for arg in "$@"; do
         *) canonical_args+=("$arg") ;;
     esac
 done
-set -- "${canonical_args[@]}"
+if [ "${#canonical_args[@]}" -gt 0 ]; then
+    set -- "${canonical_args[@]}"
+else
+    set --
+fi
 case "$dry_run_value" in
     1|true|TRUE|yes|YES) dry_run=true ;;
     0|false|FALSE|no|NO) dry_run=false ;;
@@ -508,7 +459,8 @@ Canonical OPD experiment
   eval datasets:       $EVAL_DATASETS
   W&B project/run:     $WANDB_PROJECT / $WANDB_RUN_NAME
   W&B group/job:       $WANDB_GROUP / $WANDB_JOB_TYPE
-  W&B tags:            $WANDB_TAGS
+  W&B tags:            disabled (metadata is stored in config.opd_experiment)
+  model artifacts:     $MODEL_ARTIFACT_POLICY
   run root:            $RUN_ROOT
   results file:        $RESULTS_FILE
   eval output:         $EVAL_OUTPUT_DIR
@@ -626,6 +578,40 @@ require_training_data() {
     fi
 }
 
+remove_ephemeral_model_path() {
+    local path="$1"
+    local run_root_abs path_abs
+    [ -n "$path" ] || return 0
+    [ -e "$path" ] || [ -L "$path" ] || return 0
+    run_root_abs="$("$PYTHON_BIN" -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$RUN_ROOT")"
+    path_abs="$("$PYTHON_BIN" -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$path")"
+    case "$path_abs" in
+        "$run_root_abs"/*) ;;
+        *)
+            echo "ERROR: refusing to delete model artifact outside RUN_ROOT: $path" >&2
+            return 1
+            ;;
+    esac
+    echo "Deleting consumed temporary model artifact: $path"
+    rm -rf -- "$path"
+}
+
+cleanup_baseline_milestone_model() {
+    local step="$1"
+    remove_ephemeral_model_path "$BASELINE_MODELS_DIR/step_${step}"
+    if [ -n "${BASELINE_FINAL_MODEL_LINK:-}" ]; then
+        remove_ephemeral_model_path "$BASELINE_FINAL_MODEL_LINK"
+    fi
+}
+
+cleanup_completed_baseline_models() {
+    remove_ephemeral_model_path "$BASELINE_CHECKPOINT_DIR"
+    remove_ephemeral_model_path "$BASELINE_MODELS_DIR"
+    if [ -n "${BASELINE_FINAL_MODEL_LINK:-}" ]; then
+        remove_ephemeral_model_path "$BASELINE_FINAL_MODEL_LINK"
+    fi
+}
+
 run_base_eval() {
     export EVAL_KIND=base
     export WANDB_GLOBAL_STEP=0
@@ -675,9 +661,11 @@ run_segmented_baseline() {
         export RUN_EVAL_AFTER_TRAINING=true
         echo "Running training/eval milestone fraction=$fraction step=$step/$total_steps"
         bash "$runner" "$@"
+        cleanup_baseline_milestone_model "$step"
         mkdir -p "$step_dir"
         touch "$step_dir/.complete"
     done <<< "$schedule"
+    cleanup_completed_baseline_models
 }
 
 if [ "$FAMILY" = baseline ]; then
@@ -696,6 +684,12 @@ if [ "$FAMILY" = baseline ]; then
         sft)
             require_training_data "$SFT_TRAIN_FILE"
             export TRAIN_FILE="$SFT_TRAIN_FILE"
+            export CHECKPOINT_DIR="${CHECKPOINT_DIR:-$RUN_ROOT/checkpoints}"
+            export MODELS_DIR="${MODELS_DIR:-$RUN_ROOT/models}"
+            export FINAL_MODEL_LINK="${FINAL_MODEL_LINK:-$RUN_ROOT/final_model}"
+            BASELINE_CHECKPOINT_DIR="$CHECKPOINT_DIR"
+            BASELINE_MODELS_DIR="$MODELS_DIR"
+            BASELINE_FINAL_MODEL_LINK="$FINAL_MODEL_LINK"
             export MAX_LENGTH="$((BASE_PROMPT_LENGTH + MAX_RESPONSE_LENGTH))"
             export MAX_TOKEN_LEN_PER_GPU="$MAX_LENGTH"
             export TRAIN_BATCH_SIZE="$GLOBAL_PROMPT_BATCH_SIZE"
@@ -718,10 +712,19 @@ if [ "$FAMILY" = baseline ]; then
             export TRAIN_BATCH_SIZE="$GLOBAL_PROMPT_BATCH_SIZE"
             export PPO_MINI_BATCH_SIZE="${PPO_MINI_BATCH_SIZE:-32}"
             export MAX_TRAIN_DURATION_SECONDS="${MAX_TRAIN_DURATION_SECONDS:-31536000}"
+            # Canonical segmented GRPO saves only at stop_at_step milestones.
+            # Do not let an inherited environment variable enable a full FSDP
+            # checkpoint after every ordinary optimizer step.
+            export SAVE_FREQ=-1
+            export SAVE_AT_END=false
             export TOTAL_EPOCHS=1
             export GRPO_DRY_RUN=false
             export TRAIN_DIR="${TRAIN_DIR:-$RUN_ROOT/training}"
             export CKPTS_DIR="${CKPTS_DIR:-$RUN_ROOT/checkpoints}"
+            export MODELS_DIR="${MODELS_DIR:-$RUN_ROOT/models}"
+            BASELINE_CHECKPOINT_DIR="$CKPTS_DIR"
+            BASELINE_MODELS_DIR="$MODELS_DIR"
+            BASELINE_FINAL_MODEL_LINK=""
             run_segmented_baseline \
                 "$TRAIN_FILE" \
                 recipe/opd/run/grpo/_run_qwen3_grpo_8h100.sh \

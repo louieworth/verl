@@ -18,6 +18,7 @@ PPO Trainer with Ray-based single controller.
 This trainer supports model-agonistic model initialization with huggingface
 """
 
+import gc
 import json
 import os
 import time
@@ -1395,6 +1396,7 @@ class RayPPOTrainer:
                     # repeat to align with repeated responses in rollout
                     batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
                     batch = batch.union(gen_batch_output)
+                    del gen_batch, gen_batch_output
 
                     if "response_mask" not in batch.batch.keys():
                         batch.batch["response_mask"] = compute_response_mask(batch)
@@ -1419,6 +1421,7 @@ class RayPPOTrainer:
                         if self.use_rm and "rm_scores" not in batch.batch.keys():
                             batch_reward = self._compute_reward_colocate(batch)
                             batch = batch.union(batch_reward)
+                            del batch_reward
 
                         # extract reward_tensor and reward_extra_infos_dict for training
                         reward_tensor, reward_extra_infos_dict = extract_reward(batch)
@@ -1464,6 +1467,7 @@ class RayPPOTrainer:
                                 else:
                                     old_log_prob.batch.pop("routed_experts")
                             batch = batch.union(old_log_prob)
+                            del entropys, entropy_agg, old_log_prob, response_masks
                             if "rollout_log_probs" in batch.batch.keys():
                                 # TODO: we may want to add diff of probs too.
                                 from verl.utils.debug.metrics import calculate_debug_metrics
@@ -1477,12 +1481,14 @@ class RayPPOTrainer:
                         with marked_timer(str(Role.RefPolicy), timing_raw, color="olive"):
                             ref_log_prob = self._compute_ref_log_prob(batch)
                             batch = batch.union(ref_log_prob)
+                            del ref_log_prob
 
                     # compute values
                     if self.use_critic:
                         with marked_timer("values", timing_raw, color="cyan"):
                             values = self._compute_values(batch)
                             batch = batch.union(values)
+                            del values
 
                     with marked_timer("adv", timing_raw, color="brown"):
                         # we combine with rule-based rm
@@ -1500,6 +1506,7 @@ class RayPPOTrainer:
                             metrics.update(kl_metrics)
                         else:
                             batch.batch["token_level_rewards"] = batch.batch["token_level_scores"]
+                        del reward_tensor
 
                         # Compute rollout correction: IS weights, rejection sampling, and metrics
                         # Only runs in decoupled mode (computes once per batch using stable π_old)
@@ -1585,18 +1592,14 @@ class RayPPOTrainer:
                     and training_elapsed_seconds >= max_train_duration_seconds
                 )
                 is_terminal_step = is_last_step or is_segment_end or is_time_limit_reached
+                should_save_terminal_checkpoint = (
+                    is_segment_end or (save_at_end and is_terminal_step)
+                ) and not checkpoint_saved_this_step
                 if is_time_limit_reached:
                     print(
                         f"Training time limit reached after step {self.global_steps}: "
                         f"{training_elapsed_seconds:.1f}/{max_train_duration_seconds:.1f} seconds"
                     )
-                # A segment endpoint is a resumability boundary, so it always
-                # gets a checkpoint even when save_freq/save_at_end are disabled.
-                if (is_segment_end or (save_at_end and is_terminal_step)) and not checkpoint_saved_this_step:
-                    with marked_timer("save_checkpoint", timing_raw, color="green"):
-                        self._save_checkpoint()
-                    checkpoint_saved_this_step = True
-
                 # validate
                 if self.config.trainer.test_freq > 0 and (
                     is_terminal_step or self.global_steps % self.config.trainer.test_freq == 0
@@ -1648,6 +1651,19 @@ class RayPPOTrainer:
                 # this is experimental and may be changed/removed in the future in favor of a general-purpose one
                 if isinstance(self.train_dataloader.sampler, AbstractCurriculumSampler):
                     self.train_dataloader.sampler.update(batch=batch)
+
+                # A segment endpoint is a resumability boundary, so it always
+                # gets a checkpoint even when save_freq/save_at_end are disabled.
+                # First collect every metric that needs the rollout, then release
+                # the large driver-side batch before workers materialize FSDP CPU
+                # shards. GRPO keeps n responses per prompt in this batch.
+                if should_save_terminal_checkpoint:
+                    del batch, batch_dict
+                    gc.collect()
+                    with marked_timer("save_checkpoint", timing_raw, color="green"):
+                        self._save_checkpoint()
+                    checkpoint_saved_this_step = True
+                    metrics["timing_s/save_checkpoint"] = timing_raw["save_checkpoint"]
 
                 # TODO: make a canonical logger that supports various backend
                 logger.log(data=metrics, step=self.global_steps)

@@ -43,11 +43,15 @@ run_experiment_matrix() {
     local -a family_dirs=(Baselines OPD OPSD)
     local -a baseline_variants=(base sft grpo)
     local -a distill_variants=(vanilla top_k clip skd trd)
-    local family_dir family model variant launcher
+    local family_dir family model variant launcher launcher_status
     local launched=0 failed=0
     for family_dir in "${family_dirs[@]}"; do
-        family="${family_dir,,}"
-        [ "$family" != "baselines" ] || family=baseline
+        case "$family_dir" in
+            Baselines) family=baseline ;;
+            OPD) family=opd ;;
+            OPSD) family=opsd ;;
+            *) echo "ERROR: unsupported matrix family: $family_dir" >&2; return 2 ;;
+        esac
         matrix_contains "$families" "$family" || continue
         for model in 1B 4B 8B; do
             matrix_contains "$models" "$model" || continue
@@ -69,7 +73,14 @@ run_experiment_matrix() {
                     return 1
                 fi
                 echo "[$((launched + 1))] $family/$model/$variant"
-                if ! DRY_RUN="$dry_run" bash "$launcher" "${forwarded_args[@]}"; then
+                if [ "${#forwarded_args[@]}" -gt 0 ]; then
+                    launcher_status=0
+                    DRY_RUN="$dry_run" bash "$launcher" "${forwarded_args[@]}" || launcher_status=$?
+                else
+                    launcher_status=0
+                    DRY_RUN="$dry_run" bash "$launcher" || launcher_status=$?
+                fi
+                if [ "$launcher_status" -ne 0 ]; then
                     failed=$((failed + 1))
                     [ "$continue_on_error" = 1 ] || return 1
                 fi

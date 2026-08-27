@@ -143,13 +143,15 @@ def test_initialize_wandb_resumes_persisted_run(monkeypatch, tmp_path):
     assert (("*",), {"step_metric": "global_step"}) in fake_wandb.defined_metrics
 
 
-def test_initialize_wandb_attaches_canonical_group_tags_and_config(monkeypatch, tmp_path):
+def test_initialize_wandb_attaches_group_and_config_but_no_tags(monkeypatch, tmp_path):
     monkeypatch.setenv("OPD_TASK", "math")
     monkeypatch.setenv("OPD_FAMILY", "opd")
     monkeypatch.setenv("OPD_VARIANT", "clip")
     monkeypatch.setenv("MODEL_ALIAS", "Qwen3-1.7B-Base")
     monkeypatch.setenv("MAX_RESPONSE_LENGTH", "16384")
     monkeypatch.setenv("KL_TOKEN_CLIP", "0.05")
+    monkeypatch.setenv("MODEL_ARTIFACT_POLICY", "ephemeral_eval_only")
+    monkeypatch.setenv("PIPELINE_EPHEMERAL_MODELS", "true")
     monkeypatch.setenv("WANDB_TAGS", "task=math,family=opd,variant=clip,task=math")
     monkeypatch.setenv("WANDB_GROUP", "clip-1B")
     monkeypatch.setenv("WANDB_JOB_TYPE", "opd-clip")
@@ -164,7 +166,7 @@ def test_initialize_wandb_attaches_canonical_group_tags_and_config(monkeypatch, 
         config={"native": "kept"},
     )
 
-    assert fake_wandb.init_kwargs["tags"] == ["task=math", "family=opd", "variant=clip"]
+    assert "tags" not in fake_wandb.init_kwargs
     assert fake_wandb.init_kwargs["group"] == "clip-1B"
     assert fake_wandb.init_kwargs["job_type"] == "opd-clip"
     assert fake_wandb.init_kwargs["config"]["native"] == "kept"
@@ -175,6 +177,8 @@ def test_initialize_wandb_attaches_canonical_group_tags_and_config(monkeypatch, 
         "model": "Qwen3-1.7B-Base",
         "train_response_length": 16384,
         "kl_token_clip": 0.05,
+        "model_artifact_policy": "ephemeral_eval_only",
+        "pipeline_ephemeral_models": True,
     }
 
 

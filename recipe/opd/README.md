@@ -104,7 +104,7 @@ TEACHER_MODEL_PATH=Qwen/Qwen3-14B bash recipe/opd/run/opd/reverse_topk_y_o.sh
 | --- | --- | --- | --- |
 | `DISTILL_MODE` | all | `opsd` | `opsd` \| `opd`. OPD requires `TEACHER_MODEL_PATH`. |
 | `TEACHER_MODEL_PATH` | all | mode-dependent | OPD uses `Qwen/Qwen3-14B`; OPSD must equal the frozen step-0 `MODEL_PATH`. |
-| `TEACHER_ENABLE_THINKING` | OPD teacher | `false` in every math/code OPD leaf launcher | With `false`, KL teacher supervision and every teacher rollout (including TRD `y_r`) use plain completion, so no `<think>` tokens are injected. With `true`, both use the Qwen thinking chat prefix. OPD result paths, model/result keys, generation IDs, evaluation names, and W&B run names/tags include `teacher-thinking-{true|false}`. OPSD remains Base completion and does not expose this naming or W&B dimension. |
+| `TEACHER_ENABLE_THINKING` | OPD teacher | `false` in every math/code OPD leaf launcher | With `false`, KL teacher supervision and every teacher rollout (including TRD `y_r`) use plain completion, so no `<think>` tokens are injected. With `true`, both use the Qwen thinking chat prefix. OPD result paths, model/result keys, generation IDs, evaluation names, and W&B run names include `teacher-thinking-{true|false}`. The value is stored in W&B config, not as a tag. OPSD remains Base completion and does not expose this dimension. |
 | `Y_MODE` | all | per-script | `y_o` (stage1 student rollout) or `y_r` (stage2 teacher rewrite). |
 | `BASE_PROMPT_LENGTH` | all | `1024` | Student problem prompt budget; used for y_o rollout and student-side KL prompt. |
 | `MAX_RESPONSE_LENGTH` | all | `16384` | Fixed response budget for y_o, y_r, and KL target responses. |
@@ -112,9 +112,10 @@ TEACHER_MODEL_PATH=Qwen/Qwen3-14B bash recipe/opd/run/opd/reverse_topk_y_o.sh
 | `MAX_PROMPT_LENGTH` | all | auto | Training-time teacher prompt budget, derived from OPD/OPSD and vanilla/refine. Override only for debugging. |
 | `TEMPERATURE` | all | `1.0` | Distillation softmax temperature. |
 | `LEARNING_RATE` | all | per-script (2e-6 or 5e-6) | |
-| `TOTAL_EPOCHS` | all | `1` | Outer pipeline epochs (multi-epoch resumes from previous merged ckpt). |
+| `TOTAL_EPOCHS` | all | `1` | Outer pipeline epochs. Canonical ephemeral launchers use one epoch. |
 | `MULTI_STEP` | all | `0` | `0` uses the default 512 prompts per policy optimizer step and derives the step count. `>0` means exactly that many policy optimizer steps; the full dataset is balanced across those steps and gradient accumulation is derived so each partition produces one step. No rows are dropped. Adds an `msN` tag to run/model/result names. |
-| `PIPELINE_AUTO_RESUME` | multi-step | `true` | When rerunning the same command, skip steps with a done marker or final `hf_merged/config.json`. Set `false` to fail fast if existing completed output is found. |
+| `PIPELINE_AUTO_RESUME` | multi-step | `true` | When rerunning the same command, skip steps with a validated done marker and rolling FSDP state. Set `false` to fail fast if completed output is found. |
+| `VERL_CHECKPOINT_MEMORY_LOG` | all | `false` | Set `true` to log each rank's RSS, peak RSS, and system-available RAM before and after FSDP checkpoint load/save. |
 | `KL_TOKEN_CLIP` | **forward only** | `0.06` in `forward_clip_y_o.sh`, `0` elsewhere | Per-token KL clamp. |
 | `TOP_K` | **reverse only** | `32` in `reverse_topk_y_o.sh`, `0` elsewhere | Teacher top-K local support. |
 
@@ -153,13 +154,17 @@ example `MULTI_STEP=39`. A positive value is the exact number of policy
 optimizer steps. The script balances every loaded row across those steps and
 derives gradient accumulation so each partition produces one optimizer update;
 with 40,000 rows and `MULTI_STEP=39`, 25 partitions use 1,026 rows and 14 use
-1,025 rows. Each step runs `y_o -> optional y_r -> KL train`, then chunk
-`N+1` loads chunk `N`'s `hf_merged` policy before generating its own `y_o`.
+1,025 rows. Each step runs `y_o -> optional y_r -> KL train`. Chunk `N+1`
+loads chunk `N`'s rolling FSDP state. Student rollout uses either the resident
+student service or the checkpoint's temporary LoRA adapter, so an ordinary
+step does not create `hf_merged`.
 Temporary per-chunk parquet files live under
 `gen_results/<model>/epoch1/ms39/batchXXXXX/` and are deleted after training by
-default. Sparse model retention and evaluation use
+default. Evaluation uses
 `EVAL_FRACTIONS=0.25,0.5,0.75,1.0`; for `MULTI_STEP=39` these are steps
-10, 20, 30, and 39. With the default
+10, 20, 30, and 39. Each milestone creates a temporary `hf_merged`, evaluates
+it, then deletes it. The rolling FSDP checkpoint is deleted after the next step,
+and all remaining model state is deleted after the final evaluation. With the default
 `PIPELINE_AUTO_RESUME=true`, rerunning the same command skips completed steps and
 continues from the latest available policy checkpoint.
 
