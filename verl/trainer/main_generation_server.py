@@ -45,6 +45,8 @@ from verl.trainer.generation_server_env import (
 from verl.utils.hdfs_io import makedirs
 from verl.workers.rollout.replica import get_rollout_replica_class
 
+ROLLING_LORA_MODEL_NAME = "123"
+
 
 def render_base_completion_prompt(messages) -> str:
     """Render a prompt without invoking the tokenizer chat template."""
@@ -371,16 +373,22 @@ def main(config):
         server_handles, server_addresses = asyncio.run(start_server(config))
 
         # run generate
+        request_model = config.actor_rollout_ref.model.path
+        if config.actor_rollout_ref.model.get("lora_adapter_path"):
+            request_model = ROLLING_LORA_MODEL_NAME
         gen_results = asyncio.run(
             generate(
                 server_addresses,
-                config.actor_rollout_ref.model.path,
+                request_model,
                 n_samples,
                 sampling_params,
                 chat_numpy,
                 deadline_epoch_seconds=generation_deadline,
             )
         )
+        for server_handle in server_handles:
+            ray.kill(server_handle, no_restart=True)
+        ray.shutdown()
 
         # reshape results into a numpy array
         import itertools

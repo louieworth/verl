@@ -10,6 +10,8 @@ ROOT = Path(__file__).parents[3]
 DISPATCHER = ROOT / "recipe/opd/run/run_experiment.sh"
 KL_RUNNER = ROOT / "recipe/opd/run/run_kl_training.sh"
 GRPO_RUNNER = ROOT / "recipe/opd/run/grpo/_run_qwen3_grpo_8h100.sh"
+GENERATION_SERVER = ROOT / "verl/trainer/main_generation_server.py"
+VLLM_SERVER = ROOT / "verl/workers/rollout/vllm_rollout/vllm_async_server.py"
 
 
 def _shell_function(name: str) -> str:
@@ -26,6 +28,7 @@ def test_shared_dispatcher_enforces_ephemeral_models_and_no_wandb_tags():
     assert 'export MODEL_ARTIFACT_POLICY="ephemeral_eval_only"' in source
     assert 'export PIPELINE_EPHEMERAL_MODELS="true"' in source
     assert 'export SAVE_MERGED_MODEL="false"' in source
+    assert 'export RESIDENT_STUDENT_ROLLOUT="false"' in source
     assert "canonical_wandb_tags" not in source
     assert "unset WANDB_TAGS" in source
 
@@ -56,6 +59,32 @@ def test_hf_exports_run_only_after_training_processes_exit():
     training_exit = grpo_source.index('"${TRAIN_COMMAND[@]}" 2>&1 | tee')
     shell_export = grpo_source.index('current_hf_model="$(latest_hf_checkpoint', training_exit)
     assert training_exit < shell_export
+
+
+def test_training_never_runs_inline_resident_sync():
+    source = KL_RUNNER.read_text(encoding="utf-8")
+    run_epoch_start = source.index("run_epoch() {")
+    run_epoch_source = source[run_epoch_start:]
+
+    assert "--sync_resident_rollout false" in run_epoch_source
+    assert "sync_resident_rollout_this_update" not in source
+
+
+def test_isolated_student_rollout_uses_rolling_lora_adapter():
+    source = KL_RUNNER.read_text(encoding="utf-8")
+
+    assert 'RESIDENT_STUDENT_ROLLOUT="false"' in source
+    assert 'student|skd|skd_vllm)' in source
+    assert 'rollout_lora_adapter_path="$prev_ckpt/lora_adapter"' in source
+    assert "actor_rollout_ref.model.lora_adapter_path=$student_lora_adapter_path" in source
+
+    generation_source = GENERATION_SERVER.read_text(encoding="utf-8")
+    assert "request_model = ROLLING_LORA_MODEL_NAME" in generation_source
+    assert "ray.kill(server_handle, no_restart=True)" in generation_source
+
+    vllm_source = VLLM_SERVER.read_text(encoding="utf-8")
+    assert 'lora_args["lora_modules"]' in vllm_source
+    assert 'f"{VLLM_LORA_NAME}={self.model_config.lora_adapter_path}"' in vllm_source
 
 
 def test_ephemeral_cleanup_is_confined_to_run_root(tmp_path: Path):

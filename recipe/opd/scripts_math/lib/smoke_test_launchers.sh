@@ -51,18 +51,26 @@ grep -Fxq 'export PIPELINE_EPHEMERAL_MODELS="true"' \
     "$REPO_ROOT/recipe/opd/run/run_experiment.sh"
 grep -Fxq 'export SAVE_MERGED_MODEL="false"' \
     "$REPO_ROOT/recipe/opd/run/run_experiment.sh"
+grep -Fxq 'export RESIDENT_STUDENT_ROLLOUT="false"' \
+    "$REPO_ROOT/recipe/opd/run/run_experiment.sh"
 grep -Fq 'export SAVE_FREQ=-1' "$REPO_ROOT/recipe/opd/run/run_experiment.sh"
 grep -Fq 'export SAVE_AT_END=false' "$REPO_ROOT/recipe/opd/run/run_experiment.sh"
 grep -Fxq 'unset WANDB_TAGS' "$REPO_ROOT/recipe/opd/run/run_experiment.sh"
 grep -Fq -- '--save_merged_model false' "$REPO_ROOT/recipe/opd/run/run_kl_training.sh"
 grep -Fq -- '--async_hf_export false' "$REPO_ROOT/recipe/opd/run/run_kl_training.sh"
 grep -Fq -- '--run_eval_after_training false' "$REPO_ROOT/recipe/opd/run/run_kl_training.sh"
+grep -Fq -- '--sync_resident_rollout false' "$REPO_ROOT/recipe/opd/run/run_kl_training.sh"
 grep -Fq 'export_latest_fsdp_checkpoint_after_training "$current_model_save_dir"' \
     "$REPO_ROOT/recipe/opd/run/run_kl_training.sh"
 grep -Fq 'stop_managed_resident_y_o_server' "$REPO_ROOT/recipe/opd/run/run_kl_training.sh"
 if grep -Fq -- '--save_merged_model $save_merged_this_update' \
     "$REPO_ROOT/recipe/opd/run/run_kl_training.sh"; then
     echo "ERROR: OPD still launches HF export inside live training ranks" >&2
+    exit 1
+fi
+if grep -Fq 'sync_resident_rollout_this_update' \
+    "$REPO_ROOT/recipe/opd/run/run_kl_training.sh"; then
+    echo "ERROR: OPD still syncs resident rollout inside live training ranks" >&2
     exit 1
 fi
 if rg -q 'canonical_wandb_tags|metadata\["tags"\]' \

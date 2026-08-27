@@ -16,6 +16,7 @@ from typing import Any
 
 import torch
 import torch.distributed as dist
+from safetensors.torch import save_file
 from tensordict import TensorDict
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
@@ -889,8 +890,43 @@ class KLTrainer:
             with open(lora_meta_path, "w", encoding="utf-8") as f:
                 json.dump(lora_meta, f, ensure_ascii=False, indent=4)
             logger.info("Saved LoRA rank/alpha metadata to %s", lora_meta_path)
+        if (
+            self.config.use_lora
+            and self._wandb_global_step() < self.experiment_total_training_steps
+        ):
+            self._save_lora_adapter(ckpt_dir)
         self._last_saved_checkpoint_step = self.global_step
         logger.info("Checkpoint saved to %s", ckpt_dir)
+
+    def _save_lora_adapter(self, checkpoint_dir: str) -> None:
+        params, peft_config = self.student_engine.get_per_tensor_param(
+            layered_summon=True,
+            base_sync_done=True,
+        )
+        if self.rank == 0:
+            adapter_dir = os.path.join(checkpoint_dir, "lora_adapter")
+            os.makedirs(adapter_dir, exist_ok=True)
+            adapter_state = {
+                name: tensor.detach().cpu().contiguous()
+                for name, tensor in params
+            }
+            for key in ("task_type", "peft_type"):
+                value = peft_config.get(key)
+                peft_config[key] = value.value if hasattr(value, "value") else value
+            if peft_config.get("target_modules") is not None:
+                peft_config["target_modules"] = list(peft_config["target_modules"])
+            save_file(
+                adapter_state,
+                os.path.join(adapter_dir, "adapter_model.safetensors"),
+            )
+            with open(
+                os.path.join(adapter_dir, "adapter_config.json"),
+                "w",
+                encoding="utf-8",
+            ) as f:
+                json.dump(peft_config, f, ensure_ascii=False, indent=4)
+            logger.info("Saved rolling LoRA adapter to %s", adapter_dir)
+        dist.barrier()
 
     def _should_save_checkpoint_after_step(self) -> tuple[bool, bool]:
         """Return (should_save, is_eval_milestone) for the current step."""
@@ -1284,7 +1320,6 @@ class KLTrainer:
             raise RuntimeError("Training finished without any optimizer step.")
 
         self._save_checkpoint()
-        self._sync_resident_rollout()
 
         if self.config.save_merged_model or self.config.run_eval_after_training:
             if self.config.async_hf_export and not self.config.run_eval_after_training:

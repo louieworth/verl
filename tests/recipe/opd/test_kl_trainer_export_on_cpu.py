@@ -135,3 +135,18 @@ def test_checkpoint_releases_full_vocab_batch_before_fsdp_save():
     fsdp_save = source.index("self._save_checkpoint()", release_batch)
 
     assert schedule_save < release_batch < fsdp_save
+
+
+def test_checkpoint_saves_rolling_lora_adapter_before_completion():
+    source = inspect.getsource(KLTrainer._save_checkpoint)
+
+    assert source.index("self._save_lora_adapter(ckpt_dir)") < source.index(
+        "self._last_saved_checkpoint_step = self.global_step"
+    )
+
+
+def test_train_does_not_sync_resident_rollout_while_training_workers_are_alive():
+    source = inspect.getsource(KLTrainer.train)
+
+    assert "self._save_checkpoint()" in source
+    assert "self._sync_resident_rollout()" not in source

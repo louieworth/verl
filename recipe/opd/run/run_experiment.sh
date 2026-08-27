@@ -318,6 +318,7 @@ export EVAL_FRACTIONS="${EVAL_FRACTIONS:-0.25,0.5,0.75,1.0}"
 export MODEL_ARTIFACT_POLICY="ephemeral_eval_only"
 export PIPELINE_EPHEMERAL_MODELS="true"
 export SAVE_MERGED_MODEL="false"
+export RESIDENT_STUDENT_ROLLOUT="false"
 case "$TASK/$FAMILY" in
     math/opd) DEFAULT_WANDB_PROJECT="opd-math" ;;
     math/opsd) DEFAULT_WANDB_PROJECT="opsd-math" ;;

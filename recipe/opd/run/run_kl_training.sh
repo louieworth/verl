@@ -331,9 +331,9 @@ SAVE_MERGED_MODEL=${SAVE_MERGED_MODEL:-"true"}  # Merge LoRA after training
 SAVE_STEPS=${SAVE_STEPS:-100}                   # FSDP ckpt every N optimizer steps (crash recovery)
 KEEP_LAST_N_CHECKPOINTS=${KEEP_LAST_N_CHECKPOINTS:-1}  # Rolling window; per-epoch hf_merged is always preserved
 
-# Resident student rollout keeps ordinary pipeline updates on rolling FSDP
-# state, so they do not need a merged Hugging Face export.
-RESIDENT_STUDENT_ROLLOUT=${RESIDENT_STUDENT_ROLLOUT:-""}
+# Every rollout and training segment is isolated. No student vLLM process is
+# kept alive between optimizer steps.
+RESIDENT_STUDENT_ROLLOUT="false"
 RESIDENT_YO_MANIFEST=${RESIDENT_YO_MANIFEST:-""}
 RESIDENT_YO_AUTOSTART=${RESIDENT_YO_AUTOSTART:-"true"}
 RESIDENT_YO_LOAD_FORMAT=${RESIDENT_YO_LOAD_FORMAT:-"auto"}
@@ -590,13 +590,6 @@ case "$PIPELINE_EPHEMERAL_MODELS" in
     *) echo "ERROR: PIPELINE_EPHEMERAL_MODELS must be true or false (got: $PIPELINE_EPHEMERAL_MODELS)." >&2; exit 1 ;;
 esac
 
-if [ -z "$RESIDENT_STUDENT_ROLLOUT" ]; then
-    if [ "$PIPELINE_EPHEMERAL_MODELS" = "true" ] && [ "$Y_O_ROLLOUT_MODE" = "student" ]; then
-        RESIDENT_STUDENT_ROLLOUT="true"
-    else
-        RESIDENT_STUDENT_ROLLOUT="false"
-    fi
-fi
 case "$RESIDENT_STUDENT_ROLLOUT" in
     true|false) ;;
     *) echo "ERROR: RESIDENT_STUDENT_ROLLOUT must be true or false (got: $RESIDENT_STUDENT_ROLLOUT)." >&2; exit 1 ;;
@@ -610,8 +603,8 @@ if [ "$PIPELINE_EPHEMERAL_MODELS" = "true" ]; then
     fi
     case "$Y_O_ROLLOUT_MODE" in
         student)
-            if [ "$RESIDENT_STUDENT_ROLLOUT" != "true" ]; then
-                echo "ERROR: student rollout needs RESIDENT_STUDENT_ROLLOUT=true in ephemeral model mode." >&2
+            if [ "$USE_LORA" != "true" ]; then
+                echo "ERROR: isolated student rollout requires USE_LORA=true in ephemeral model mode." >&2
                 exit 1
             fi
             ;;
@@ -2454,11 +2447,18 @@ generate_stage1_y_o_responses() {
                     --top_p "$ROLLOUT_TOP_P" \
                     --max_tokens "$MAX_RESPONSE_LENGTH"
             else
+                local -a student_lora_overrides=()
+                if [ -n "$student_lora_adapter_path" ]; then
+                    student_lora_overrides+=("actor_rollout_ref.model.lora_rank=$LORA_RANK")
+                    student_lora_overrides+=("actor_rollout_ref.model.lora_alpha=$LORA_ALPHA")
+                    student_lora_overrides+=("actor_rollout_ref.model.lora_adapter_path=$student_lora_adapter_path")
+                fi
                 env -u PYTORCH_CUDA_ALLOC_CONF "$PYTHON_BIN" -m verl.trainer.main_generation_server \
                     trainer.nnodes="${NNODES}" \
                     trainer.n_gpus_per_node="${NGPUS_PER_NODE}" \
                     actor_rollout_ref.model.path="${current_model_path}" \
                     actor_rollout_ref.model.trust_remote_code=true \
+                    "${student_lora_overrides[@]}" \
                     actor_rollout_ref.rollout.temperature="$ROLLOUT_TEMPERATURE" \
                     actor_rollout_ref.rollout.top_p="$ROLLOUT_TOP_P" \
                     actor_rollout_ref.rollout.top_k="$ROLLOUT_TOP_K" \
@@ -3761,7 +3761,6 @@ run_epoch() {
     fi
 
     local save_merged_this_update="$SAVE_MERGED_MODEL"
-    local sync_resident_rollout_this_update="false"
     local resume_checkpoint_arg=""
     local prev_ckpt=""
     local rollout_lora_adapter_path=""
@@ -3788,27 +3787,27 @@ run_epoch() {
             save_merged_this_update="true"
         fi
         case "$Y_O_ROLLOUT_MODE" in
-            skd|skd_vllm)
+            student|skd|skd_vllm)
                 if [ "$update_index" -gt 1 ]; then
                     rollout_lora_adapter_path="$prev_ckpt/lora_adapter"
                     if [ ! -s "$rollout_lora_adapter_path/adapter_model.safetensors" ] || \
                        [ ! -s "$rollout_lora_adapter_path/adapter_config.json" ]; then
-                        echo "ERROR: rolling SKD LoRA adapter is incomplete: $rollout_lora_adapter_path" >&2
+                        echo "ERROR: rolling LoRA adapter is incomplete: $rollout_lora_adapter_path" >&2
                         exit 1
                     fi
+                    rollout_lora_adapter_path="$(cd "$rollout_lora_adapter_path" && pwd -P)"
                 fi
                 ;;
         esac
     fi
     if [ "$RESIDENT_STUDENT_ROLLOUT" = "true" ]; then
         student_model_path_for_train="$MODEL_PATH"
-        sync_resident_rollout_this_update="true"
-        if [ "$Y_MODE" = "y_r" ] && [ "$RESIDENT_YO_RELEASE_AFTER_STAGE1" = "true" ]; then
-            sync_resident_rollout_this_update="false"
-        elif [ -n "$pipeline_batch_index" ] && [ "$PIPELINE_EPHEMERAL_MODELS" != "true" ] && \
-             [ "$is_milestone_update" != "true" ]; then
-            save_merged_this_update="false"
-            current_model_save_dir="$(pipeline_temp_model_save_dir "$update_index")"
+        if [ "$Y_MODE" != "y_r" ] || [ "$RESIDENT_YO_RELEASE_AFTER_STAGE1" != "true" ]; then
+            if [ -n "$pipeline_batch_index" ] && [ "$PIPELINE_EPHEMERAL_MODELS" != "true" ] && \
+                [ "$is_milestone_update" != "true" ]; then
+                save_merged_this_update="false"
+                current_model_save_dir="$(pipeline_temp_model_save_dir "$update_index")"
+            fi
         fi
     fi
 
@@ -4247,7 +4246,7 @@ EOF
         --max_ckpt_to_keep $KEEP_LAST_N_CHECKPOINTS \
         $resume_checkpoint_arg \
         --resident_rollout_manifest $RESIDENT_YO_MANIFEST \
-        --sync_resident_rollout $sync_resident_rollout_this_update \
+        --sync_resident_rollout false \
         --async_hf_export false \
         --run_eval_after_training false \
         --eval_datasets $EVAL_DATASETS \
@@ -4328,15 +4327,6 @@ EOF_TORCHRUN
             fi
         fi
         export_latest_fsdp_checkpoint_after_training "$current_model_save_dir"
-    fi
-
-    if [ "$RESIDENT_STUDENT_ROLLOUT" = "true" ] && [ "$sync_resident_rollout_this_update" = "true" ]; then
-        latest_resident_ckpt="$(find_latest_fsdp_checkpoint "$current_model_save_dir")"
-        if [ -n "$latest_resident_ckpt" ]; then
-            mark_resident_y_o_synced "$latest_resident_ckpt"
-        else
-            echo "WARNING: resident rollout sync completed but no FSDP checkpoint was found in $current_model_save_dir" >&2
-        fi
     fi
 
     cleanup_pipeline_batch_data "$current_gen_results_dir"
