@@ -152,9 +152,17 @@ class KLTrainer:
         logger.info("  Per-GPU Batch Size: %s", self.config.train_batch_size)
         logger.info("  Grad Accum Steps: %s", self.config.gradient_accumulation_steps)
 
+    def finish_tracking(self, exit_code: int = 0) -> None:
+        if (
+            not self.sync_only
+            and HAS_WANDB
+            and self.is_logging
+            and getattr(wandb, "run", None) is not None
+        ):
+            wandb.finish(exit_code=exit_code)
+
     def close(self):
-        if not self.sync_only and HAS_WANDB and self.is_logging:
-            wandb.finish()
+        self.finish_tracking()
         destroy_global_process_group()
 
     def _init_wandb(self):

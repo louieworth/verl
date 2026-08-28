@@ -292,6 +292,10 @@ def main():
         # then hard-exit so torchrun reaps every worker.
         import traceback
         traceback.print_exc()
+        try:
+            trainer.finish_tracking(exit_code=1)
+        except BaseException:
+            traceback.print_exc()
         sys.stdout.flush()
         sys.stderr.flush()
         os._exit(1)

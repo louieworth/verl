@@ -223,6 +223,23 @@ def test_kl_config_validates_experiment_total_steps():
         KLTrainingConfig(wandb_total_training_steps=0)
 
 
+def test_kl_trainer_finishes_wandb_with_failure_exit_code(monkeypatch):
+    finish_calls = []
+    trainer = object.__new__(KLTrainer)
+    trainer.sync_only = False
+    trainer.is_logging = True
+    fake_wandb = SimpleNamespace(
+        run=object(),
+        finish=lambda **kwargs: finish_calls.append(kwargs),
+    )
+    monkeypatch.setattr("recipe.opd.kl_trainer.HAS_WANDB", True)
+    monkeypatch.setattr("recipe.opd.kl_trainer.wandb", fake_wandb)
+
+    trainer.finish_tracking(exit_code=1)
+
+    assert finish_calls == [{"exit_code": 1}]
+
+
 def test_kl_trainer_common_meta_uses_batching_config():
     trainer = object.__new__(KLTrainer)
     trainer.tokenizer = SimpleNamespace(pad_token_id=7)

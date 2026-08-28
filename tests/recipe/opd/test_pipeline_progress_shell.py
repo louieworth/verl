@@ -152,6 +152,35 @@ def test_marker_schema_and_all_fsdp_ranks_are_required(tmp_path: Path):
     assert result.returncode == 0, result.stderr
 
 
+def test_complete_ephemeral_training_checkpoint_can_resume_without_retraining(tmp_path: Path):
+    temp_root = tmp_path / "pipeline_tmp_checkpoints"
+    checkpoint = temp_root / "step00015" / "global_step_1"
+    checkpoint.mkdir(parents=True)
+    (checkpoint / "fsdp_config.json").write_text(
+        json.dumps({"world_size": 2}), encoding="utf-8"
+    )
+    for rank in range(2):
+        for kind in ("model", "optim", "extra_state"):
+            (checkpoint / f"{kind}_world_size_2_rank_{rank}.pt").write_bytes(b"state")
+
+    result = _run_shell(
+        (
+            "pipeline_temp_model_save_dir",
+            "pipeline_fsdp_checkpoint_complete",
+            "pipeline_ephemeral_training_checkpoint_complete",
+        ),
+        "pipeline_ephemeral_training_checkpoint_complete 15; "
+        "! pipeline_ephemeral_training_checkpoint_complete 16",
+        {
+            "TEST_PROGRESS_DIR": str(tmp_path / "progress"),
+            "PIPELINE_TEMP_MODEL_DIR": str(temp_root),
+            "PIPELINE_EPHEMERAL_MODELS": "true",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
 def test_kept_marker_requires_strict_hf_artifact_and_cannot_use_frontier(tmp_path: Path):
     progress = tmp_path / "progress"
     progress.mkdir()

@@ -119,6 +119,7 @@ def main() -> None:
         id=args.run_id,
         name=os.environ.get("WANDB_RUN_NAME") or None,
         resume=args.resume,
+        mode=os.environ.get("WANDB_MODE", "online"),
         reinit=True,
         config=merge_opd_wandb_config(None),
     )

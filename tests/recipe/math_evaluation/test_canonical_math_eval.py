@@ -320,6 +320,7 @@ def test_wandb_logger_uses_custom_global_step_axis(tmp_path, monkeypatch):
         return FakeRun()
 
     monkeypatch.setitem(sys.modules, "wandb", SimpleNamespace(init=fake_init))
+    monkeypatch.setenv("WANDB_MODE", "offline")
     monkeypatch.setattr(
         sys,
         "argv",
@@ -339,6 +340,7 @@ def test_wandb_logger_uses_custom_global_step_axis(tmp_path, monkeypatch):
     )
     wandb_logger.main()
     assert calls["init"]["resume"] == "allow"
+    assert calls["init"]["mode"] == "offline"
     assert calls["definitions"] == [
         (("global_step",), {}),
         (("*",), {"step_metric": "global_step"}),

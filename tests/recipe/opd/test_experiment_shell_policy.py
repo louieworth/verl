@@ -9,6 +9,7 @@ from pathlib import Path
 ROOT = Path(__file__).parents[3]
 DISPATCHER = ROOT / "recipe/opd/run/run_experiment.sh"
 KL_RUNNER = ROOT / "recipe/opd/run/run_kl_training.sh"
+TRAINING_ENTRYPOINT = ROOT / "recipe/opd/run_training.py"
 GRPO_RUNNER = ROOT / "recipe/opd/run/grpo/_run_qwen3_grpo_8h100.sh"
 GENERATION_SERVER = ROOT / "verl/trainer/main_generation_server.py"
 VLLM_SERVER = ROOT / "verl/workers/rollout/vllm_rollout/vllm_async_server.py"
@@ -59,6 +60,34 @@ def test_hf_exports_run_only_after_training_processes_exit():
     training_exit = grpo_source.index('"${TRAIN_COMMAND[@]}" 2>&1 | tee')
     shell_export = grpo_source.index('current_hf_model="$(latest_hf_checkpoint', training_exit)
     assert training_exit < shell_export
+
+
+def test_failed_training_flushes_wandb_before_hard_exit():
+    source = TRAINING_ENTRYPOINT.read_text(encoding="utf-8")
+    failure_handler = source[source.index("    except BaseException:") :]
+
+    finish = failure_handler.index("trainer.finish_tracking(exit_code=1)")
+    hard_exit = failure_handler.index("os._exit(1)")
+    assert finish < hard_exit
+
+
+def test_ephemeral_resume_exports_evaluates_then_cleans_without_retraining():
+    source = KL_RUNNER.read_text(encoding="utf-8")
+    start = source.index("backfill_completed_pipeline_milestone_eval() {")
+    end = source.index("\nformat_duration_seconds() {", start)
+    backfill = source[start:end]
+
+    checkpoint = backfill.index('pipeline_ephemeral_training_checkpoint_complete "$update"')
+    export = backfill.index('export_latest_fsdp_checkpoint_after_training "$ephemeral_model_dir"')
+    evaluate = backfill.index("run_post_training_eval_if_needed", export)
+    cleanup = backfill.index('cleanup_ephemeral_hf_export "$ephemeral_model_dir/hf_merged"')
+    assert checkpoint < export < evaluate < cleanup
+
+    finalize_start = source.index("finalize_resumed_pipeline_update() {")
+    finalize_end = source.index("\narchive_or_delete_pipeline_path() {", finalize_start)
+    finalize = source[finalize_start:finalize_end]
+    assert 'resumed_model_dir="$(pipeline_temp_model_save_dir "$update")"' in finalize
+    assert 'run_single_rollout_optimizer_milestone_evals \\\n            "$resumed_model_dir"' in finalize
 
 
 def test_training_never_runs_inline_resident_sync():

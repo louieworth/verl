@@ -3083,6 +3083,13 @@ PYFSDPWORLDSIZE
     done
 }
 
+pipeline_ephemeral_training_checkpoint_complete() {
+    local update="$1"
+
+    [ "$PIPELINE_EPHEMERAL_MODELS" = "true" ] || return 1
+    pipeline_fsdp_checkpoint_complete "$(pipeline_temp_model_save_dir "$update")"
+}
+
 pipeline_done_model_artifact_complete() {
     local status="$1"
     local model_path="$2"
@@ -3274,12 +3281,16 @@ finalize_resumed_pipeline_update() {
     local refresh_marker="$4"
 
     if [ "$total_updates" -eq 1 ]; then
-        local position epoch batch
+        local position epoch batch resumed_model_dir
         position="$(update_position_from_global_step "$update" "$batches_per_epoch")"
         epoch="${position%% *}"
         batch="${position##* }"
+        resumed_model_dir="$(update_model_save_dir "$epoch" "$batch")"
+        if pipeline_ephemeral_training_checkpoint_complete "$update"; then
+            resumed_model_dir="$(pipeline_temp_model_save_dir "$update")"
+        fi
         run_single_rollout_optimizer_milestone_evals \
-            "$(update_model_save_dir "$epoch" "$batch")" \
+            "$resumed_model_dir" \
             "$(update_output_dir "$epoch" "$batch")" \
             "$PIPELINE_TOTAL_OPTIMIZER_STEPS"
     else
@@ -4786,6 +4797,7 @@ backfill_completed_pipeline_milestone_eval() {
 
     if [ "$PIPELINE_EPHEMERAL_MODELS" = "true" ]; then
         local padded_update padded_total eval_model_name eval_output_dir eval_global_step milestone_fraction
+        local ephemeral_model_dir
         printf -v padded_update '%05d' "$update"
         printf -v padded_total '%05d' "$total_updates"
         eval_model_name="${RESULTS_MODEL_KEY}_step${padded_update}of${padded_total}"
@@ -4796,6 +4808,20 @@ backfill_completed_pipeline_milestone_eval() {
            log_existing_eval_metrics_to_wandb \
                "$eval_output_dir" "$eval_global_step" "$milestone_fraction"; then
             echo "Ephemeral milestone step $update evaluation already complete"
+            return 0
+        fi
+        ephemeral_model_dir="$(pipeline_temp_model_save_dir "$update")"
+        if pipeline_ephemeral_training_checkpoint_complete "$update"; then
+            position="$(update_position_from_global_step "$update" "$batches_per_epoch")"
+            epoch="${position%% *}"
+            batch="${position##* }"
+            export_latest_fsdp_checkpoint_after_training "$ephemeral_model_dir"
+            run_post_training_eval_if_needed \
+                "$ephemeral_model_dir" \
+                "$(update_output_dir "$epoch" "$batch")" \
+                "$update" \
+                "$total_updates"
+            cleanup_ephemeral_hf_export "$ephemeral_model_dir/hf_merged"
             return 0
         fi
         echo "ERROR: ephemeral milestone step $update is committed but its evaluation results are incomplete." >&2
@@ -5189,6 +5215,7 @@ if [ "$MULTI_STEP" -gt 0 ]; then
             UPDATE_MARKER_CHAIN_VALID="false"
             UPDATE_MARKER_STATUS=""
             UPDATE_HF_VALID="false"
+            UPDATE_EPHEMERAL_TRAINING_VALID="false"
             if pipeline_done_marker_structurally_valid "$GLOBAL_UPDATE"; then
                 UPDATE_MARKER_STATUS="$(read_pipeline_done_marker_field "$UPDATE_PROGRESS_MARKER" status)"
                 if pipeline_done_marker_semantically_valid "$GLOBAL_UPDATE" && \
@@ -5209,10 +5236,14 @@ if [ "$MULTI_STEP" -gt 0 ]; then
             if hf_export_complete "$UPDATE_DONE_MARKER" || hf_export_complete "$UPDATE_RESUME_MODEL"; then
                 UPDATE_HF_VALID="true"
             fi
+            if pipeline_ephemeral_training_checkpoint_complete "$GLOBAL_UPDATE"; then
+                UPDATE_EPHEMERAL_TRAINING_VALID="true"
+            fi
 
             if [ "$UPDATE_MARKER_DIRECT_VALID" = "true" ] || \
                [ "$UPDATE_MARKER_CHAIN_VALID" = "true" ] || \
-               [ "$UPDATE_HF_VALID" = "true" ]; then
+               [ "$UPDATE_HF_VALID" = "true" ] || \
+               [ "$UPDATE_EPHEMERAL_TRAINING_VALID" = "true" ]; then
                 if [ "$PIPELINE_AUTO_RESUME" = "true" ]; then
                     echo ""
                     echo "=========================================="
@@ -5221,6 +5252,8 @@ if [ "$MULTI_STEP" -gt 0 ]; then
                         echo "  Found validated marker and artifact: $UPDATE_PROGRESS_MARKER"
                     elif [ "$UPDATE_MARKER_CHAIN_VALID" = "true" ]; then
                         echo "  Found validated marker covered by completion frontier $VALIDATED_PROGRESS_FRONTIER: $UPDATE_PROGRESS_MARKER"
+                    elif [ "$UPDATE_EPHEMERAL_TRAINING_VALID" = "true" ]; then
+                        echo "  Found complete temporary FSDP checkpoint: $(pipeline_temp_model_save_dir "$GLOBAL_UPDATE")"
                     else
                         echo "  Found strict HF export: $UPDATE_DONE_MARKER"
                     fi
