@@ -14,6 +14,7 @@ else
 fi
 export PYTHON_BIN
 source "$REPO_ROOT/recipe/opd/scripts_math/lib/model_path_validation.sh"
+source "$REPO_ROOT/recipe/opd/run/hf_export_validation.sh"
 
 TASK="${OPD_TASK:?OPD_TASK must be math or code}"
 FAMILY="${OPD_FAMILY:?OPD_FAMILY must be baseline, opd, or opsd}"
@@ -312,10 +313,23 @@ export MICRO_BATCH_SIZE_PER_GPU="${MICRO_BATCH_SIZE_PER_GPU:-1}"
 export PPO_MICRO_BATCH_SIZE_PER_GPU="${PPO_MICRO_BATCH_SIZE_PER_GPU:-1}"
 export USE_DYNAMIC_BSZ="${USE_DYNAMIC_BSZ:-false}"
 export EVAL_FRACTIONS="${EVAL_FRACTIONS:-0.25,0.5,0.75,1.0}"
-# All launchers under scripts_math and script_code share one artifact policy.
-# Training checkpoints are rolling state, milestone HF exports exist only for
-# evaluation, and no model artifact is retained after the run completes.
-export MODEL_ARTIFACT_POLICY="ephemeral_eval_only"
+# Math training runs retain the four evaluation milestone models, but defer all
+# benchmark work until training has completed. Other experiment families keep
+# the existing consume-after-eval artifact policy.
+case "$TASK/$FAMILY/$VARIANT" in
+    math/opd/*|math/opsd/*)
+        export MODEL_ARTIFACT_POLICY="milestone_hf_deferred_eval"
+        export PIPELINE_DEFER_MILESTONE_EVALS="true"
+        ;;
+    math/baseline/sft|math/baseline/grpo)
+        export MODEL_ARTIFACT_POLICY="milestone_hf_deferred_eval"
+        export PIPELINE_DEFER_MILESTONE_EVALS="false"
+        ;;
+    *)
+        export MODEL_ARTIFACT_POLICY="ephemeral_eval_only"
+        export PIPELINE_DEFER_MILESTONE_EVALS="false"
+        ;;
+esac
 export PIPELINE_EPHEMERAL_MODELS="true"
 export SAVE_MERGED_MODEL="false"
 export RESIDENT_STUDENT_ROLLOUT="false"
@@ -634,11 +648,113 @@ run_base_eval() {
     fi
 }
 
+configure_baseline_milestone() {
+    local step="$1"
+    local fraction="$2"
+    local total_steps="$3"
+    local step_dir="$RUN_ROOT/eval/step_${step}"
+
+    export TOTAL_TRAINING_STEPS="$total_steps"
+    export STOP_AT_STEP="$step"
+    export WANDB_GLOBAL_STEP="$step"
+    export EVAL_STEP="$step"
+    export EVAL_MILESTONE_FRACTION="$fraction"
+    export EVAL_KIND=milestone
+    export EVAL_MODEL_NAME="${EXPERIMENT_ID}_step${step}"
+    export EVAL_RESULTS_FILE="$step_dir/results.json"
+    export EVAL_METRICS_FILE="$step_dir/metrics.json"
+    export EVAL_OUTPUT_DIR="$step_dir/generations"
+    export EVAL_RESULTS_CSV_FILE="$step_dir/results.csv"
+}
+
+run_saved_math_baseline_eval() {
+    local model_path="$1"
+    local eval_tp
+
+    if ! hf_export_complete "$model_path"; then
+        echo "ERROR: complete milestone Hugging Face model is missing: $model_path" >&2
+        return 1
+    fi
+    if [ "$VARIANT" = sft ]; then
+        eval_tp=1
+    else
+        eval_tp="${EVAL_GEN_TP:-$NGPUS_PER_NODE}"
+    fi
+
+    mkdir -p "$(dirname "$EVAL_RESULTS_FILE")" "$EVAL_OUTPUT_DIR" "$RUN_ROOT/logs"
+    echo "Running deferred baseline eval fraction=$EVAL_MILESTONE_FRACTION step=$EVAL_STEP model=$model_path"
+    PYTHON_BIN="$PYTHON_BIN" \
+    NGPUS_PER_NODE="$NGPUS_PER_NODE" \
+    NNODES=1 \
+    GEN_TP="$eval_tp" \
+    EVAL_DATASETS_DIR="$EVAL_DATASETS_DIR" \
+    DATASETS="$EVAL_DATASETS" \
+    PASS_K="$PASS_K" \
+    EVAL_BASE_MODEL_NAME="$MODEL_ALIAS" \
+    EVAL_MODEL_NAME="$EVAL_MODEL_NAME" \
+    EVAL_OUTPUT_DIR="$EVAL_OUTPUT_DIR" \
+    EVAL_RESULTS_FILE="$EVAL_RESULTS_FILE" \
+    EVAL_RESULTS_CSV_FILE="$EVAL_RESULTS_CSV_FILE" \
+    EVAL_METRICS_FILE="$EVAL_METRICS_FILE" \
+    EVAL_MAX_NUM_SEQS="${EVAL_MAX_NUM_SEQS:-64}" \
+    EVAL_GPU_MEMORY_UTILIZATION="${EVAL_GPU_MEMORY_UTILIZATION:-0.90}" \
+    WRITE_PASS16_AGGREGATES=true \
+    WRITE_RESULTS_CSV=true \
+        bash recipe/math_evaluation/benchmark_kl_model.sh "$model_path" \
+        2>&1 | tee "$RUN_ROOT/logs/eval_step_${EVAL_STEP}_pass${PASS_K}.log"
+}
+
+run_deferred_math_baseline() {
+    local train_file="$1"
+    local runner="$2"
+    shift 2
+    local schedule step fraction total_steps step_dir model_dir
+
+    schedule="$(training_milestones "$train_file" "$GLOBAL_PROMPT_BATCH_SIZE")"
+    echo "Training and exporting all baseline milestones before evaluation"
+    while read -r step fraction total_steps; do
+        [ -n "$step" ] || continue
+        configure_baseline_milestone "$step" "$fraction" "$total_steps"
+        model_dir="$BASELINE_MODELS_DIR/step_${step}"
+        if hf_export_complete "$model_dir"; then
+            echo "Reusing exported baseline milestone step $step/$total_steps: $model_dir"
+            continue
+        fi
+        export RUN_EVAL_AFTER_TRAINING=false
+        echo "Running baseline training milestone fraction=$fraction step=$step/$total_steps"
+        bash "$runner" "$@"
+        if ! hf_export_complete "$model_dir"; then
+            echo "ERROR: training did not produce a complete milestone model: $model_dir" >&2
+            return 1
+        fi
+    done <<< "$schedule"
+
+    echo "All baseline milestone models are ready, starting ordered evaluation"
+    export RUN_EVAL_AFTER_TRAINING=true
+    while read -r step fraction total_steps; do
+        [ -n "$step" ] || continue
+        step_dir="$RUN_ROOT/eval/step_${step}"
+        if [ -f "$step_dir/.complete" ]; then
+            echo "Milestone eval step $step/$total_steps is already complete: $step_dir"
+            continue
+        fi
+        configure_baseline_milestone "$step" "$fraction" "$total_steps"
+        run_saved_math_baseline_eval "$BASELINE_MODELS_DIR/step_${step}"
+        touch "$step_dir/.complete"
+    done <<< "$schedule"
+    remove_ephemeral_model_path "$BASELINE_CHECKPOINT_DIR"
+}
+
 run_segmented_baseline() {
     local train_file="$1"
     local runner="$2"
     shift 2
     local schedule step fraction total_steps step_dir
+
+    if [ "$MODEL_ARTIFACT_POLICY" = milestone_hf_deferred_eval ]; then
+        run_deferred_math_baseline "$train_file" "$runner" "$@"
+        return
+    fi
 
     schedule="$(training_milestones "$train_file" "$GLOBAL_PROMPT_BATCH_SIZE")"
     while read -r step fraction total_steps; do
@@ -648,17 +764,7 @@ run_segmented_baseline() {
             echo "Milestone step $step/$total_steps is already complete: $step_dir"
             continue
         fi
-        export TOTAL_TRAINING_STEPS="$total_steps"
-        export STOP_AT_STEP="$step"
-        export WANDB_GLOBAL_STEP="$step"
-        export EVAL_STEP="$step"
-        export EVAL_MILESTONE_FRACTION="$fraction"
-        export EVAL_KIND=milestone
-        export EVAL_MODEL_NAME="${EXPERIMENT_ID}_step${step}"
-        export EVAL_RESULTS_FILE="$step_dir/results.json"
-        export EVAL_METRICS_FILE="$step_dir/metrics.json"
-        export EVAL_OUTPUT_DIR="$step_dir/generations"
-        export EVAL_RESULTS_CSV_FILE="$step_dir/results.csv"
+        configure_baseline_milestone "$step" "$fraction" "$total_steps"
         export RUN_EVAL_AFTER_TRAINING=true
         echo "Running training/eval milestone fraction=$fraction step=$step/$total_steps"
         bash "$runner" "$@"

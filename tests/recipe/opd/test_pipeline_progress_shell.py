@@ -29,6 +29,7 @@ set -euo pipefail
 source {HF_VALIDATION}
 PIPELINE_DONE_MARKER_SCHEMA=opd_pipeline_update/v1
 PIPELINE_EPHEMERAL_MODELS=${{PIPELINE_EPHEMERAL_MODELS:-false}}
+PIPELINE_DEFER_MILESTONE_EVALS=${{PIPELINE_DEFER_MILESTONE_EVALS:-false}}
 PYTHON_BIN={sys.executable}
 pipeline_progress_dir() {{ printf '%s\\n' "$TEST_PROGRESS_DIR"; }}
 format_pipeline_batch_id() {{ printf '%05d' "$1"; }}
@@ -306,6 +307,79 @@ mark_pipeline_update_done 2 4 4
     assert "model_path=none\n" in marker
 
 
+def test_deferred_milestone_marker_requires_durable_hf_model(tmp_path: Path):
+    progress = tmp_path / "progress"
+    progress.mkdir()
+    checkpoint = tmp_path / "global_step_1"
+    checkpoint.mkdir()
+    durable_model = tmp_path / "models" / "batch00015" / "hf_merged"
+    durable_model.mkdir(parents=True)
+    result = _run_shell(
+        ("pipeline_done_marker", "mark_pipeline_update_done"),
+        f"""
+PIPELINE_EPHEMERAL_MODELS=true
+PIPELINE_DEFER_MILESTONE_EVALS=true
+RUN_EVAL_AFTER_TRAINING=true
+RESIDENT_STUDENT_ROLLOUT=false
+PIPELINE_FULL_BATCH_OPTIMIZER_STEPS=1
+PIPELINE_TAIL_OPTIMIZER_STEPS=1
+pipeline_optimizer_step_offset() {{ echo 14; }}
+pipeline_checkpoint_for_update() {{ echo {checkpoint}; }}
+pipeline_should_keep_update() {{ return 0; }}
+model_dir_for_global_update() {{ echo {durable_model.parent}; }}
+pipeline_done_model_artifact_complete() {{ [ "$1" = kept ] && [ "$2" = {durable_model} ]; }}
+pipeline_update_resume_checkpoint_complete() {{ return 0; }}
+write_pipeline_latest_model_state() {{ :; }}
+mark_pipeline_update_done 15 58 58
+""",
+        {"TEST_PROGRESS_DIR": str(progress)},
+    )
+    assert result.returncode == 0, result.stderr
+    marker = (progress / "step00015.done").read_text(encoding="utf-8")
+    assert "status=kept\n" in marker
+    assert f"model_path={durable_model}\n" in marker
+
+
+def test_deferred_milestones_evaluate_in_fraction_order(tmp_path: Path):
+    result = _run_shell(
+        ("run_deferred_pipeline_milestone_evals",),
+        """
+PIPELINE_DEFER_MILESTONE_EVALS=true
+RUN_EVAL_AFTER_TRAINING=true
+PIPELINE_KEEP_STEPS=15,29,44,58
+backfill_completed_pipeline_milestone_eval() { echo "$1"; }
+run_deferred_pipeline_milestone_evals 58 58
+""",
+        {"TEST_PROGRESS_DIR": str(tmp_path / "unused")},
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == ["15", "29", "44", "58"]
+
+
+def test_single_rollout_exports_all_optimizer_milestones_before_eval(tmp_path: Path):
+    source_dir = tmp_path / "rolling"
+    durable_dir = tmp_path / "durable"
+    result = _run_shell(
+        ("export_single_rollout_optimizer_milestones_after_training",),
+        f"""
+OPTIMIZER_MILESTONE_STEPS=15,29,44,58
+export_latest_fsdp_checkpoint_after_training() {{
+    printf '%s|%s|%s\n' "$1" "$2" "$3"
+}}
+export_single_rollout_optimizer_milestones_after_training \
+    {source_dir} {durable_dir} 58
+""",
+        {"TEST_PROGRESS_DIR": str(tmp_path / "unused")},
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == [
+        f"{source_dir}|{durable_dir}/optimizer_eval/step00015/hf_merged|{source_dir}/global_step_15",
+        f"{source_dir}|{durable_dir}/optimizer_eval/step00029/hf_merged|{source_dir}/global_step_29",
+        f"{source_dir}|{durable_dir}/optimizer_eval/step00044/hf_merged|{source_dir}/global_step_44",
+        f"{source_dir}|{durable_dir}/hf_merged|{source_dir}/global_step_58",
+    ]
+
+
 def test_ephemeral_hf_export_is_deleted_only_from_temp_root(tmp_path: Path):
     temp_root = tmp_path / "pipeline_tmp"
     export_dir = temp_root / "step00015" / "hf_merged"
@@ -336,7 +410,6 @@ def test_ephemeral_hf_export_is_deleted_only_from_temp_root(tmp_path: Path):
     )
     assert result.returncode != 0
     assert unexpected.is_dir()
-
 
 def test_resident_temp_prune_never_deletes_future_frontier(tmp_path: Path):
     temp_root = tmp_path / "temp"

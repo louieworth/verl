@@ -63,6 +63,7 @@ _CONFIG_ENV_FIELDS = {
     "SKD_TEACHER_TEMPERATURE": "skd_teacher_temperature",
     "MODEL_ARTIFACT_POLICY": "model_artifact_policy",
     "PIPELINE_EPHEMERAL_MODELS": "pipeline_ephemeral_models",
+    "PIPELINE_DEFER_MILESTONE_EVALS": "pipeline_defer_milestone_evals",
     "RESIDENT_STUDENT_ROLLOUT": "resident_student_rollout",
     "SEED": "seed",
 }

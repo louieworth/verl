@@ -24,9 +24,14 @@ def _shell_function(name: str) -> str:
     return source[match.start() : match.end() + end.end()]
 
 
-def test_shared_dispatcher_enforces_ephemeral_models_and_no_wandb_tags():
+def test_shared_dispatcher_defers_math_training_eval_and_disables_wandb_tags():
     source = DISPATCHER.read_text(encoding="utf-8")
+    assert "math/opd/*|math/opsd/*)" in source
+    assert "math/baseline/sft|math/baseline/grpo)" in source
+    assert 'export MODEL_ARTIFACT_POLICY="milestone_hf_deferred_eval"' in source
+    assert 'export PIPELINE_DEFER_MILESTONE_EVALS="true"' in source
     assert 'export MODEL_ARTIFACT_POLICY="ephemeral_eval_only"' in source
+    assert 'export PIPELINE_DEFER_MILESTONE_EVALS="false"' in source
     assert 'export PIPELINE_EPHEMERAL_MODELS="true"' in source
     assert 'export SAVE_MERGED_MODEL="false"' in source
     assert 'export RESIDENT_STUDENT_ROLLOUT="false"' in source
@@ -60,6 +65,94 @@ def test_hf_exports_run_only_after_training_processes_exit():
     training_exit = grpo_source.index('"${TRAIN_COMMAND[@]}" 2>&1 | tee')
     shell_export = grpo_source.index('current_hf_model="$(latest_hf_checkpoint', training_exit)
     assert training_exit < shell_export
+
+
+def test_deferred_math_opd_saves_milestones_then_evaluates_after_training():
+    source = KL_RUNNER.read_text(encoding="utf-8")
+    run_epoch_start = source.index("run_epoch() {")
+    run_epoch_end = source.index("\neval_results_complete() {", run_epoch_start)
+    run_epoch = source[run_epoch_start:run_epoch_end]
+
+    assert '[ "$PIPELINE_DEFER_MILESTONE_EVALS" = "true" ]' in run_epoch
+    assert 'run_eval_this_update="false"' in run_epoch
+    assert 'deferred_hf_export_dir="$current_final_model_save_dir/hf_merged"' in run_epoch
+    torchrun_exit = run_epoch.index(') 2>&1 | tee "$current_output_dir/logs/training_')
+    durable_export = run_epoch.index('"$current_model_save_dir" "$deferred_hf_export_dir"')
+    assert torchrun_exit < durable_export
+
+    training_loop = source.index('for EPOCH in $(seq 1 "$TOTAL_EPOCHS")')
+    deferred_eval = source.rindex("run_deferred_pipeline_milestone_evals", training_loop)
+    assert training_loop < deferred_eval
+
+
+def test_deferred_math_baseline_exports_all_models_before_ordered_eval():
+    deferred = _shell_function("run_deferred_math_baseline")
+
+    training_loop = deferred.index('echo "Training and exporting all baseline milestones before evaluation"')
+    inline_eval_disabled = deferred.index("export RUN_EVAL_AFTER_TRAINING=false", training_loop)
+    runner = deferred.index('bash "$runner" "$@"', inline_eval_disabled)
+    exported_model = deferred.index('hf_export_complete "$model_dir"', runner)
+    eval_phase = deferred.index('echo "All baseline milestone models are ready, starting ordered evaluation"')
+    eval_call = deferred.index('run_saved_math_baseline_eval "$BASELINE_MODELS_DIR/step_${step}"', eval_phase)
+
+    assert training_loop < inline_eval_disabled < runner < exported_model < eval_phase < eval_call
+    assert 'remove_ephemeral_model_path "$BASELINE_CHECKPOINT_DIR"' in deferred
+    assert "cleanup_completed_baseline_models" not in deferred
+
+
+def test_deferred_math_baseline_runtime_order(tmp_path):
+    events = tmp_path / "events.txt"
+    runner = tmp_path / "runner.sh"
+    runner.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'printf "train:%s\\n" "$STOP_AT_STEP" >> "$EVENTS_FILE"\n'
+        'mkdir -p "$MODELS_DIR/step_${STOP_AT_STEP}"\n'
+        ': > "$MODELS_DIR/step_${STOP_AT_STEP}/complete"\n',
+        encoding="utf-8",
+    )
+    runner.chmod(0o755)
+
+    script = f"""
+set -euo pipefail
+{_shell_function("configure_baseline_milestone")}
+{_shell_function("run_deferred_math_baseline")}
+RUN_ROOT={shlex.quote(str(tmp_path / "run"))}
+BASELINE_MODELS_DIR="$RUN_ROOT/models"
+BASELINE_CHECKPOINT_DIR="$RUN_ROOT/checkpoints"
+MODELS_DIR="$BASELINE_MODELS_DIR"
+GLOBAL_PROMPT_BATCH_SIZE=512
+EXPERIMENT_ID=baseline-test
+EVENTS_FILE={shlex.quote(str(events))}
+export MODELS_DIR EVENTS_FILE
+training_milestones() {{
+    printf '%s\n' '15 0.25 58' '29 0.5 58' '44 0.75 58' '58 1.0 58'
+}}
+hf_export_complete() {{
+    [ -f "$1/complete" ]
+}}
+run_saved_math_baseline_eval() {{
+    mkdir -p "$(dirname "$EVAL_RESULTS_FILE")"
+    printf 'eval:%s\n' "$EVAL_STEP" >> "$EVENTS_FILE"
+}}
+remove_ephemeral_model_path() {{
+    printf 'cleanup\n' >> "$EVENTS_FILE"
+}}
+run_deferred_math_baseline train.parquet {shlex.quote(str(runner))}
+"""
+    subprocess.run(["bash", "-c", script], cwd=ROOT, check=True)
+
+    assert events.read_text(encoding="utf-8").splitlines() == [
+        "train:15",
+        "train:29",
+        "train:44",
+        "train:58",
+        "eval:15",
+        "eval:29",
+        "eval:44",
+        "eval:58",
+        "cleanup",
+    ]
 
 
 def test_failed_training_flushes_wandb_before_hard_exit():

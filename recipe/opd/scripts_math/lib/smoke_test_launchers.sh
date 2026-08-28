@@ -45,7 +45,11 @@ for shell_file in "${shell_files[@]}" "$OPD_ROOT/scripts_math/run_matrix.sh"; do
     bash -n "$shell_file"
 done
 
-grep -Fxq 'export MODEL_ARTIFACT_POLICY="ephemeral_eval_only"' \
+grep -Fxq '        export MODEL_ARTIFACT_POLICY="ephemeral_eval_only"' \
+    "$REPO_ROOT/recipe/opd/run/run_experiment.sh"
+grep -Fxq '        export MODEL_ARTIFACT_POLICY="milestone_hf_deferred_eval"' \
+    "$REPO_ROOT/recipe/opd/run/run_experiment.sh"
+grep -Fxq '        export PIPELINE_DEFER_MILESTONE_EVALS="true"' \
     "$REPO_ROOT/recipe/opd/run/run_experiment.sh"
 grep -Fxq 'export PIPELINE_EPHEMERAL_MODELS="true"' \
     "$REPO_ROOT/recipe/opd/run/run_experiment.sh"
@@ -202,7 +206,7 @@ grep -q 'train/eval response: 16384/16384' <<<"$math_topk"
 grep -q 'W&B project/run:     opd-math / opd-math-top_k-Qwen3-1.7B-Base-teacher-thinking-false-ms0-' <<<"$math_topk"
 grep -q 'W&B group/job:       top_k-1B / opd-top_k' <<<"$math_topk"
 grep -q 'W&B tags:            disabled' <<<"$math_topk"
-grep -q 'model artifacts:     ephemeral_eval_only' <<<"$math_topk"
+grep -q 'model artifacts:     milestone_hf_deferred_eval' <<<"$math_topk"
 if grep -q 'Preparing canonical code' <<<"$math_topk"; then
     echo "ERROR: a math dry-run triggered code bootstrap" >&2
     exit 1
@@ -232,6 +236,7 @@ grep -q 'code reward:         deepcoder_binary_15_longest_v1' <<<"$code_grpo"
 grep -q 'reward test suite:   top 15 by input length; binary all-pass; timeout=10s' <<<"$code_grpo"
 grep -q 'W&B project/run:     opd-code / baseline-code-grpo-Qwen3-1.7B-Base-ms0-' <<<"$code_grpo"
 grep -q 'W&B tags:            disabled' <<<"$code_grpo"
+grep -q 'model artifacts:     ephemeral_eval_only' <<<"$code_grpo"
 
 math_skd="$(DRY_RUN=1 bash "$OPD_ROOT/scripts_math/OPD/1B/skd.sh")"
 grep -q 'task/family/variant: math/opd/skd' <<<"$math_skd"
@@ -245,6 +250,7 @@ math_opsd_8b="$(DRY_RUN=1 bash "$OPD_ROOT/scripts_math/OPSD/8B/trd.sh")"
 grep -q 'family: opsd' <<<"$math_opsd_8b"
 grep -q 'model: Qwen/Qwen3-8B-Base' <<<"$math_opsd_8b"
 grep -q 'teacher: Qwen/Qwen3-8B-Base' <<<"$math_opsd_8b"
+grep -q 'model artifacts:     milestone_hf_deferred_eval' <<<"$math_opsd_8b"
 
 math_opd_8b="$(DRY_RUN=1 bash "$OPD_ROOT/scripts_math/OPD/8B/trd.sh")"
 grep -q 'family: opd' <<<"$math_opd_8b"
@@ -331,6 +337,11 @@ fi
 sft_override="$(DRY_RUN=1 bash "$OPD_ROOT/scripts_math/Baselines/1B/sft.sh" trainer.foo=bar)"
 grep -q 'trainer.foo=bar' <<<"$sft_override"
 grep -q 'Canonical OPD experiment' <<<"$sft_override"
+grep -q 'model artifacts:     milestone_hf_deferred_eval' <<<"$sft_override"
+
+grpo_baseline="$(DRY_RUN=1 bash "$OPD_ROOT/scripts_math/Baselines/8B/grpo.sh")"
+grep -q 'task/family/variant: math/baseline/grpo' <<<"$grpo_baseline"
+grep -q 'model artifacts:     milestone_hf_deferred_eval' <<<"$grpo_baseline"
 
 matrix_override="$(
     DRY_RUN=1 \

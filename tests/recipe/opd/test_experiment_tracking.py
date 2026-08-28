@@ -150,8 +150,9 @@ def test_initialize_wandb_attaches_group_and_config_but_no_tags(monkeypatch, tmp
     monkeypatch.setenv("MODEL_ALIAS", "Qwen3-1.7B-Base")
     monkeypatch.setenv("MAX_RESPONSE_LENGTH", "16384")
     monkeypatch.setenv("KL_TOKEN_CLIP", "0.05")
-    monkeypatch.setenv("MODEL_ARTIFACT_POLICY", "ephemeral_eval_only")
+    monkeypatch.setenv("MODEL_ARTIFACT_POLICY", "milestone_hf_deferred_eval")
     monkeypatch.setenv("PIPELINE_EPHEMERAL_MODELS", "true")
+    monkeypatch.setenv("PIPELINE_DEFER_MILESTONE_EVALS", "true")
     monkeypatch.setenv("WANDB_TAGS", "task=math,family=opd,variant=clip,task=math")
     monkeypatch.setenv("WANDB_GROUP", "clip-1B")
     monkeypatch.setenv("WANDB_JOB_TYPE", "opd-clip")
@@ -177,8 +178,9 @@ def test_initialize_wandb_attaches_group_and_config_but_no_tags(monkeypatch, tmp
         "model": "Qwen3-1.7B-Base",
         "train_response_length": 16384,
         "kl_token_clip": 0.05,
-        "model_artifact_policy": "ephemeral_eval_only",
+        "model_artifact_policy": "milestone_hf_deferred_eval",
         "pipeline_ephemeral_models": True,
+        "pipeline_defer_milestone_evals": True,
     }
 
 

@@ -265,6 +265,7 @@ PIPELINE_STORE_RESUME_MODEL_IN_GEN_RESULTS=${PIPELINE_STORE_RESUME_MODEL_IN_GEN_
 PIPELINE_CLEANUP_GEN_RESULTS_ON_COMPLETE=${PIPELINE_CLEANUP_GEN_RESULTS_ON_COMPLETE:-"true"}
 PIPELINE_TEMP_MODEL_DIR=${PIPELINE_TEMP_MODEL_DIR:-""}
 PIPELINE_EPHEMERAL_MODELS=${PIPELINE_EPHEMERAL_MODELS:-"false"}  # Eval consumes and deletes all model artifacts.
+PIPELINE_DEFER_MILESTONE_EVALS=${PIPELINE_DEFER_MILESTONE_EVALS:-"false"}  # Retain milestone HF exports and evaluate them after all training.
 PIPELINE_DONE_MARKER_SCHEMA="opd_pipeline_update/v1"
 # Resume behavior:
 #   resume_matching : default; find an older gen_results run with the same semantic signature,
@@ -590,6 +591,22 @@ case "$PIPELINE_EPHEMERAL_MODELS" in
     *) echo "ERROR: PIPELINE_EPHEMERAL_MODELS must be true or false (got: $PIPELINE_EPHEMERAL_MODELS)." >&2; exit 1 ;;
 esac
 
+case "$PIPELINE_DEFER_MILESTONE_EVALS" in
+    true|false) ;;
+    *) echo "ERROR: PIPELINE_DEFER_MILESTONE_EVALS must be true or false (got: $PIPELINE_DEFER_MILESTONE_EVALS)." >&2; exit 1 ;;
+esac
+
+if [ "$PIPELINE_DEFER_MILESTONE_EVALS" = "true" ]; then
+    if [ "$PIPELINE_EPHEMERAL_MODELS" != "true" ]; then
+        echo "ERROR: deferred milestone evals require PIPELINE_EPHEMERAL_MODELS=true for rolling FSDP training." >&2
+        exit 1
+    fi
+    if [ "$RUN_EVAL_AFTER_TRAINING" != "true" ]; then
+        echo "ERROR: deferred milestone evals require RUN_EVAL_AFTER_TRAINING=true." >&2
+        exit 1
+    fi
+fi
+
 case "$RESIDENT_STUDENT_ROLLOUT" in
     true|false) ;;
     *) echo "ERROR: RESIDENT_STUDENT_ROLLOUT must be true or false (got: $RESIDENT_STUDENT_ROLLOUT)." >&2; exit 1 ;;
@@ -639,7 +656,8 @@ if [ "$RESIDENT_STUDENT_ROLLOUT" = "true" ] && [ "$Y_MODE" = "y_r" ]; then
     fi
     RESIDENT_YO_RELEASE_AFTER_STAGE1="true"
 fi
-export PIPELINE_EPHEMERAL_MODELS SAVE_MERGED_MODEL RESIDENT_STUDENT_ROLLOUT
+export PIPELINE_EPHEMERAL_MODELS PIPELINE_DEFER_MILESTONE_EVALS
+export SAVE_MERGED_MODEL RESIDENT_STUDENT_ROLLOUT
 
 if [ "$Y_O_ROLLOUT_MODE" != "teacher" ]; then
     TEACHER_TRAJECTORY_CONDITIONING=""
@@ -1312,6 +1330,7 @@ pipeline_total_steps=${PIPELINE_TOTAL_STEPS:-0}
 pipeline_batches_per_epoch=${PIPELINE_BATCHES_PER_EPOCH:-$TOTAL_EPOCHS}
 resident_student_rollout=$RESIDENT_STUDENT_ROLLOUT
 pipeline_ephemeral_models=$PIPELINE_EPHEMERAL_MODELS
+pipeline_defer_milestone_evals=$PIPELINE_DEFER_MILESTONE_EVALS
 base_prompt_length=$BASE_PROMPT_LENGTH
 max_prompt_length=$MAX_PROMPT_LENGTH
 expert_solution_prompt_length=$EXPERT_SOLUTION_PROMPT_LENGTH
@@ -1370,6 +1389,7 @@ case "${KL_CONFIG_DRY_RUN:-false}" in
         echo "  optimizer eval ckpt: ${OPTIMIZER_MILESTONE_STEPS:-none}"
         echo "  checkpoint policy:   $PIPELINE_LOCAL_KEEP_POLICY"
         echo "  ephemeral models:    $PIPELINE_EPHEMERAL_MODELS"
+        echo "  deferred evals:      $PIPELINE_DEFER_MILESTONE_EVALS"
         echo "  resident rollout:    $RESIDENT_STUDENT_ROLLOUT"
         echo "  eval fractions:      $EVAL_FRACTIONS"
         echo "  eval root:           $EVAL_DATASETS_DIR"
@@ -3169,7 +3189,11 @@ write_pipeline_checkpoint_plan() {
         local update dir
         for update in $(seq 1 "$total_updates"); do
             if [ "$PIPELINE_EPHEMERAL_MODELS" = "true" ]; then
-                if pipeline_should_keep_update "$update" "$total_updates" && \
+                if [ "$PIPELINE_DEFER_MILESTONE_EVALS" = "true" ] && \
+                   pipeline_should_keep_update "$update" "$total_updates"; then
+                    dir="$(model_dir_for_global_update "$update" "$batches_per_epoch")/hf_merged"
+                    printf "%s\tdeferred_eval\t%s\n" "$update" "$dir"
+                elif pipeline_should_keep_update "$update" "$total_updates" && \
                    [ "$RUN_EVAL_AFTER_TRAINING" = "true" ]; then
                     dir="$(pipeline_temp_model_save_dir "$update")/hf_merged"
                     printf "%s\ttransient_eval\t%s\n" "$update" "$dir"
@@ -3214,7 +3238,11 @@ mark_pipeline_update_done() {
     global_optimizer_step=$((optimizer_offset + checkpoint_step))
 
     if [ "$PIPELINE_EPHEMERAL_MODELS" = "true" ]; then
-        if [ "$update" -eq "$total_updates" ] || \
+        if [ "$PIPELINE_DEFER_MILESTONE_EVALS" = "true" ] && \
+           pipeline_should_keep_update "$update" "$total_updates"; then
+            model_dir="$(model_dir_for_global_update "$update" "$batches_per_epoch")/hf_merged"
+            keep_status="kept"
+        elif [ "$update" -eq "$total_updates" ] || \
            { [ "$RUN_EVAL_AFTER_TRAINING" = "true" ] && pipeline_should_keep_update "$update" "$total_updates"; }; then
             model_dir="none"
             keep_status="consumed_ephemeral"
@@ -3279,6 +3307,7 @@ finalize_resumed_pipeline_update() {
     local total_updates="$2"
     local batches_per_epoch="$3"
     local refresh_marker="$4"
+    local evaluate_now="true"
 
     if [ "$total_updates" -eq 1 ]; then
         local position epoch batch resumed_model_dir
@@ -3287,17 +3316,28 @@ finalize_resumed_pipeline_update() {
         batch="${position##* }"
         resumed_model_dir="$(update_model_save_dir "$epoch" "$batch")"
         if pipeline_ephemeral_training_checkpoint_complete "$update"; then
-            resumed_model_dir="$(pipeline_temp_model_save_dir "$update")"
+            if [ "$PIPELINE_DEFER_MILESTONE_EVALS" = "true" ]; then
+                export_single_rollout_optimizer_milestones_after_training \
+                    "$(pipeline_temp_model_save_dir "$update")" "$resumed_model_dir" \
+                    "$PIPELINE_TOTAL_OPTIMIZER_STEPS"
+            else
+                resumed_model_dir="$(pipeline_temp_model_save_dir "$update")"
+            fi
         fi
         run_single_rollout_optimizer_milestone_evals \
             "$resumed_model_dir" \
             "$(update_output_dir "$epoch" "$batch")" \
             "$PIPELINE_TOTAL_OPTIMIZER_STEPS"
     else
+        if [ "$PIPELINE_DEFER_MILESTONE_EVALS" = "true" ] && \
+           [ "$update" -lt "$total_updates" ]; then
+            evaluate_now="false"
+        fi
         backfill_completed_pipeline_milestone_eval \
             "$update" \
             "$total_updates" \
-            "$batches_per_epoch"
+            "$batches_per_epoch" \
+            "$evaluate_now"
     fi
     if [ "$refresh_marker" = "true" ]; then
         mark_pipeline_update_done "$update" "$total_updates" "$batches_per_epoch"
@@ -3499,11 +3539,14 @@ cleanup_ephemeral_hf_export() {
 
 export_latest_fsdp_checkpoint_after_training() {
     local model_save_dir="$1"
-    local target_dir="$model_save_dir/hf_merged"
-    local checkpoint_path export_lora_rank=0 export_lora_alpha=0
+    local target_dir="${2:-$model_save_dir/hf_merged}"
+    local checkpoint_path="${3:-}"
+    local export_lora_rank=0 export_lora_alpha=0
 
     hf_export_complete "$target_dir" && return 0
-    checkpoint_path="$(find_latest_fsdp_checkpoint "$model_save_dir")"
+    if [ -z "$checkpoint_path" ]; then
+        checkpoint_path="$(find_latest_fsdp_checkpoint "$model_save_dir")"
+    fi
     if [ -z "$checkpoint_path" ] || ! pipeline_fsdp_checkpoint_complete "$checkpoint_path"; then
         echo "ERROR: cannot export an incomplete FSDP checkpoint under $model_save_dir" >&2
         return 1
@@ -3530,6 +3573,27 @@ export_latest_fsdp_checkpoint_after_training() {
         echo "ERROR: post-training HF export is incomplete: $target_dir" >&2
         return 1
     fi
+}
+
+export_single_rollout_optimizer_milestones_after_training() {
+    local source_model_dir="$1"
+    local durable_model_dir="$2"
+    local total_optimizer_steps="$3"
+    local milestone_step padded_step target_dir checkpoint_path
+    local -a optimizer_milestones
+
+    IFS=',' read -r -a optimizer_milestones <<< "$OPTIMIZER_MILESTONE_STEPS"
+    for milestone_step in "${optimizer_milestones[@]}"; do
+        printf -v padded_step '%05d' "$milestone_step"
+        checkpoint_path="$source_model_dir/global_step_${milestone_step}"
+        if [ "$milestone_step" -eq "$total_optimizer_steps" ]; then
+            target_dir="$durable_model_dir/hf_merged"
+        else
+            target_dir="$durable_model_dir/optimizer_eval/step${padded_step}/hf_merged"
+        fi
+        export_latest_fsdp_checkpoint_after_training \
+            "$source_model_dir" "$target_dir" "$checkpoint_path"
+    done
 }
 
 resolve_update_model_path() {
@@ -3770,8 +3834,12 @@ run_epoch() {
     if [ -n "$pipeline_batch_index" ] && [ "$is_milestone_update" != "true" ]; then
         run_eval_this_update="false"
     fi
+    if [ -n "$pipeline_batch_index" ] && [ "$PIPELINE_DEFER_MILESTONE_EVALS" = "true" ]; then
+        run_eval_this_update="false"
+    fi
 
     local save_merged_this_update="$SAVE_MERGED_MODEL"
+    local deferred_hf_export_dir=""
     local resume_checkpoint_arg=""
     local prev_ckpt=""
     local rollout_lora_adapter_path=""
@@ -3796,6 +3864,11 @@ run_epoch() {
         save_merged_this_update="false"
         if [ "$run_eval_this_update" = "true" ]; then
             save_merged_this_update="true"
+        fi
+        if [ "$PIPELINE_DEFER_MILESTONE_EVALS" = "true" ] && \
+           [ "$is_milestone_update" = "true" ]; then
+            save_merged_this_update="true"
+            deferred_hf_export_dir="$current_final_model_save_dir/hf_merged"
         fi
         case "$Y_O_ROLLOUT_MODE" in
             student|skd|skd_vllm)
@@ -4089,6 +4162,7 @@ pipeline_cleanup_batch_data: $PIPELINE_CLEANUP_BATCH_DATA
 pipeline_store_resume_model_in_gen_results: $PIPELINE_STORE_RESUME_MODEL_IN_GEN_RESULTS
 pipeline_cleanup_gen_results_on_complete: $PIPELINE_CLEANUP_GEN_RESULTS_ON_COMPLETE
 pipeline_ephemeral_models: $PIPELINE_EPHEMERAL_MODELS
+pipeline_defer_milestone_evals: $PIPELINE_DEFER_MILESTONE_EVALS
 resident_student_rollout: $RESIDENT_STUDENT_ROLLOUT
 pipeline_auto_resume: $PIPELINE_AUTO_RESUME
 pipeline_resume_mode: $PIPELINE_RESUME_MODE
@@ -4337,7 +4411,16 @@ EOF_TORCHRUN
                 echo "         Stop it externally if host RAM is constrained." >&2
             fi
         fi
-        export_latest_fsdp_checkpoint_after_training "$current_model_save_dir"
+        if [ -n "$deferred_hf_export_dir" ] && [ "$total_updates" -eq 1 ]; then
+            export_single_rollout_optimizer_milestones_after_training \
+                "$current_model_save_dir" "$current_final_model_save_dir" \
+                "$PIPELINE_TOTAL_OPTIMIZER_STEPS"
+        elif [ -n "$deferred_hf_export_dir" ]; then
+            export_latest_fsdp_checkpoint_after_training \
+                "$current_model_save_dir" "$deferred_hf_export_dir"
+        else
+            export_latest_fsdp_checkpoint_after_training "$current_model_save_dir"
+        fi
     fi
 
     cleanup_pipeline_batch_data "$current_gen_results_dir"
@@ -4366,7 +4449,9 @@ EOF_TORCHRUN
         echo "  Eval Results: $RESULTS_FILE"
     fi
     if [ "$save_merged_this_update" = "true" ]; then
-        if [ "$PIPELINE_EPHEMERAL_MODELS" = "true" ]; then
+        if [ -n "$deferred_hf_export_dir" ]; then
+            echo "  Deferred Eval Model: $deferred_hf_export_dir"
+        elif [ "$PIPELINE_EPHEMERAL_MODELS" = "true" ]; then
             echo "  Merged Model: consumed by eval and deleted"
         else
             echo "  Merged Model: $current_model_save_dir/hf_merged"
@@ -4782,7 +4867,9 @@ run_single_rollout_optimizer_milestone_evals() {
             "$eval_model_path" \
             "$eval_model_name" \
             "$eval_output_dir"
-        cleanup_ephemeral_hf_export "$eval_model_path"
+        if [ "$PIPELINE_DEFER_MILESTONE_EVALS" != "true" ]; then
+            cleanup_ephemeral_hf_export "$eval_model_path"
+        fi
     done
 }
 
@@ -4790,12 +4877,14 @@ backfill_completed_pipeline_milestone_eval() {
     local update="$1"
     local total_updates="$2"
     local batches_per_epoch="$3"
+    local evaluate_now="$4"
     local position epoch batch eval_model_dir eval_model_path
 
     [ "$RUN_EVAL_AFTER_TRAINING" = "true" ] || return 0
     pipeline_should_keep_update "$update" "$total_updates" || return 0
 
-    if [ "$PIPELINE_EPHEMERAL_MODELS" = "true" ]; then
+    if [ "$PIPELINE_EPHEMERAL_MODELS" = "true" ] && \
+       [ "$PIPELINE_DEFER_MILESTONE_EVALS" != "true" ]; then
         local padded_update padded_total eval_model_name eval_output_dir eval_global_step milestone_fraction
         local ephemeral_model_dir
         printf -v padded_update '%05d' "$update"
@@ -4833,7 +4922,22 @@ backfill_completed_pipeline_milestone_eval() {
     epoch="${position%% *}"
     batch="${position##* }"
     eval_model_dir="$(model_dir_for_global_update "$update" "$batches_per_epoch")"
-    if ! hf_export_complete "$eval_model_dir/hf_merged"; then
+    if [ "$PIPELINE_DEFER_MILESTONE_EVALS" = "true" ]; then
+        if ! hf_export_complete "$eval_model_dir/hf_merged" && \
+           pipeline_ephemeral_training_checkpoint_complete "$update"; then
+            export_latest_fsdp_checkpoint_after_training \
+                "$(pipeline_temp_model_save_dir "$update")" \
+                "$eval_model_dir/hf_merged"
+        fi
+        if ! hf_export_complete "$eval_model_dir/hf_merged"; then
+            echo "ERROR: deferred milestone HF export is missing or incomplete: $eval_model_dir/hf_merged" >&2
+            return 1
+        fi
+        if [ "$evaluate_now" != "true" ]; then
+            echo "Deferred milestone step $update model is complete; evaluation waits for all training updates"
+            return 0
+        fi
+    elif ! hf_export_complete "$eval_model_dir/hf_merged"; then
         eval_model_path="$(read_pipeline_done_model_path_for_step "$update" || true)"
         if [ "${eval_model_path##*/}" = "hf_merged" ]; then
             eval_model_dir="$(dirname "$eval_model_path")"
@@ -4850,6 +4954,27 @@ backfill_completed_pipeline_milestone_eval() {
         echo "       Refusing to skip a reproducibility/eval milestone." >&2
         return 1
     fi
+}
+
+run_deferred_pipeline_milestone_evals() {
+    local total_updates="$1"
+    local batches_per_epoch="$2"
+    local update
+    local -a milestone_updates
+
+    if [ "$total_updates" -eq 1 ]; then
+        run_single_rollout_optimizer_milestone_evals \
+            "$(model_dir_for_global_update 1 "$batches_per_epoch")" \
+            "$(update_output_dir 1 1)" \
+            "$PIPELINE_TOTAL_OPTIMIZER_STEPS"
+        return 0
+    fi
+
+    IFS=',' read -r -a milestone_updates <<< "$PIPELINE_KEEP_STEPS"
+    for update in "${milestone_updates[@]}"; do
+        backfill_completed_pipeline_milestone_eval \
+            "$update" "$total_updates" "$batches_per_epoch" true
+    done
 }
 
 format_duration_seconds() {
@@ -5044,6 +5169,7 @@ pipeline_archive_keep_mode: ${PIPELINE_ARCHIVE_KEEP_MODE}
 pipeline_cleanup_batch_data: $PIPELINE_CLEANUP_BATCH_DATA
 pipeline_temp_model_dir: $PIPELINE_TEMP_MODEL_DIR
 pipeline_ephemeral_models: $PIPELINE_EPHEMERAL_MODELS
+pipeline_defer_milestone_evals: $PIPELINE_DEFER_MILESTONE_EVALS
 resident_student_rollout: $RESIDENT_STUDENT_ROLLOUT
 pipeline_final_alias_dir: $(pipeline_final_alias_dir)
 total_train_samples: ${TOTAL_TRAIN_SAMPLES:-}
@@ -5148,7 +5274,9 @@ if [ "$MULTI_STEP" -gt 0 ]; then
     echo "Multi-step tag:       $MULTISTEP_TAG"
     echo "Auto resume:          $PIPELINE_AUTO_RESUME"
     echo "Resume mode:          $PIPELINE_RESUME_MODE"
-    if [ "$PIPELINE_EPHEMERAL_MODELS" = "true" ]; then
+    if [ "$PIPELINE_DEFER_MILESTONE_EVALS" = "true" ]; then
+        echo "Model retention:      four durable milestone HF exports, eval deferred until training completes"
+    elif [ "$PIPELINE_EPHEMERAL_MODELS" = "true" ]; then
         echo "Model retention:      ephemeral, eval exports are deleted after use"
     else
         echo "Model keep policy:    local=${PIPELINE_LOCAL_KEEP_POLICY}, planned=${PIPELINE_KEEP_STEPS:-every ${PIPELINE_KEEP_INTERVAL} plus final}, archive=${PIPELINE_ARCHIVE_PRUNED_MODE}:${PIPELINE_ARCHIVE_MODEL_DIR}"
@@ -5174,7 +5302,8 @@ if [ "$MULTI_STEP" -gt 0 ]; then
                 backfill_completed_pipeline_milestone_eval \
                     "$COMPLETED_UPDATE" \
                     "$TOTAL_PIPELINE_UPDATES" \
-                    "$PIPELINE_BATCHES_PER_EPOCH"
+                    "$PIPELINE_BATCHES_PER_EPOCH" \
+                    true
             done
             FINAL_MARKER_REFRESH="true"
             if read_pipeline_done_model_path_for_step "$TOTAL_PIPELINE_UPDATES" >/dev/null; then
@@ -5365,7 +5494,11 @@ fi
 
 if [ "$RUN_EVAL_AFTER_TRAINING" = "true" ]; then
     if [ "$MULTI_STEP" -gt 0 ]; then
-        if [ "$PIPELINE_EPHEMERAL_MODELS" != "true" ] && \
+        if [ "$PIPELINE_DEFER_MILESTONE_EVALS" = "true" ] && \
+           [ -z "${PIPELINE_STOPPED_EARLY_UPDATE:-}" ]; then
+            run_deferred_pipeline_milestone_evals \
+                "$TOTAL_PIPELINE_UPDATES" "$PIPELINE_BATCHES_PER_EPOCH"
+        elif [ "$PIPELINE_EPHEMERAL_MODELS" != "true" ] && \
            [ -z "${PIPELINE_STOPPED_EARLY_UPDATE:-}" ] && [ "$TOTAL_PIPELINE_UPDATES" -gt 1 ]; then
             run_post_training_eval_if_needed "$FINAL_MODEL_SAVE_DIR" "$FINAL_OUTPUT_DIR" "$TOTAL_PIPELINE_UPDATES" "$TOTAL_PIPELINE_UPDATES"
         fi
@@ -5387,7 +5520,9 @@ echo "Result Key: $RESULTS_MODEL_KEY"
 echo "Gen Results ID: $GEN_RESULTS_RUN_ID"
 echo "Gen ID File: $GEN_RESULTS_RUN_ID_FILE"
 echo "Logs & Config: $FINAL_OUTPUT_DIR"
-if [ "$PIPELINE_EPHEMERAL_MODELS" = "true" ]; then
+if [ "$PIPELINE_DEFER_MILESTONE_EVALS" = "true" ]; then
+    echo "Model Artifacts: four durable milestone HF exports"
+elif [ "$PIPELINE_EPHEMERAL_MODELS" = "true" ]; then
     echo "Model Artifacts: deleted after evaluation"
 else
     echo "Model Checkpoints: $FINAL_MODEL_SAVE_DIR"
@@ -5397,7 +5532,9 @@ echo "Gen Metadata: $GEN_RESULTS_METADATA_FILE"
 if [ "$RUN_EVAL_AFTER_TRAINING" = "true" ]; then
     echo "Eval Results: $RESULTS_FILE"
 fi
-if [ "$PIPELINE_EPHEMERAL_MODELS" = "true" ]; then
+if [ "$PIPELINE_DEFER_MILESTONE_EVALS" = "true" ]; then
+    echo "Merged Models: retained at pipeline milestone batch directories"
+elif [ "$PIPELINE_EPHEMERAL_MODELS" = "true" ]; then
     echo "Merged Model: temporary eval exports consumed and deleted"
 elif [ "$SAVE_MERGED_MODEL" = "true" ]; then
     echo "Merged Model: $FINAL_MODEL_SAVE_DIR/hf_merged"
