@@ -66,6 +66,10 @@ grep -Fq -- '--run_eval_after_training false' "$REPO_ROOT/recipe/opd/run/run_kl_
 grep -Fq -- '--sync_resident_rollout false' "$REPO_ROOT/recipe/opd/run/run_kl_training.sh"
 grep -Fq 'export_latest_fsdp_checkpoint_after_training "$current_model_save_dir"' \
     "$REPO_ROOT/recipe/opd/run/run_kl_training.sh"
+grep -Fq 'run_eval_with_wandb.py' \
+    "$REPO_ROOT/recipe/math_evaluation/benchmark_kl_model.sh"
+grep -Fq 'EVAL_WANDB_WRAPPED' \
+    "$REPO_ROOT/recipe/math_evaluation/benchmark_kl_model.sh"
 grep -Fq 'stop_managed_resident_y_o_server' "$REPO_ROOT/recipe/opd/run/run_kl_training.sh"
 if grep -Fq -- '--save_merged_model $save_merged_this_update' \
     "$REPO_ROOT/recipe/opd/run/run_kl_training.sh"; then

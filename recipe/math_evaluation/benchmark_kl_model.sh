@@ -49,6 +49,16 @@ export EVAL_PROMPT_LENGTH="${EVAL_PROMPT_LENGTH:-2048}"
 export EVAL_RESPONSE_LENGTH="${EVAL_RESPONSE_LENGTH:-16384}"
 export EVAL_MAX_MODEL_LEN="${EVAL_MAX_MODEL_LEN:-$((EVAL_PROMPT_LENGTH + EVAL_RESPONSE_LENGTH))}"
 
+# Canonical training launchers provide a persisted W&B run ID and explicit
+# global step. Keep that run active for the entire benchmark so normal terminal
+# output appears in W&B Logs and structured dataset progress is visible live.
+if [ -n "${WANDB_RUN_ID:-}" ] && [ "${EVAL_WANDB_WRAPPED:-0}" != 1 ] && \
+   [ "${1:-}" != "--dry-run" ] && [ "${1:-}" != "--config" ]; then
+    export EVAL_WANDB_WRAPPED=1
+    exec "${PYTHON_BIN}" "$SCRIPT_DIR/run_eval_with_wandb.py" -- \
+        bash "$SCRIPT_DIR/benchmark_kl_model.sh" "$@"
+fi
+
 if [ "${1:-}" = "--dry-run" ]; then
     DRY_RUN_FLAG="--dry_run"
     shift
@@ -250,7 +260,9 @@ evaluate_one_model() {
                 echo "ERROR: milestone W&B eval logging requires EVAL_MILESTONE_FRACTION" >&2
                 exit 1
             fi
-            "${PYTHON_BIN}" "$SCRIPT_DIR/log_metrics_wandb.py" --metrics_file "${METRICS_FILE}"
+            if [ "${EVAL_WANDB_WRAPPED:-0}" != 1 ]; then
+                "${PYTHON_BIN}" "$SCRIPT_DIR/log_metrics_wandb.py" --metrics_file "${METRICS_FILE}"
+            fi
         fi
     fi
 

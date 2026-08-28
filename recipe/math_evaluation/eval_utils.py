@@ -40,6 +40,15 @@ GENERATION_CACHE_SCHEMA_VERSION = "opd_math_generation_cache/v1"
 BASE_EVAL_PROMPT_CONTRACT = "plain_base_completion_trailing_newline_v1"
 CHAT_EVAL_PROMPT_CONTRACT = "tokenizer_chat_template_generation_prompt_v1"
 _SMALL_CHECKPOINT_FILE_HASH_LIMIT = 8 * 1024 * 1024
+EVAL_PROGRESS_PREFIX = "[EVAL_PROGRESS] "
+
+
+def emit_eval_progress(phase: str, **details: Any) -> None:
+    """Emit one machine-readable line while preserving normal terminal logs."""
+    event = {"phase": phase, **details}
+    encoded = json.dumps(event, sort_keys=True, separators=(",", ":"))
+    print(f"{EVAL_PROGRESS_PREFIX}{encoded}", flush=True)
+
 
 # The standalone generation server currently exposes the OpenAI chat endpoint.
 # Supplying this template makes that endpoint behave as a raw completion API:
@@ -56,6 +65,7 @@ def completion_text(result) -> str:
     if hasattr(choice, "text"):
         return choice.text or ""
     return choice.message.content or ""
+
 
 DATASET_ALIASES = {
     "math-ai/aime25": "aime25",
@@ -400,11 +410,23 @@ def _generate_responses_with_server(
     seed: int,
     force_base_prompt: bool,
     tokenizer_path: Optional[str],
+    dataset_name: str = "",
+    dataset_index: int = 0,
+    dataset_total: int = 0,
 ):
     dataset = pd.read_parquet(dataset_path)
     chat_lst = dataset[prompt_key].tolist()
     chat_lst = [chat.tolist() if hasattr(chat, "tolist") else chat for chat in chat_lst]
     chat_numpy = np.array(chat_lst, dtype=object)
+    emit_eval_progress(
+        "dataset_loaded",
+        dataset=dataset_name,
+        dataset_index=dataset_index,
+        dataset_total=dataset_total,
+        problem_count=len(chat_lst),
+        sample_total=pass_k,
+        overall_fraction=(dataset_index - 1) / dataset_total if dataset_total else 0.0,
+    )
 
     sampling_params = {
         "temperature": temperature,
@@ -444,6 +466,18 @@ def _generate_responses_with_server(
     # deterministic column at a time with seed, seed+1, ..., seed+N-1.
     responses = [[] for _ in range(len(chat_lst))]
     for sample_index in range(pass_k):
+        emit_eval_progress(
+            "sample_started",
+            dataset=dataset_name,
+            dataset_index=dataset_index,
+            dataset_total=dataset_total,
+            problem_count=len(chat_lst),
+            sample_index=sample_index + 1,
+            sample_total=pass_k,
+            overall_fraction=(
+                ((dataset_index - 1) + sample_index / pass_k) / dataset_total if dataset_total else 0.0
+            ),
+        )
         sample_params = {**sampling_params, "seed": seed + sample_index}
         gen_results = asyncio.run(
             generate(
@@ -462,6 +496,20 @@ def _generate_responses_with_server(
             )
         for prompt_index, result in enumerate(results):
             responses[prompt_index].append(completion_text(result))
+        emit_eval_progress(
+            "sample_complete",
+            dataset=dataset_name,
+            dataset_index=dataset_index,
+            dataset_total=dataset_total,
+            problem_count=len(chat_lst),
+            sample_index=sample_index + 1,
+            sample_total=pass_k,
+            overall_fraction=(
+                ((dataset_index - 1) + (sample_index + 1) / pass_k) / dataset_total
+                if dataset_total
+                else 0.0
+            ),
+        )
 
     dataset["responses"] = responses
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
@@ -484,6 +532,9 @@ def generate_responses_with_server(
     force_base_prompt: bool = True,
     tokenizer_path: Optional[str] = None,
     cache_provenance: Optional[dict[str, Any]] = None,
+    dataset_name: str = "",
+    dataset_index: int = 0,
+    dataset_total: int = 0,
 ):
     _generate_responses_with_server(
         server_addresses,
@@ -499,6 +550,9 @@ def generate_responses_with_server(
         seed=seed,
         force_base_prompt=force_base_prompt,
         tokenizer_path=tokenizer_path,
+        dataset_name=dataset_name,
+        dataset_index=dataset_index,
+        dataset_total=dataset_total,
     )
     if cache_provenance is not None:
         write_generation_cache_manifest(output_path, cache_provenance)
@@ -676,6 +730,13 @@ def run_evaluation_suite(
     eval_results: dict[str, float] = {}
 
     try:
+        emit_eval_progress(
+            "server_starting",
+            dataset="",
+            dataset_index=0,
+            dataset_total=len(dataset_paths),
+            overall_fraction=0.0,
+        )
         server_handles, server_addresses, response_length = launch_generation_server(
             model_path,
             tokenizer_path,
@@ -686,11 +747,27 @@ def run_evaluation_suite(
             n_gpus_per_node=n_gpus_per_node,
             tensor_model_parallel_size=tensor_model_parallel_size,
         )
+        emit_eval_progress(
+            "server_ready",
+            dataset="",
+            dataset_index=0,
+            dataset_total=len(dataset_paths),
+            overall_fraction=0.0,
+        )
 
-        for dataset_name, dataset_path in dataset_paths.items():
+        dataset_total = len(dataset_paths)
+        for dataset_index, (dataset_name, dataset_path) in enumerate(dataset_paths.items(), start=1):
             if not dataset_path or not os.path.exists(dataset_path):
                 logger.warning("Skipping evaluation dataset %s because %s does not exist", dataset_name, dataset_path)
                 continue
+            emit_eval_progress(
+                "dataset_started",
+                dataset=dataset_name,
+                dataset_index=dataset_index,
+                dataset_total=dataset_total,
+                sample_total=pass_k,
+                overall_fraction=(dataset_index - 1) / dataset_total,
+            )
 
             gen_output = os.path.join(output_dir, f"{dataset_name}_pass{pass_k}_generation.parquet")
             prompt_length = int(os.environ.get("EVAL_PROMPT_LENGTH", str(DEFAULT_PROMPT_LENGTH)))
@@ -721,6 +798,15 @@ def run_evaluation_suite(
                 )
             ):
                 logger.info("  Reusing existing generated responses for %s: %s", dataset_name, gen_output)
+                emit_eval_progress(
+                    "generation_cache_reused",
+                    dataset=dataset_name,
+                    dataset_index=dataset_index,
+                    dataset_total=dataset_total,
+                    sample_index=pass_k,
+                    sample_total=pass_k,
+                    overall_fraction=dataset_index / dataset_total,
+                )
             else:
                 logger.info("  Generating responses for %s with pass@%s...", dataset_name, pass_k)
                 generate_responses_with_server(
@@ -738,9 +824,21 @@ def run_evaluation_suite(
                     force_base_prompt=force_base_prompt,
                     tokenizer_path=tokenizer_path,
                     cache_provenance=cache_provenance,
+                    dataset_name=dataset_name,
+                    dataset_index=dataset_index,
+                    dataset_total=dataset_total,
                 )
 
             logger.info("  Computing scores for %s...", dataset_name)
+            emit_eval_progress(
+                "scoring_started",
+                dataset=dataset_name,
+                dataset_index=dataset_index,
+                dataset_total=dataset_total,
+                sample_index=pass_k,
+                sample_total=pass_k,
+                overall_fraction=dataset_index / dataset_total,
+            )
             accuracy = evaluate_generated_output(
                 dataset_name,
                 gen_output,
@@ -751,7 +849,23 @@ def run_evaluation_suite(
                 model_path=model_path,
             )
             eval_results[dataset_name] = accuracy
+            emit_eval_progress(
+                "dataset_complete",
+                dataset=dataset_name,
+                dataset_index=dataset_index,
+                dataset_total=dataset_total,
+                sample_index=pass_k,
+                sample_total=pass_k,
+                overall_fraction=dataset_index / dataset_total,
+            )
 
+        emit_eval_progress(
+            "suite_complete",
+            dataset="",
+            dataset_index=dataset_total,
+            dataset_total=dataset_total,
+            overall_fraction=1.0,
+        )
         return eval_results
     finally:
         shutdown_generation_server(server_handles)
