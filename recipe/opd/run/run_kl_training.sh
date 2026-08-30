@@ -22,6 +22,7 @@ set -o pipefail
 
 RUN_KL_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$RUN_KL_SCRIPT_DIR/hf_export_validation.sh"
+source "$RUN_KL_SCRIPT_DIR/wandb_run_lifecycle.sh"
 
 sanitize_path_component() {
     local value="${1:-unknown}"
@@ -5072,6 +5073,9 @@ EOF
 on_training_exit() {
     local status="$?"
     stop_managed_resident_y_o_server || true
+    if ! finish_wandb_run_guardian "$status"; then
+        status=1
+    fi
     notify_training_exit "$status"
     exit "$status"
 }
@@ -5082,6 +5086,8 @@ on_training_exit() {
 
 trap on_training_exit EXIT
 
+export WANDB_RUN_NAME="${WANDB_RUN_NAME:-$WANDB_RUN_NAME_BASE}"
+start_wandb_run_guardian "$MODEL_SAVE_BASE_DIR"
 print_base_configuration
 notify_training_start
 

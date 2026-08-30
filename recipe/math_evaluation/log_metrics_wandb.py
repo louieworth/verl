@@ -14,6 +14,8 @@ import os
 from verl.utils.wandb_metadata import (
     merge_opd_wandb_config,
     wandb_init_metadata_from_env,
+    wandb_process_settings,
+    wandb_shared_run_enabled,
 )
 
 
@@ -119,10 +121,12 @@ def main() -> None:
         id=args.run_id,
         name=os.environ.get("WANDB_RUN_NAME") or None,
         resume=args.resume,
-        mode=os.environ.get("WANDB_MODE", "online"),
         reinit=True,
         config=merge_opd_wandb_config(None),
+        settings=wandb_process_settings(wandb, label="eval-metrics"),
     )
+    if not wandb_shared_run_enabled():
+        init_kwargs["mode"] = os.environ.get("WANDB_MODE", "online")
     init_kwargs.update(wandb_init_metadata_from_env())
     run = wandb.init(**init_kwargs)
     try:

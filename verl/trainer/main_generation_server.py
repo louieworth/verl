@@ -98,30 +98,86 @@ def read_parquet_compat(path: str) -> pd.DataFrame:
         return pd.concat(batches, axis=0, ignore_index=True)
 
 
-async def start_server(config):
+async def _shutdown_rollout_servers_async(rollout_servers) -> None:
+    server_actors = [server for replica in rollout_servers for server in replica.servers]
+    worker_actors = [worker for replica in rollout_servers for worker in replica.workers]
+    placement_groups = [
+        placement_group
+        for replica in rollout_servers
+        if replica.resource_pool is not None
+        for placement_group in (replica.resource_pool.pgs or [])
+    ]
+
+    shutdown_refs = []
+    for server in server_actors:
+        try:
+            shutdown_refs.append(server.shutdown.remote())
+        except AttributeError:
+            # Non-vLLM rollout backends retain their existing force-stop path.
+            continue
+
+    if shutdown_refs:
+        try:
+            shutdown_results = await asyncio.wait_for(
+                asyncio.gather(
+                    *shutdown_refs,
+                    return_exceptions=True,
+                ),
+                timeout=30,
+            )
+            for result in shutdown_results:
+                if isinstance(result, BaseException):
+                    print(f"Warning: vLLM graceful shutdown failed: {result}")
+        except TimeoutError:
+            print("Warning: vLLM graceful shutdown timed out after 30 seconds")
+
+    for actor in server_actors + worker_actors:
+        ray.kill(actor, no_restart=True)
+    for placement_group in placement_groups:
+        ray.util.remove_placement_group(placement_group)
+
+
+def shutdown_rollout_servers(rollout_servers) -> None:
+    if rollout_servers and ray.is_initialized():
+        asyncio.run(_shutdown_rollout_servers_async(rollout_servers))
+
+
+async def start_server(config, *, return_replicas: bool = False):
     tp_size = config.actor_rollout_ref.rollout.tensor_model_parallel_size
     num_replicas = (config.trainer.n_gpus_per_node * config.trainer.nnodes) // tp_size
     rollout_config = config.actor_rollout_ref.rollout
     model_config = config.actor_rollout_ref.model
-    # create standalone rollout server
     rollout_server_class = get_rollout_replica_class(config.actor_rollout_ref.rollout.name)
-    rollout_servers = [
-        rollout_server_class(
-            replica_rank=replica_rank,
-            config=rollout_config,
-            model_config=model_config,
-            gpus_per_node=config.trainer.n_gpus_per_node,
-        )
-        for replica_rank in range(num_replicas)
-    ]
-    await asyncio.gather(*[server.init_standalone() for server in rollout_servers])
+    max_attempts = max(1, int(os.environ.get("VERL_ROLLOUT_START_ATTEMPTS", "2")))
 
-    server_handles = [server._server_handle for server in rollout_servers]
-    server_addresses = [server._server_address for server in rollout_servers]
-    assert len(server_handles) == num_replicas
-    assert len(server_addresses) == num_replicas
+    for attempt in range(1, max_attempts + 1):
+        rollout_servers = [
+            rollout_server_class(
+                replica_rank=replica_rank,
+                config=rollout_config,
+                model_config=model_config,
+                gpus_per_node=config.trainer.n_gpus_per_node,
+            )
+            for replica_rank in range(num_replicas)
+        ]
+        try:
+            await asyncio.gather(*[server.init_standalone() for server in rollout_servers])
+        except Exception as exc:
+            await _shutdown_rollout_servers_async(rollout_servers)
+            if not isinstance(exc, ray.exceptions.ActorDiedError) or attempt == max_attempts:
+                raise
+            print(
+                f"vLLM rollout actor died during startup, retrying ({attempt}/{max_attempts}): {exc!r}",
+                flush=True,
+            )
+            await asyncio.sleep(2)
+            continue
 
-    return server_handles, server_addresses
+        server_handles = [server._server_handle for server in rollout_servers]
+        server_addresses = [server._server_address for server in rollout_servers]
+        assert len(server_handles) == num_replicas
+        assert len(server_addresses) == num_replicas
+        return (rollout_servers if return_replicas else server_handles), server_addresses
 
 
 async def submit_request(server_address, max_retries=5, retry_base_delay=2.0, **chat_complete_request):
@@ -369,26 +425,28 @@ def main(config):
         chat_lst = [chat.tolist() if hasattr(chat, "tolist") else chat for chat in chat_lst]
         chat_numpy = np.array(chat_lst)
 
-        # start native server
-        server_handles, server_addresses = asyncio.run(start_server(config))
+        rollout_servers = []
+        try:
+            # start native server
+            rollout_servers, server_addresses = asyncio.run(start_server(config, return_replicas=True))
 
-        # run generate
-        request_model = config.actor_rollout_ref.model.path
-        if config.actor_rollout_ref.model.get("lora_adapter_path"):
-            request_model = ROLLING_LORA_MODEL_NAME
-        gen_results = asyncio.run(
-            generate(
-                server_addresses,
-                request_model,
-                n_samples,
-                sampling_params,
-                chat_numpy,
-                deadline_epoch_seconds=generation_deadline,
+            # run generate
+            request_model = config.actor_rollout_ref.model.path
+            if config.actor_rollout_ref.model.get("lora_adapter_path"):
+                request_model = ROLLING_LORA_MODEL_NAME
+            gen_results = asyncio.run(
+                generate(
+                    server_addresses,
+                    request_model,
+                    n_samples,
+                    sampling_params,
+                    chat_numpy,
+                    deadline_epoch_seconds=generation_deadline,
+                )
             )
-        )
-        for server_handle in server_handles:
-            ray.kill(server_handle, no_restart=True)
-        ray.shutdown()
+        finally:
+            shutdown_rollout_servers(rollout_servers)
+            ray.shutdown()
 
         # reshape results into a numpy array
         import itertools

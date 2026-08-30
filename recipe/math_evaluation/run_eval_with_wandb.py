@@ -158,7 +158,12 @@ def main() -> None:
 
     import wandb
 
-    from verl.utils.wandb_metadata import merge_opd_wandb_config, wandb_init_metadata_from_env
+    from verl.utils.wandb_metadata import (
+        merge_opd_wandb_config,
+        wandb_init_metadata_from_env,
+        wandb_process_settings,
+        wandb_shared_run_enabled,
+    )
 
     init_kwargs = {
         "project": project,
@@ -166,11 +171,16 @@ def main() -> None:
         "id": run_id,
         "name": os.environ.get("WANDB_RUN_NAME") or None,
         "resume": os.environ.get("WANDB_RESUME", "allow"),
-        "mode": os.environ.get("WANDB_MODE", "online"),
         "reinit": True,
         "config": merge_opd_wandb_config(None),
-        "settings": wandb.Settings(console=os.environ.get("WANDB_CONSOLE", "wrap")),
+        "settings": wandb_process_settings(
+            wandb,
+            label="eval",
+            console=os.environ.get("WANDB_CONSOLE", "wrap"),
+        ),
     }
+    if not wandb_shared_run_enabled():
+        init_kwargs["mode"] = os.environ.get("WANDB_MODE", "online")
     init_kwargs.update(wandb_init_metadata_from_env())
     run = wandb.init(**init_kwargs)
     run.define_metric("global_step")

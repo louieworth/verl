@@ -15,6 +15,7 @@ fi
 export PYTHON_BIN
 source "$REPO_ROOT/recipe/opd/scripts_math/lib/model_path_validation.sh"
 source "$REPO_ROOT/recipe/opd/run/hf_export_validation.sh"
+source "$REPO_ROOT/recipe/opd/run/wandb_run_lifecycle.sh"
 
 TASK="${OPD_TASK:?OPD_TASK must be math or code}"
 FAMILY="${OPD_FAMILY:?OPD_FAMILY must be baseline, opd, or opsd}"
@@ -553,6 +554,14 @@ PYWANDBID
 )"
 }
 
+on_baseline_exit() {
+    local status="$?"
+    if ! finish_wandb_run_guardian "$status"; then
+        status=1
+    fi
+    exit "$status"
+}
+
 training_milestones() {
     local parquet_path="$1"
     local global_batch="$2"
@@ -780,6 +789,8 @@ if [ "$FAMILY" = baseline ]; then
     # persisted W&B identity here.  Distillation resolves it only after its
     # resume-matching logic has selected the correct historical state file.
     resolve_wandb_run_id
+    trap on_baseline_exit EXIT
+    start_wandb_run_guardian "$RUN_ROOT"
     case "$VARIANT" in
         base)
             if [ "$#" -gt 0 ]; then

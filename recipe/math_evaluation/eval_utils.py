@@ -24,7 +24,7 @@ from verl.trainer.generation_server_env import (
     build_generation_server_runtime_env,
     temporarily_clear_torch_launch_env,
 )
-from verl.trainer.main_generation_server import generate, start_server
+from verl.trainer.main_generation_server import generate, shutdown_rollout_servers, start_server
 
 logger = logging.getLogger(__name__)
 
@@ -692,16 +692,12 @@ def launch_generation_server(
 
     with temporarily_clear_torch_launch_env():
         ray.init(runtime_env=build_generation_server_runtime_env())
-        server_handles, server_addresses = asyncio.run(start_server(config))
-        return server_handles, server_addresses, response_length
+        rollout_servers, server_addresses = asyncio.run(start_server(config, return_replicas=True))
+        return rollout_servers, server_addresses, response_length
 
 
-def shutdown_generation_server(server_handles: list):
-    for server_handle in server_handles:
-        try:
-            ray.kill(server_handle, no_restart=True)
-        except Exception:
-            pass
+def shutdown_generation_server(rollout_servers: list):
+    shutdown_rollout_servers(rollout_servers)
     if ray.is_initialized():
         ray.shutdown()
 
@@ -726,7 +722,7 @@ def run_evaluation_suite(
 ) -> dict[str, float]:
     os.makedirs(output_dir, exist_ok=True)
 
-    server_handles = []
+    rollout_servers = []
     eval_results: dict[str, float] = {}
 
     try:
@@ -737,7 +733,7 @@ def run_evaluation_suite(
             dataset_total=len(dataset_paths),
             overall_fraction=0.0,
         )
-        server_handles, server_addresses, response_length = launch_generation_server(
+        rollout_servers, server_addresses, response_length = launch_generation_server(
             model_path,
             tokenizer_path,
             temperature=temperature,
@@ -868,7 +864,7 @@ def run_evaluation_suite(
         )
         return eval_results
     finally:
-        shutdown_generation_server(server_handles)
+        shutdown_generation_server(rollout_servers)
 
 
 def run_evaluation_on_dataset(

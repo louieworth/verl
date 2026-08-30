@@ -105,11 +105,17 @@ class Tracking:
             from verl.utils.wandb_metadata import (
                 merge_opd_wandb_config,
                 wandb_init_metadata_from_env,
+                wandb_process_settings,
             )
 
-            settings = None
+            settings_kwargs = {}
             if config and config["trainer"].get("wandb_proxy", None):
-                settings = wandb.Settings(https_proxy=config["trainer"]["wandb_proxy"])
+                settings_kwargs["https_proxy"] = config["trainer"]["wandb_proxy"]
+            settings = wandb_process_settings(
+                wandb,
+                label="trainer",
+                **settings_kwargs,
+            )
             entity = os.environ.get("WANDB_ENTITY", None)
             wandb_init_kwargs = {
                 "project": project_name,

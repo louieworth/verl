@@ -279,8 +279,11 @@ class CheckpointEngineWorker(Worker):
                 device_mesh=None,
                 **self.extra_rollout_kwargs,
             )
-        # sglang and trt-llm need device_mesh for internal communication
-        initialize_global_process_group_ray(timeout_second=None, backend="cpu:gloo")
+        # vLLM with the colocated naive backend transfers weights in-process and
+        # does not need a global torch process group. Avoid creating one Gloo
+        # rendezvous per standalone replica during rollout server startup.
+        if backend != "naive" or self.rollout_config.name in {"sglang", "trtllm"}:
+            initialize_global_process_group_ray(timeout_second=None, backend="cpu:gloo")
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     async def update_weights(self, global_steps: int = None):

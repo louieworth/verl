@@ -16,7 +16,12 @@ from numbers import Number
 from pathlib import Path
 from typing import Any
 
-from verl.utils.wandb_metadata import merge_opd_wandb_config, wandb_init_metadata_from_env
+from verl.utils.wandb_metadata import (
+    merge_opd_wandb_config,
+    wandb_init_metadata_from_env,
+    wandb_process_settings,
+    wandb_shared_run_enabled,
+)
 
 
 DEFAULT_EVAL_FRACTIONS = (0.25, 0.5, 0.75, 1.0)
@@ -263,9 +268,15 @@ def initialize_wandb_run(
         id=state.run_id,
         name=run_name or None,
         resume=os.environ.get("WANDB_RESUME", "allow"),
-        mode=mode or os.environ.get("WANDB_MODE", "online"),
         config=merge_opd_wandb_config(config),
     )
+    if wandb_shared_run_enabled():
+        init_kwargs["settings"] = wandb_process_settings(
+            wandb_client,
+            label="kl-trainer",
+        )
+    else:
+        init_kwargs["mode"] = mode or os.environ.get("WANDB_MODE", "online")
     init_kwargs.update(wandb_init_metadata_from_env())
     wandb_client.init(**init_kwargs)
     define_metric = getattr(wandb_client, "define_metric", None)

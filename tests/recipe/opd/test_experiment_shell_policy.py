@@ -13,6 +13,8 @@ TRAINING_ENTRYPOINT = ROOT / "recipe/opd/run_training.py"
 GRPO_RUNNER = ROOT / "recipe/opd/run/grpo/_run_qwen3_grpo_8h100.sh"
 GENERATION_SERVER = ROOT / "verl/trainer/main_generation_server.py"
 VLLM_SERVER = ROOT / "verl/workers/rollout/vllm_rollout/vllm_async_server.py"
+WANDB_GUARDIAN = ROOT / "recipe/opd/wandb_run_guardian.py"
+WANDB_LIFECYCLE = ROOT / "recipe/opd/run/wandb_run_lifecycle.sh"
 
 
 def _shell_function(name: str) -> str:
@@ -22,6 +24,20 @@ def _shell_function(name: str) -> str:
     end = re.search(r"(?m)^}\n", source[match.end() :])
     assert end, f"unterminated shell function {name}"
     return source[match.start() : match.end() + end.end()]
+
+
+def test_every_math_leaf_launcher_uses_canonical_dispatcher():
+    launcher_roots = [
+        ROOT / "recipe/opd/scripts_math/Baselines",
+        ROOT / "recipe/opd/scripts_math/OPD",
+        ROOT / "recipe/opd/scripts_math/OPSD",
+    ]
+    launchers = sorted(path for root in launcher_roots for path in root.glob("*/*.sh"))
+
+    assert len(launchers) == 41
+    for launcher in launchers:
+        source = launcher.read_text(encoding="utf-8")
+        assert 'scripts_math/lib/launch_common.sh' in source, launcher
 
 
 def test_shared_dispatcher_defers_math_training_eval_and_disables_wandb_tags():
@@ -164,6 +180,22 @@ def test_failed_training_flushes_wandb_before_hard_exit():
     assert finish < hard_exit
 
 
+def test_wandb_run_finishes_only_from_pipeline_exit_traps():
+    dispatcher = DISPATCHER.read_text(encoding="utf-8")
+    kl_runner = KL_RUNNER.read_text(encoding="utf-8")
+    lifecycle = WANDB_LIFECYCLE.read_text(encoding="utf-8")
+    guardian = WANDB_GUARDIAN.read_text(encoding="utf-8")
+
+    assert 'start_wandb_run_guardian "$RUN_ROOT"' in dispatcher
+    assert "trap on_baseline_exit EXIT" in dispatcher
+    assert 'start_wandb_run_guardian "$MODEL_SAVE_BASE_DIR"' in kl_runner
+    assert "trap on_training_exit EXIT" in kl_runner
+    assert 'finish_wandb_run_guardian "$status"' in dispatcher
+    assert 'finish_wandb_run_guardian "$status"' in kl_runner
+    assert "export WANDB_SHARED_RUN=1" in lifecycle
+    assert 'run.finish(exit_code=exit_code)' in guardian
+
+
 def test_ephemeral_resume_exports_evaluates_then_cleans_without_retraining():
     source = KL_RUNNER.read_text(encoding="utf-8")
     start = source.index("backfill_completed_pipeline_milestone_eval() {")
@@ -202,7 +234,8 @@ def test_isolated_student_rollout_uses_rolling_lora_adapter():
 
     generation_source = GENERATION_SERVER.read_text(encoding="utf-8")
     assert "request_model = ROLLING_LORA_MODEL_NAME" in generation_source
-    assert "ray.kill(server_handle, no_restart=True)" in generation_source
+    assert "shutdown_rollout_servers(rollout_servers)" in generation_source
+    assert "worker_actors = [worker for replica in rollout_servers for worker in replica.workers]" in generation_source
 
     vllm_source = VLLM_SERVER.read_text(encoding="utf-8")
     assert 'lora_args["lora_modules"]' in vllm_source

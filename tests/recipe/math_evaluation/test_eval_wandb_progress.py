@@ -71,6 +71,7 @@ def test_math_benchmark_wraps_terminal_and_avoids_duplicate_wandb_init():
     assert 'exec "${PYTHON_BIN}" "$SCRIPT_DIR/run_eval_with_wandb.py"' in benchmark
     assert '[ "${EVAL_WANDB_WRAPPED:-0}" != 1 ]' in benchmark
     wrapper = (ROOT / "recipe/math_evaluation/run_eval_with_wandb.py").read_text(encoding="utf-8")
+    assert 'label="eval"' in wrapper
     assert 'define_metric("eval/progress/' not in wrapper
     assert '"eval/progress/' not in wrapper
     assert '"sample_started"' in eval_utils

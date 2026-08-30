@@ -582,6 +582,21 @@ class vLLMHttpServer:
         self.task = asyncio.create_task(asyncio.to_thread(run_headless_wrapper))
         self.task.add_done_callback(on_run_headless_done)
 
+    async def shutdown(self):
+        """Stop the HTTP frontend and vLLM engine before Ray terminates the actor."""
+
+        server_task = getattr(self, "_server_task", None)
+        if server_task is not None and not server_task.done():
+            server_task.cancel()
+            await asyncio.gather(server_task, return_exceptions=True)
+
+        engine = getattr(self, "engine", None)
+        shutdown = getattr(engine, "shutdown", None)
+        if shutdown is not None:
+            result = shutdown()
+            if inspect.isawaitable(result):
+                await result
+
     async def generate(
         self,
         prompt_ids: list[int],

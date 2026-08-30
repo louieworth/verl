@@ -101,6 +101,31 @@ def wandb_init_metadata_from_env() -> dict[str, Any]:
     return metadata
 
 
+def wandb_shared_run_enabled() -> bool:
+    """Return whether a pipeline-level W&B primary owns the run state."""
+    return os.environ.get("WANDB_SHARED_RUN", "").strip().lower() in {"1", "true", "yes"}
+
+
+def wandb_process_settings(
+    wandb_client: Any,
+    *,
+    primary: bool = False,
+    label: str,
+    **settings_kwargs: Any,
+) -> Any | None:
+    """Build W&B settings for one writer in a pipeline-owned shared run."""
+    if wandb_shared_run_enabled():
+        settings_kwargs.update(
+            mode="shared",
+            x_primary=primary,
+            x_update_finish_state=primary,
+            x_label=f"{label}-{os.getpid()}",
+        )
+    if not settings_kwargs:
+        return None
+    return wandb_client.Settings(**settings_kwargs)
+
+
 def opd_experiment_config_from_env() -> dict[str, Any]:
     """Return the compact, queryable canonical experiment configuration."""
     result: dict[str, Any] = {}

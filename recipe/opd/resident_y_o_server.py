@@ -17,7 +17,7 @@ from verl.trainer.generation_server_env import (
     build_generation_server_runtime_env,
     temporarily_clear_torch_launch_env,
 )
-from verl.trainer.main_generation_server import start_server
+from verl.trainer.main_generation_server import shutdown_rollout_servers, start_server
 
 
 def str_to_bool(value: str) -> bool:
@@ -119,7 +119,7 @@ def main() -> None:
             namespace=args.ray_namespace or None,
             runtime_env=build_generation_server_runtime_env(),
         )
-        _, server_addresses = asyncio.run(start_server(config))
+        rollout_servers, server_addresses = asyncio.run(start_server(config, return_replicas=True))
 
     num_replicas = (args.nnodes * args.n_gpus_per_node) // args.tensor_model_parallel_size
     manifest = {
@@ -149,6 +149,7 @@ def main() -> None:
     signal.signal(signal.SIGINT, _request_stop)
     while not stop:
         time.sleep(5)
+    shutdown_rollout_servers(rollout_servers)
     ray.shutdown()
 
 

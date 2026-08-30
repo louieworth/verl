@@ -70,6 +70,18 @@ grep -Fq 'run_eval_with_wandb.py' \
     "$REPO_ROOT/recipe/math_evaluation/benchmark_kl_model.sh"
 grep -Fq 'EVAL_WANDB_WRAPPED' \
     "$REPO_ROOT/recipe/math_evaluation/benchmark_kl_model.sh"
+grep -Fq 'source "$REPO_ROOT/recipe/opd/run/wandb_run_lifecycle.sh"' \
+    "$REPO_ROOT/recipe/opd/run/run_experiment.sh"
+grep -Fq 'trap on_baseline_exit EXIT' \
+    "$REPO_ROOT/recipe/opd/run/run_experiment.sh"
+grep -Fq 'start_wandb_run_guardian "$RUN_ROOT"' \
+    "$REPO_ROOT/recipe/opd/run/run_experiment.sh"
+grep -Fq 'source "$RUN_KL_SCRIPT_DIR/wandb_run_lifecycle.sh"' \
+    "$REPO_ROOT/recipe/opd/run/run_kl_training.sh"
+grep -Fq 'trap on_training_exit EXIT' \
+    "$REPO_ROOT/recipe/opd/run/run_kl_training.sh"
+grep -Fq 'start_wandb_run_guardian "$MODEL_SAVE_BASE_DIR"' \
+    "$REPO_ROOT/recipe/opd/run/run_kl_training.sh"
 grep -Fq 'stop_managed_resident_y_o_server' "$REPO_ROOT/recipe/opd/run/run_kl_training.sh"
 if grep -Fq -- '--save_merged_model $save_merged_this_update' \
     "$REPO_ROOT/recipe/opd/run/run_kl_training.sh"; then
@@ -89,6 +101,7 @@ if rg -q 'canonical_wandb_tags|metadata\["tags"\]' \
 fi
 
 for launcher in "${launchers[@]}"; do
+    grep -Fq 'scripts_math/lib/launch_common.sh' "$launcher"
     grep -q '^export OPD_TASK=' "$launcher"
     grep -q '^export OPD_FAMILY=' "$launcher"
     grep -q '^export OPD_VARIANT=' "$launcher"

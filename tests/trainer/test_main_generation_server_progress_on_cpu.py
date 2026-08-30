@@ -45,6 +45,17 @@ class FakeTqdm:
         self.updates += value
 
 
+class FakeRemoteMethod:
+    def __init__(self, callback):
+        self.callback = callback
+
+    def remote(self):
+        async def run():
+            return self.callback()
+
+        return asyncio.create_task(run())
+
+
 def test_generate_per_replica_preserves_request_order_and_updates_progress(monkeypatch):
     async def fake_submit_request(server_address, **chat_complete_request):
         content = chat_complete_request["messages"][0]["content"]
@@ -144,3 +155,37 @@ def test_generate_per_replica_deadline_keeps_completed_requests(monkeypatch):
 
     assert results[:2] == ["server-0:fast", "server-0:fast"]
     assert results[2:] == [None, None]
+
+
+def test_shutdown_rollout_servers_stops_vllm_and_checkpoint_workers(monkeypatch):
+    shutdown_calls = []
+    killed = []
+    removed_placement_groups = []
+
+    server_actor = type("FakeActor", (), {})()
+    server_actor.shutdown = FakeRemoteMethod(lambda: shutdown_calls.append("server"))
+    worker_actor = type("FakeActor", (), {})()
+    placement_group = object()
+    resource_pool = type("FakeResourcePool", (), {"pgs": [placement_group]})()
+    replica = type(
+        "FakeReplica",
+        (),
+        {"servers": [server_actor], "workers": [worker_actor], "resource_pool": resource_pool},
+    )()
+
+    monkeypatch.setattr(
+        main_generation_server.ray,
+        "kill",
+        lambda actor, no_restart: killed.append((actor, no_restart)),
+    )
+    monkeypatch.setattr(
+        main_generation_server.ray.util,
+        "remove_placement_group",
+        removed_placement_groups.append,
+    )
+
+    asyncio.run(main_generation_server._shutdown_rollout_servers_async([replica]))
+
+    assert shutdown_calls == ["server"]
+    assert killed == [(server_actor, True), (worker_actor, True)]
+    assert removed_placement_groups == [placement_group]

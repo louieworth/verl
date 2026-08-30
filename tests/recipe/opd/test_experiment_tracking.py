@@ -21,6 +21,7 @@ from recipe.opd.experiment_tracking import (
     resolve_wandb_run_state,
 )
 from recipe.opd.kl_trainer import KLTrainer, token_entropy_from_logits
+from verl.utils.wandb_metadata import wandb_process_settings
 
 
 class FakeWandb:
@@ -31,6 +32,10 @@ class FakeWandb:
 
     def init(self, **kwargs):
         self.init_kwargs = kwargs
+
+    @staticmethod
+    def Settings(**kwargs):
+        return kwargs
 
     def define_metric(self, *args, **kwargs):
         self.defined_metrics.append((args, kwargs))
@@ -117,6 +122,7 @@ def test_wandb_state_rejects_conflicting_experiment_identity(tmp_path):
 def test_initialize_wandb_resumes_persisted_run(monkeypatch, tmp_path):
     monkeypatch.delenv("WANDB_RUN_ID", raising=False)
     monkeypatch.delenv("WANDB_RESUME", raising=False)
+    monkeypatch.delenv("WANDB_SHARED_RUN", raising=False)
     monkeypatch.delenv("WANDB_TAGS", raising=False)
     monkeypatch.delenv("WANDB_GROUP", raising=False)
     monkeypatch.delenv("WANDB_JOB_TYPE", raising=False)
@@ -182,6 +188,17 @@ def test_initialize_wandb_attaches_group_and_config_but_no_tags(monkeypatch, tmp
         "pipeline_ephemeral_models": True,
         "pipeline_defer_milestone_evals": True,
     }
+
+
+def test_shared_wandb_worker_cannot_finish_pipeline_run(monkeypatch):
+    monkeypatch.setenv("WANDB_SHARED_RUN", "1")
+
+    settings = wandb_process_settings(FakeWandb(), label="trainer")
+
+    assert settings["mode"] == "shared"
+    assert settings["x_primary"] is False
+    assert settings["x_update_finish_state"] is False
+    assert settings["x_label"].startswith("trainer-")
 
 
 def test_eval_metrics_are_flattened_and_logged_at_explicit_step():

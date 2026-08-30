@@ -14,7 +14,7 @@
 
 import os
 
-from recipe.opd import eval_utils
+from recipe.math_evaluation import eval_utils
 from verl.trainer.generation_server_env import (
     TORCH_LAUNCH_ENV_KEYS,
     build_generation_server_runtime_env,
@@ -42,7 +42,8 @@ def test_launch_generation_server_sanitizes_torchrun_env(monkeypatch):
         observed["ray_init_env"] = {key: os.environ.get(key) for key in TORCH_LAUNCH_ENV_KEYS}
         observed["runtime_env"] = runtime_env
 
-    async def fake_start_server(config):
+    async def fake_start_server(config, *, return_replicas):
+        assert return_replicas is True
         observed["start_server_env"] = {key: os.environ.get(key) for key in TORCH_LAUNCH_ENV_KEYS}
         observed["config"] = config
         return ["server-handle"], ["127.0.0.1:8000"]

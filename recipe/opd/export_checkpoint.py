@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import ctypes
 import errno
+import fnmatch
 import gc
 import json
 import os
@@ -79,26 +80,59 @@ def strict_load(target_dir: Path, trust_remote_code: bool) -> None:
         raise RuntimeError(f"Exported model failed strict load validation: {problems}")
 
 
-def merge_lora_adapter(target_dir: Path, trust_remote_code: bool) -> bool:
-    adapter_dir = target_dir / "lora_adapter"
+def _is_root_model_weight(name: str) -> bool:
+    return any(
+        fnmatch.fnmatch(name, pattern)
+        for pattern in (
+            "model.safetensors",
+            "model.safetensors.index.json",
+            "model-*-of-*.safetensors",
+            "pytorch_model.bin",
+            "pytorch_model.bin.index.json",
+            "pytorch_model-*-of-*.bin",
+        )
+    )
+
+
+def _copy_hf_assets(source_dir: Path, output_dir: Path) -> None:
+    """Copy tokenizer, config, and adapter assets without copying root weights."""
+
+    for source in source_dir.iterdir():
+        if _is_root_model_weight(source.name):
+            continue
+        destination = output_dir / source.name
+        if source.is_dir():
+            shutil.copytree(source, destination)
+        else:
+            shutil.copy2(source, destination)
+
+
+def merge_lora_adapter(source_dir: Path, output_dir: Path, trust_remote_code: bool) -> bool:
+    if source_dir.resolve() == output_dir.resolve():
+        raise ValueError("LoRA merge source and output directories must differ")
+
+    adapter_dir = source_dir / "lora_adapter"
     if not (adapter_dir / "adapter_config.json").is_file():
         return False
+
+    _copy_hf_assets(source_dir, output_dir)
 
     import torch
     from peft import PeftModel
     from transformers import AutoModelForCausalLM
 
     base = AutoModelForCausalLM.from_pretrained(
-        str(target_dir),
+        str(source_dir),
         torch_dtype=torch.bfloat16,
         low_cpu_mem_usage=True,
         trust_remote_code=trust_remote_code,
     )
     peft_model = PeftModel.from_pretrained(base, str(adapter_dir), is_trainable=False)
     merged = peft_model.merge_and_unload(safe_merge=True)
-    # Saving back into the same directory keeps tokenizer/config assets and the
-    # adapter provenance while replacing the root weights with full weights.
-    merged.save_pretrained(str(target_dir), safe_serialization=True)
+    # Safetensors loaded with low_cpu_mem_usage may remain mmap-backed. Never
+    # truncate or replace those source shards while the merged model can still
+    # reference their pages, because doing so can terminate Python with SIGBUS.
+    merged.save_pretrained(str(output_dir), safe_serialization=True)
     del merged, peft_model, base
     gc.collect()
     return True
@@ -174,7 +208,8 @@ def main() -> None:
     ensure_lora_metadata(checkpoint_dir, args.lora_rank, args.lora_alpha)
 
     target_dir.parent.mkdir(parents=True, exist_ok=True)
-    staging_dir = Path(tempfile.mkdtemp(prefix=f".{target_dir.name}.staging.", dir=target_dir.parent))
+    unmerged_dir = Path(tempfile.mkdtemp(prefix=f".{target_dir.name}.unmerged.", dir=target_dir.parent))
+    publish_dir = unmerged_dir
     try:
         command = [
             sys.executable,
@@ -188,18 +223,23 @@ def main() -> None:
             "--hf_model_config_path",
             args.base_model,
             "--target_dir",
-            str(staging_dir),
+            str(unmerged_dir),
         ]
         if args.trust_remote_code:
             command.append("--trust-remote-code")
         subprocess.run(command, check=True)
 
-        lora_merged = merge_lora_adapter(staging_dir, args.trust_remote_code)
+        adapter_config = unmerged_dir / "lora_adapter" / "adapter_config.json"
+        if adapter_config.is_file():
+            publish_dir = Path(tempfile.mkdtemp(prefix=f".{target_dir.name}.staging.", dir=target_dir.parent))
+            lora_merged = merge_lora_adapter(unmerged_dir, publish_dir, args.trust_remote_code)
+        else:
+            lora_merged = False
         if args.lora_rank > 0 and not lora_merged:
             raise RuntimeError(
-                f"LoRA rank {args.lora_rank} was requested but no adapter was exported under {staging_dir}"
+                f"LoRA rank {args.lora_rank} was requested but no adapter was exported under {unmerged_dir}"
             )
-        strict_load(staging_dir, args.trust_remote_code)
+        strict_load(publish_dir, args.trust_remote_code)
 
         marker = {
             "schema_version": EXPORT_SCHEMA,
@@ -209,19 +249,21 @@ def main() -> None:
             "lora_alpha": args.lora_alpha,
             "lora_merged_into_root": lora_merged,
         }
-        marker_path = staging_dir / "opd_export.json"
+        marker_path = publish_dir / "opd_export.json"
         temporary = marker_path.with_suffix(f".tmp.{os.getpid()}")
         temporary.write_text(json.dumps(marker, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         os.replace(temporary, marker_path)
-        atomic_publish_directory(staging_dir, target_dir)
+        atomic_publish_directory(publish_dir, target_dir)
     finally:
-        # After an exchange this path contains the previous committed target;
-        # after any pre-publish failure it contains only private partial output.
-        if _path_exists(staging_dir):
+        # After an exchange publish_dir contains the previous committed target.
+        # unmerged_dir remains a private, read-only merge input for LoRA exports.
+        for temporary_dir in {unmerged_dir, publish_dir}:
+            if not _path_exists(temporary_dir):
+                continue
             try:
-                _remove_path(staging_dir)
+                _remove_path(temporary_dir)
             except OSError as exc:
-                print(f"WARNING: could not remove export staging path {staging_dir}: {exc}", file=sys.stderr)
+                print(f"WARNING: could not remove export staging path {temporary_dir}: {exc}", file=sys.stderr)
     print(f"Strict full-model export complete: {target_dir}")
 
 
