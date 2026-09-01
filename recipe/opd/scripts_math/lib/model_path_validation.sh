@@ -95,3 +95,24 @@ PY
 
     printf '%s\n' "$resolved_path"
 }
+
+opd_resolve_teacher_model_path() {
+    local requested_path="$1"
+    local label="${2:-TEACHER_MODEL_PATH}"
+    if [ -z "$requested_path" ]; then
+        opd_model_path_error "$label cannot be empty"
+        return 2
+    fi
+
+    if [ -d "$requested_path" ]; then
+        (cd "$requested_path" && pwd -P)
+    else
+        printf '%s\n' "$requested_path"
+    fi
+}
+
+opd_teacher_model_alias() {
+    local model_path="$1"
+    model_path="${model_path%/}"
+    printf '%s\n' "${model_path##*/}"
+}

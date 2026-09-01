@@ -21,6 +21,7 @@ _CONFIG_ENV_FIELDS = {
     "OPD_MODEL_SIZE": "model_size",
     "MODEL_ALIAS": "model",
     "TEACHER_MODEL": "teacher_model",
+    "TEACHER_MODEL_PATH": "teacher_model_path",
     "DISTILL_MODE": "distill_mode",
     "KL_TYPE": "kl_type",
     "KL_METHOD": "kl_method",

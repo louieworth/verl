@@ -303,6 +303,10 @@ class KLTrainer:
             self.config.student_model_path,
             self.config.teacher_model_path,
         ]
+        if any(
+            identifier and "Qwen3-30B-A3B" in identifier for identifier in model_identifiers
+        ):
+            return {"transformer_layer_cls_to_wrap": ["Qwen3MoeDecoderLayer"]}
         if any(identifier and "Qwen3" in identifier for identifier in model_identifiers):
             return {"transformer_layer_cls_to_wrap": ["Qwen3DecoderLayer"]}
         return {}

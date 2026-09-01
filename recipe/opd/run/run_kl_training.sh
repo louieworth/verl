@@ -211,8 +211,8 @@ if [ "$DISTILL_MODE" = "opsd" ]; then
         echo "ERROR: OPSD is self-distillation: TEACHER_MODEL_PATH must be the frozen step-0 MODEL_PATH." >&2
         exit 1
     fi
-elif [ "$TEACHER_MODEL_PATH" != "Qwen/Qwen3-14B" ] && [ ! -d "$TEACHER_MODEL_PATH" ]; then
-    echo "ERROR: OPD teacher must be Qwen/Qwen3-14B or a local snapshot of that checkpoint." >&2
+elif [ -z "$TEACHER_MODEL_PATH" ]; then
+    echo "ERROR: OPD requires TEACHER_MODEL_PATH." >&2
     exit 1
 fi
 USE_LORA=${USE_LORA:-true}

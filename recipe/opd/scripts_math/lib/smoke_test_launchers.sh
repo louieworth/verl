@@ -229,6 +229,14 @@ if grep -q 'Preparing canonical code' <<<"$math_topk"; then
     exit 1
 fi
 
+opd_30b_teacher="$(
+    TEACHER_MODEL_PATH=Qwen/Qwen3-30B-A3B-Instruct-2507 DRY_RUN=1 \
+        bash "$OPD_ROOT/scripts_math/OPD/4B/vanilla.sh"
+)"
+grep -q 'teacher: Qwen/Qwen3-30B-A3B-Instruct-2507' <<<"$opd_30b_teacher"
+grep -q 'teacher thinking:    false' <<<"$opd_30b_teacher"
+grep -q 'teacher supervision: plain_completion' <<<"$opd_30b_teacher"
+
 code_clip="$(DRY_RUN=1 bash "$OPD_ROOT/script_code/OPSD/4B/clip.sh")"
 grep -q 'task: code' <<<"$code_clip"
 grep -q 'teacher: Qwen/Qwen3-4B-Base' <<<"$code_clip"

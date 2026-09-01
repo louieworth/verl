@@ -140,14 +140,11 @@ launch_experiment() {
     case "$family" in
         opd)
             teacher_model_path="$(
-                opd_resolve_base_model_path \
+                opd_resolve_teacher_model_path \
                     "${TEACHER_MODEL_PATH:-Qwen/Qwen3-14B}" \
-                    Qwen/Qwen3-14B \
-                    5120 \
-                    40 \
                     TEACHER_MODEL_PATH
             )" || return $?
-            teacher_model_alias="Qwen3-14B"
+            teacher_model_alias="$(opd_teacher_model_alias "$teacher_model_path")" || return $?
             export TEACHER_MODEL_PATH="$teacher_model_path"
             export TEACHER_MODEL="$teacher_model_alias"
             export OPD_TEACHER_MODEL_PATH="$teacher_model_path"

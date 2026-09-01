@@ -226,15 +226,13 @@ if [ "$FAMILY" = baseline ]; then
     export TEACHER_MODEL=""
 elif [ "$FAMILY" = opd ]; then
     TEACHER_MODEL_PATH="$(
-        opd_resolve_base_model_path \
+        opd_resolve_teacher_model_path \
             "${TEACHER_MODEL_PATH:-Qwen/Qwen3-14B}" \
-            Qwen/Qwen3-14B \
-            5120 \
-            40 \
             TEACHER_MODEL_PATH
     )" || exit $?
     export TEACHER_MODEL_PATH
-    export TEACHER_MODEL="${TEACHER_MODEL:-Qwen3-14B}"
+    TEACHER_MODEL="$(opd_teacher_model_alias "$TEACHER_MODEL_PATH")" || exit $?
+    export TEACHER_MODEL
 else
     TEACHER_MODEL_PATH="$(
         opd_resolve_base_model_path \

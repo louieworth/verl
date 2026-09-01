@@ -53,11 +53,15 @@ def test_wandb_metadata_is_available_from_the_installed_verl_namespace(monkeypat
 
 def test_wandb_metadata_includes_teacher_thinking_only_for_opd(monkeypatch):
     monkeypatch.setenv("OPD_FAMILY", "opd")
+    monkeypatch.setenv("TEACHER_MODEL", "Qwen3-30B-A3B-Instruct-2507")
+    monkeypatch.setenv("TEACHER_MODEL_PATH", "Qwen/Qwen3-30B-A3B-Instruct-2507")
     monkeypatch.setenv("TEACHER_ENABLE_THINKING", "false")
     monkeypatch.setenv("TEACHER_THINKING_NAME_TAG", "teacher-thinking-false")
     monkeypatch.setenv("TEACHER_SUPERVISION_RENDER_MODE", "plain_completion")
     monkeypatch.setenv("TEACHER_ROLLOUT_RENDER_MODE", "plain_completion")
     config = merge_opd_wandb_config({})["opd_experiment"]
+    assert config["teacher_model"] == "Qwen3-30B-A3B-Instruct-2507"
+    assert config["teacher_model_path"] == "Qwen/Qwen3-30B-A3B-Instruct-2507"
     assert config["teacher_enable_thinking"] is False
     assert config["teacher_thinking_name_tag"] == "teacher-thinking-false"
     assert config["teacher_supervision_render_mode"] == "plain_completion"
