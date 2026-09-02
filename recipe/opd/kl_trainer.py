@@ -297,17 +297,9 @@ class KLTrainer:
         )
 
     def _build_wrap_policy(self, model_path: str) -> dict[str, list[str]]:
-        model_identifiers = [
-            model_path,
-            self.config.base_model_name,
-            self.config.student_model_path,
-            self.config.teacher_model_path,
-        ]
-        if any(
-            identifier and "Qwen3-30B-A3B" in identifier for identifier in model_identifiers
-        ):
+        if "Qwen3-30B-A3B" in model_path:
             return {"transformer_layer_cls_to_wrap": ["Qwen3MoeDecoderLayer"]}
-        if any(identifier and "Qwen3" in identifier for identifier in model_identifiers):
+        if "Qwen3" in model_path:
             return {"transformer_layer_cls_to_wrap": ["Qwen3DecoderLayer"]}
         return {}
 

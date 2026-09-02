@@ -326,3 +326,23 @@ def test_kl_trainer_engine_config_uses_batching_config(monkeypatch):
     assert engine_config.use_dynamic_bsz is False
     assert engine_config.micro_batch_size_per_gpu == 1
     assert engine_config.infer_micro_batch_size_per_gpu == 1
+
+
+@pytest.mark.parametrize(
+    "student_path",
+    ["Qwen/Qwen3-4B-Base", "Qwen/Qwen3-8B-Base"],
+)
+def test_kl_trainer_wrap_policy_uses_only_current_model(student_path):
+    trainer = object.__new__(KLTrainer)
+    trainer.config = SimpleNamespace(
+        base_model_name=student_path.rsplit("/", 1)[-1],
+        student_model_path=student_path,
+        teacher_model_path="Qwen/Qwen3-30B-A3B-Instruct-2507",
+    )
+
+    assert trainer._build_wrap_policy(student_path) == {
+        "transformer_layer_cls_to_wrap": ["Qwen3DecoderLayer"]
+    }
+    assert trainer._build_wrap_policy(trainer.config.teacher_model_path) == {
+        "transformer_layer_cls_to_wrap": ["Qwen3MoeDecoderLayer"]
+    }
