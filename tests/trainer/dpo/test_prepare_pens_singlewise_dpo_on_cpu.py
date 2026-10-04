@@ -18,13 +18,13 @@ from pathlib import Path
 
 import pyarrow.parquet as pq
 
-from recipe.dpo.data.prepare_pens_singlewise_dpo import (
+from recipe.dpo.prepare_data.prepare_pens_singlewise_dpo import (
     build_split,
     compute_floor_quantile,
     load_news_lookup,
     normalize_pos_weight,
 )
-from recipe.dpo.sample_id import compute_sample_id_from_record
+from recipe.dpo.prepare_data.sample_id import compute_sample_id_from_record
 
 
 class TestPreparePENSSingleWiseDPO(unittest.TestCase):

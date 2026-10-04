@@ -30,7 +30,13 @@ from transformers.dynamic_module_utils import custom_object_save
 
 from verl.utils.device import is_cuda_available
 from verl.utils.fs import copy_to_local, is_non_local, local_mkdir_safe
-from verl.utils.fsdp_utils import fsdp_version, get_fsdp_full_state_dict, get_fsdp_state_ctx
+from verl.utils.fsdp_utils import (
+    fsdp_version,
+    get_fsdp_full_state_dict,
+    get_fsdp_state_ctx,
+    merged_lora_context,
+    normalize_peft_param_name,
+)
 from verl.utils.logger import log_with_rank
 from verl.utils.transformers_compat import get_auto_model_for_vision2seq
 
@@ -304,7 +310,23 @@ class FSDPCheckpointManager(BaseCheckpointManager):
         if self.should_save_hf_model:
             # Only rank 0 will save hf model and,
             # offload to cpu to save LLMs which may be too large to fit in one GPU
-            state_dict = get_fsdp_full_state_dict(self.model, offload_to_cpu=True, rank0_only=True)
+            peft_model = getattr(self.model, "_fsdp_wrapped_module", self.model)
+            if hasattr(peft_model, "peft_config"):
+                # A raw PEFT state dict contains adapter wrapper names and is
+                # not directly loadable by AutoModelForCausalLM. Temporarily
+                # merge LoRA into the base weights, gather them, then restore
+                # the trainable adapter so checkpointing does not alter
+                # continued training.
+                with merged_lora_context(self.model, backup_adapters=True):
+                    state_dict = get_fsdp_full_state_dict(
+                        self.model, offload_to_cpu=True, rank0_only=True
+                    )
+                if self.rank == 0:
+                    state_dict = normalize_peft_param_name(state_dict)
+            else:
+                state_dict = get_fsdp_full_state_dict(
+                    self.model, offload_to_cpu=True, rank0_only=True
+                )
 
             if self.rank == 0:
                 hf_local_path = os.path.join(local_path, "huggingface")

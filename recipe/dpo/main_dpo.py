@@ -22,7 +22,7 @@ from recipe.dpo.core_algos import is_pointwise_dpo_loss, is_prospect_dpo_loss, r
 from recipe.dpo.collate import pointwise_dynamic_prompt_collate_fn
 from recipe.dpo.dpo_trainer import RayDPOTrainer
 from recipe.dpo.pointwise_dataset import PointwiseDPODataset
-from recipe.dpo.reference_logps_materializer import maybe_materialize_pointwise_reference_logps
+from recipe.dpo.prepare_data.reference_logps_materializer import maybe_materialize_pointwise_reference_logps
 from recipe.dpo.recipe_worker import RecipeDPOWorker
 from recipe.dpo.sampler import LengthBucketSampler
 from recipe.dpo.singlewise_dataset import SingleWiseDPODataset
@@ -52,9 +52,6 @@ class DPOTaskRunner:
             raise NotImplementedError("Offline DPO currently supports only FSDP legacy workers")
 
         loss_type = config.algorithm.get("dpo_loss_type", "sigmoid")
-        if is_pointwise_dpo_loss(loss_type) and config.algorithm.get("reference_free", False):
-            raise ValueError("Point-wise offline DPO variants require algorithm.reference_free=false")
-
         if is_pointwise_dpo_loss(loss_type) and requires_reference_model(
             loss_type,
             config.algorithm.get("reference_free", False),
@@ -163,7 +160,14 @@ class DPOTaskRunner:
 def main(config):
     auto_set_device(config)
     config = migrate_legacy_reward_impl(config)
-    run_ppo(config, task_runner_class=ray.remote(num_cpus=1)(DPOTaskRunner))
+    try:
+        run_ppo(config, task_runner_class=ray.remote(num_cpus=1)(DPOTaskRunner))
+    finally:
+        # Interleaved PENS runs launch generation eval after each training
+        # segment. Tear down all training actors before the shell proceeds so
+        # vLLM receives the full GPU set.
+        if ray.is_initialized():
+            ray.shutdown()
 
 
 if __name__ == "__main__":

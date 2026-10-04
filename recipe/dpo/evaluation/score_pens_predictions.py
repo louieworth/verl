@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pandas as pd
 
-STRUCTURED_PARSE_STATUSES = {"fenced_json", "inline_json", "boxed"}
+STRUCTURED_PARSE_STATUSES = {"plain_text"}
 
 
 def load_table(path: Path) -> pd.DataFrame:

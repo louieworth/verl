@@ -125,12 +125,12 @@ human rewrites, so the scorer collapses them into a single example with multiple
 - `gold_headlines`: all personalized gold titles for that pair
 - scoring rule: compute ROUGE against each gold title and keep the maximum score for that pair
 
-This directory provides:
+The data preparation and evaluation directories provide:
 
 1. download the dataset
 
 ```bash
-bash recipe/dpo/evaluation/download_pens_data.sh
+bash recipe/dpo/prepare_data/download_pens_data.sh
 ```
 
 2. score your predictions directly against the official `personalized_test.tsv`
@@ -151,16 +151,16 @@ The scorer matches rows by `user_id` + `news_id`.
 If your prediction file only contains one generated title per line, `.txt` input is also supported and
 will be aligned by row order when the prediction count matches the reference count.
 
-3. optionally flatten `personalized_test.tsv` into a row-wise inspection file
+3. prepare evaluation prompts and an optional row-wise inspection file
 
 ```bash
-python3 recipe/dpo/evaluation/prepare_pens_eval_examples.py \
-  --news-tsv /path/to/PENS/news.tsv \
-  --test-tsv /path/to/personalized_test.tsv \
+python3 recipe/dpo/prepare_data/prepare_pens_personalized_eval.py \
+  --news-file /path/to/PENS/news.tsv \
+  --test-file /path/to/personalized_test.tsv \
   --output /path/to/pens_eval_examples.jsonl
 ```
 
-The flattened file is optional. It is only useful if you want a per-row debugging file with:
+Use `--output /path/to/prompts.parquet` for the generation pipeline. JSONL is useful for inspecting rows with:
 
 - `user_id`
 - `news_id`
@@ -189,12 +189,15 @@ The default output files are:
 
 ```bash
 RAW_FILE=./gen_results/<model>.parquet
-RESULT_JSON_FILE=./results/result.json
 ```
 
 The pipeline extracts predictions and computes ROUGE in memory. It no longer writes
 `predictions.parquet`, `per_example_scores.parquet`, or a standalone metrics file.
-The shared `result.json` stores the metrics and metadata under the derived model slug key.
+Metrics and evaluation configuration are recorded in W&B. Interleaved training hands the result
+to checkpoint management through the existing model-directory `interleaved_eval_state.json`;
+it does not create a `metrics/` directory or a separate metrics/config JSON file.
+W&B records `eval/ROUGE-1`, `eval/ROUGE-2`, and `eval/ROUGE-L` as percentages
+(F1 multiplied by 100), with `eval/global_step` as the hidden step axis.
 
 If your machine has multiple busy GPUs, restrict visible GPUs and set the rollout sizes explicitly, for example:
 
@@ -224,7 +227,7 @@ ALIGN_BY_ORDER=false
 `recipe/dpo/evaluation/run_pens_personalized_eval.sh` now runs generation directly through
 `verl.trainer.main_generation_server`, while
 `recipe/dpo/evaluation/run_pens_personalized_eval.py` only handles post-generation parsing,
-ROUGE scoring, and `results/result.json` upsert.
+ROUGE scoring, W&B logging, and checkpoint-state handoff.
 
 For Qwen3.5 headline generation, the default evaluation config in this script uses
 the model's non-thinking mode. On the current merged checkpoint, this materially
@@ -253,8 +256,7 @@ python3 -m verl.trainer.main_generation_server \
 
 python3 recipe/dpo/evaluation/run_pens_personalized_eval.py \
   --raw-file "./gen_results/<model>.parquet" \
-  --test-file "${TEST_FILE}" \
-  --result-json-file "./results/result.json"
+  --test-file "${TEST_FILE}"
 ```
 
 The pipeline assumes `PROMPT_FILE` already exists. If it is missing, the shell script exits immediately.
@@ -273,11 +275,12 @@ The prepared evaluation file should be built ahead of time. The prompt parquet s
 chat-message column so it can be consumed directly by
 `verl.trainer.main_generation_server`.
 
-The shared `result.json` uses the model slug as the top-level key:
+The evaluator prints its result to stdout and records metrics in W&B. Its stdout includes:
 
 ```json
 {
-  "<model>": {
+  "model_key": "<model>__thinkOFF__<date>",
+  "metrics": {
     "backend": "python",
     "count": 20554,
     "joined_count": 20554,
@@ -337,14 +340,7 @@ You can use these rows as rough anchors:
 - around `0.45 / 0.25 / 0.35`: copying the original article title without personalization
 - near `0`: random or degenerate generation
 
-To reproduce the dummy files:
-
-```bash
-python3 recipe/dpo/evaluation/make_dummy_pens_predictions.py \
-  --references /data/data/jiangli/data/pens/extract/personalized_test.tsv \
-  --news-tsv /data/data/jiangli/data/pens/extract/news.tsv \
-  --output-dir /data/data/jiangli/data/pens/extract/dummy_eval
-```
+The dummy files above are historical outputs. Their generator is not included in this checkout.
 
 ## Official Training Recipe Behind The Baselines
 

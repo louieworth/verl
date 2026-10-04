@@ -1,18 +1,27 @@
 #!/usr/bin/env python3
 """Prepare prompt-aligned PENS personalized headline evaluation examples."""
+# ruff: noqa: E402 -- direct script imports follow the repository path setup.
 
 from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from pens_eval_utils import build_personalized_eval_records, dump_jsonl, load_news_table, render_prompt_for_model
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
+from recipe.dpo.prepare_data.pens_eval_utils import (
+    build_personalized_eval_records,
+    dump_jsonl,
+    load_news_table,
+    render_prompt_for_model,
+)
 
 SERIALIZED_COLUMNS = {"prompt", "clicked_news_ids", "clicked_titles", "gold_headlines"}
 PROMPT_SCHEMA = pa.list_(pa.struct([("role", pa.string()), ("content", pa.string())]))

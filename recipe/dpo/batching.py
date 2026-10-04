@@ -119,13 +119,15 @@ def build_dpo_update_proto(
 def build_prospect_dpo_update_proto(
     batch: DataProto,
     beta: float,
-    alpha_tau: float,
-    alpha_k: float,
-    lambda_max: float,
-    lambda_gamma: float,
-    reference_logps: torch.Tensor,
-    alpha_max: float = 1.0,
+    positive_kappa: float,
+    negative_kappa: float,
+    reference_logps: torch.Tensor | None,
     average_log_prob: bool = False,
+    reference_free: bool = False,
+    sft_coef: float = 0.0,
+    negative_scale: float = 1.0,
+    global_class_mean: bool = False,
+    use_feedback_weights: bool = True,
 ) -> DataProto:
     tensors = {}
     for key in (
@@ -141,28 +143,33 @@ def build_prospect_dpo_update_proto(
         if key not in batch.batch:
             raise KeyError(f"Missing required Prospect-DPO update key: {key}")
         tensors[key] = batch.batch[key]
-    tensors["reference_logps"] = reference_logps
+    if reference_logps is not None:
+        tensors["reference_logps"] = reference_logps
 
     meta_info = {
         "dpo_beta": beta,
         "dpo_loss_type": "prospect_dpo",
-        "reference_free": False,
-        "prospect_dpo_alpha_tau": alpha_tau,
-        "prospect_dpo_alpha_k": alpha_k,
-        "prospect_dpo_alpha_max": alpha_max,
-        "prospect_dpo_lambda_max": lambda_max,
-        "prospect_dpo_lambda_gamma": lambda_gamma,
+        "reference_free": bool(reference_free),
+        "prospect_dpo_positive_kappa": positive_kappa,
+        "prospect_dpo_negative_kappa": negative_kappa,
+        "prospect_dpo_sft_coef": sft_coef,
+        "prospect_dpo_negative_scale": negative_scale,
+        "prospect_dpo_use_feedback_weights": bool(use_feedback_weights),
         "average_log_prob": bool(average_log_prob),
         "global_token_num": int(batch.batch["attention_mask"].sum().item()),
     }
+    if global_class_mean:
+        positive_fraction = float((batch.batch["label"] > 0.5).float().mean().item())
+        meta_info["prospect_dpo_class_fractions"] = (positive_fraction, 1.0 - positive_fraction)
     return DataProto.from_dict(tensors=tensors, meta_info=meta_info)
 
 
 def build_single_wise_dpo_update_proto(
     batch: DataProto,
     beta: float,
-    reference_logps: torch.Tensor,
+    reference_logps: torch.Tensor | None,
     average_log_prob: bool = False,
+    reference_free: bool = False,
 ) -> DataProto:
     tensors = {}
     for key in (
@@ -176,12 +183,13 @@ def build_single_wise_dpo_update_proto(
         if key not in batch.batch:
             raise KeyError(f"Missing required single-wise DPO update key: {key}")
         tensors[key] = batch.batch[key]
-    tensors["reference_logps"] = reference_logps
+    if reference_logps is not None:
+        tensors["reference_logps"] = reference_logps
 
     meta_info = {
         "dpo_beta": beta,
         "dpo_loss_type": "single_wise_dpo",
-        "reference_free": False,
+        "reference_free": bool(reference_free),
         "average_log_prob": bool(average_log_prob),
         "global_token_num": int(batch.batch["attention_mask"].sum().item()),
     }

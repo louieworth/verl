@@ -38,6 +38,7 @@ os.environ["TOKENIZERS_PARALLELISM"] = "true"
 # os.environ['TORCH_COMPILE_DISABLE'] = '1'
 
 import asyncio
+import json
 from pprint import pprint
 
 import pandas as pd
@@ -49,6 +50,44 @@ from verl.utils.hdfs_io import makedirs
 from verl.workers.rollout.replica import get_rollout_replica_class
 
 PROGRESS_UPDATE_INTERVAL = 500
+SERVER_SHUTDOWN_TIMEOUT_SECONDS = 120
+
+
+async def shutdown_servers(rollout_servers) -> None:
+    """Gracefully stop vLLM, then remove the Ray actors it was running in."""
+
+    server_handles = [handle for replica in rollout_servers for handle in replica.servers]
+    if server_handles:
+        shutdown_refs = [handle.shutdown.remote() for handle in server_handles]
+        try:
+            results = await asyncio.wait_for(
+                asyncio.gather(*shutdown_refs, return_exceptions=True),
+                timeout=SERVER_SHUTDOWN_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            print(
+                f"[shutdown] timed out after {SERVER_SHUTDOWN_TIMEOUT_SECONDS}s "
+                "while waiting for vLLM servers"
+            )
+        else:
+            failures = [result for result in results if isinstance(result, BaseException)]
+            actor_errors = [
+                result
+                for result in results
+                if isinstance(result, dict) and result.get("errors")
+            ]
+            if failures or actor_errors:
+                print(f"[shutdown] vLLM cleanup warnings: {failures + actor_errors}")
+
+    # The expensive EngineCore children have now been joined by shutdown().
+    # Explicitly remove both server and checkpoint-worker actors so the local
+    # Ray runtime releases every GPU reservation before the driver returns.
+    worker_handles = [handle for replica in rollout_servers for handle in replica.workers]
+    for handle in [*server_handles, *worker_handles]:
+        try:
+            ray.kill(handle, no_restart=True)
+        except Exception as exc:
+            print(f"[shutdown] Ray actor cleanup warning: {exc}")
 
 
 async def start_server(config):
@@ -67,24 +106,61 @@ async def start_server(config):
         )
         for replica_rank in range(num_replicas)
     ]
-    await asyncio.gather(*[server.init_standalone() for server in rollout_servers])
+    try:
+        await asyncio.gather(*[server.init_standalone() for server in rollout_servers])
+    except BaseException:
+        await shutdown_servers(rollout_servers)
+        raise
 
     server_handles = [server._server_handle for server in rollout_servers]
     server_addresses = [server._server_address for server in rollout_servers]
     assert len(server_handles) == num_replicas
     assert len(server_addresses) == num_replicas
 
-    return server_handles, server_addresses
+    return rollout_servers, server_handles, server_addresses
+
+
+async def _read_streaming_chat_completion(resp):
+    chunks = []
+    async for raw_line in resp.content:
+        line = raw_line.decode("utf-8", errors="replace").strip()
+        if not line or line.startswith(":"):
+            continue
+        if not line.startswith("data:"):
+            continue
+        payload = line[len("data:") :].strip()
+        if payload == "[DONE]":
+            break
+        try:
+            data = json.loads(payload)
+        except json.JSONDecodeError:
+            continue
+        if "error" in data:
+            err = data["error"]
+            err_msg = err.get("message", "") if isinstance(err, dict) else str(err)
+            print(f"[submit_request] skipping failed streaming request: {err_msg[:200]}")
+            return None
+        for choice in data.get("choices", []):
+            delta = choice.get("delta") or {}
+            content = delta.get("content")
+            if content:
+                chunks.append(content)
+    return "".join(chunks)
 
 
 async def submit_request(session: aiohttp.ClientSession, server_address, **chat_complete_request):
     extra_headers = chat_complete_request.pop("extra_headers", {})
+    use_stream = bool(chat_complete_request.get("stream"))
     async with session.post(
         url=f"http://{server_address}/v1/chat/completions",
         headers={"Authorization": "Bearer token-abc123", **extra_headers},
         json=chat_complete_request,
     ) as resp:
-        data = await resp.json()
+        content_type = resp.headers.get("Content-Type", "")
+        if use_stream and "text/event-stream" in content_type:
+            return await _read_streaming_chat_completion(resp)
+
+        data = await resp.json(content_type=None)
         # Handle request-level errors (e.g. context length exceeded) without
         # crashing the whole batch. Returning None lets the caller record an
         # empty response for this row and continue.
@@ -272,6 +348,13 @@ def main(config):
             sampling_params["chat_template_kwargs"] = _ctk
             print(f"Per-request chat_template_kwargs: {_ctk}")
 
+    _stream = OmegaConf.select(config, "data.stream", default=False)
+    if isinstance(_stream, str):
+        _stream = _stream.strip().lower() in {"1", "true", "yes", "on"}
+    if _stream:
+        sampling_params["stream"] = True
+        print("Per-request streaming: enabled")
+
     from omegaconf import ListConfig
 
     train_files = config.data.train_files
@@ -296,45 +379,59 @@ def main(config):
     print(f"Per-replica request concurrency: {request_concurrency or 'unbounded'}")
 
     # start native server
-    server_handles, server_addresses = asyncio.run(start_server(config))
+    rollout_servers, server_handles, server_addresses = asyncio.run(start_server(config))
 
-    # run generate
-    gen_results = asyncio.run(
-        generate(
-            server_addresses,
-            config.actor_rollout_ref.model.path,
-            n_samples,
-            sampling_params,
-            chat_numpy,
-            request_concurrency,
+    try:
+        # run generate
+        gen_results = asyncio.run(
+            generate(
+                server_addresses,
+                config.actor_rollout_ref.model.path,
+                n_samples,
+                sampling_params,
+                chat_numpy,
+                request_concurrency,
+            )
         )
-    )
 
-    # reshape results into a numpy array
-    import itertools
+        # reshape results into a numpy array
+        import itertools
 
-    results = list(itertools.chain.from_iterable(gen_results))
+        results = list(itertools.chain.from_iterable(gen_results))
 
-    # extract content from results; None means the request failed (e.g. context
-    # length exceeded) — record an empty string so the row is kept for alignment.
-    num_failed = sum(1 for r in results if r is None)
-    if num_failed:
-        print(f"[main] {num_failed}/{len(results)} requests failed and were recorded as empty responses")
-    results = np.array([("" if result is None else result.choices[0].message.content) for result in results])
-    results = np.reshape(results, (-1, n_samples))
+        # extract content from results; None means the request failed (e.g. context
+        # length exceeded) — record an empty string so the row is kept for alignment.
+        num_failed = sum(1 for r in results if r is None)
+        if num_failed:
+            print(f"[main] {num_failed}/{len(results)} requests failed and were recorded as empty responses")
 
-    assert results.shape == (len(chat_lst), n_samples)
+        def _extract_content(result):
+            if result is None:
+                return ""
+            if isinstance(result, str):
+                return result
+            return result.choices[0].message.content or ""
 
-    results = results.tolist()
+        results = np.array([_extract_content(result) for result in results])
+        results = np.reshape(results, (-1, n_samples))
 
-    # add to the data frame
-    dataset["responses"] = results
+        assert results.shape == (len(chat_lst), n_samples)
 
-    # write to a new parquet
-    output_dir = os.path.dirname(config.data.output_path)
-    makedirs(output_dir, exist_ok=True)
-    print(f"Saving results to {config.data.output_path}")
-    dataset.to_parquet(config.data.output_path)
+        results = results.tolist()
+
+        # add to the data frame
+        dataset["responses"] = results
+
+        # write to a new parquet
+        output_dir = os.path.dirname(config.data.output_path)
+        makedirs(output_dir, exist_ok=True)
+        print(f"Saving results to {config.data.output_path}")
+        dataset.to_parquet(config.data.output_path)
+    finally:
+        try:
+            asyncio.run(shutdown_servers(rollout_servers))
+        finally:
+            ray.shutdown()
 
 
 if __name__ == "__main__":

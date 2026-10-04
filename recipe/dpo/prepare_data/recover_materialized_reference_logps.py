@@ -18,7 +18,7 @@ from transformers import AutoModelForCausalLM
 if __package__ in {None, ""}:
     sys.path.append(str(Path(__file__).resolve().parents[3]))
 
-from recipe.dpo.data.precompute_point_reference_logps import (
+from recipe.dpo.prepare_data.precompute_point_reference_logps import (
     PointwiseTensorizer,
     compute_reference_logps_for_table,
     maybe_tqdm,
@@ -118,7 +118,7 @@ def _build_worker_pool(
 ):
     import ray
 
-    from recipe.dpo.reference_logps_materializer import ReferenceLogpsWorker, ReferenceWorkerPool
+    from recipe.dpo.prepare_data.reference_logps_materializer import ReferenceLogpsWorker, ReferenceWorkerPool
 
     if not ray.is_initialized():
         ray.init(ignore_reinit_error=True)

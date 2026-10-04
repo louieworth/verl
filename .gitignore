@@ -7,7 +7,7 @@
 **/*.tar.gz
 **/playground
 **/wandb
-
+paper/
 /pyrightconfig.json
 
 # Byte-compiled / optimized / DLL files
@@ -133,9 +133,17 @@ logs
 log
 outputs
 .history
-dpo-8b-16gpu-59216121.err
+results/
+.github/
+.pytest_cache/
+.ruff_cache/
+.vscode/
+metrics/
 
 # Slurm / sbatch
 **/sbatch/
 *.out
 *.err
+
+# Local test and generated directories
+tests/

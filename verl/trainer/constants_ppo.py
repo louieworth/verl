@@ -29,6 +29,15 @@ PPO_RAY_RUNTIME_ENV = {
         # https://docs.vllm.ai/en/latest/usage/troubleshooting.html?h=nccl_cumem_enable#known-issues
         # https://github.com/vllm-project/vllm/blob/c6b0a7d3ba03ca414be1174e9bd86a97191b7090/vllm/worker/worker_base.py#L445
         "NCCL_CUMEM_ENABLE": "0",
+        # Single-node PENS DPO jobs run all 8 ranks on one host. Propagate
+        # these into Ray workers explicitly; wrapper shell exports are not
+        # reliably visible inside actor worker runtime environments.
+        "NCCL_NET_PLUGIN": "none",
+        "NCCL_IB_DISABLE": "1",
+        "TORCH_NCCL_ENABLE_MONITORING": "0",
+        "TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC": "7200",
+        "TORCH_NCCL_ASYNC_ERROR_HANDLING": "1",
+        "TORCH_NCCL_AVOID_RECORD_STREAMS": "1",
         # TODO: disable compile cache due to cache corruption issue
         # https://github.com/vllm-project/vllm/issues/31199
         "VLLM_DISABLE_COMPILE_CACHE": "1",
@@ -56,4 +65,14 @@ def get_ppo_ray_runtime_env():
     for key in list(runtime_env["env_vars"].keys()):
         if os.environ.get(key) is not None:
             runtime_env["env_vars"].pop(key, None)
+    for key in (
+        "NCCL_NET_PLUGIN",
+        "NCCL_IB_DISABLE",
+        "TORCH_NCCL_ENABLE_MONITORING",
+        "TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC",
+        "TORCH_NCCL_ASYNC_ERROR_HANDLING",
+        "TORCH_NCCL_AVOID_RECORD_STREAMS",
+    ):
+        if os.environ.get(key) is not None:
+            runtime_env["env_vars"][key] = os.environ[key]
     return runtime_env

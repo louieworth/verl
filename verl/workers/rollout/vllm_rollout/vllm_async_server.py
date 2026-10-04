@@ -225,6 +225,8 @@ class vLLMHttpServer:
         # used for http server
         self._server_address = ray.util.get_node_ip_address().strip("[]")
         self._server_port = None
+        self._server_task = None
+        self.engine = None
 
         # used for controlling vllm server profiler
         profiler_config = self.config.profiler
@@ -258,6 +260,57 @@ class vLLMHttpServer:
             f"data_parallel_rpc_port: {self._dp_rpc_port}, data_parallel_master_port: {self._dp_master_port}"
         )
         self._external_engine_manager = None
+
+    async def shutdown(self) -> dict[str, Any]:
+        """Stop HTTP serving and release vLLM child processes before actor exit.
+
+        Ray normally tears the server actor down when the driver exits.  vLLM's
+        EngineCore is a child process, however, and an abrupt actor teardown can
+        leave that child alive with its CUDA allocation.  Evaluation and training
+        run back-to-back on the same GPUs, so expose an explicit shutdown hook
+        that the generation driver can await before killing Ray actors.
+        """
+
+        errors: list[str] = []
+
+        server_task = self._server_task
+        if server_task is not None and not server_task.done():
+            server_task.cancel()
+            results = await asyncio.gather(server_task, return_exceptions=True)
+            for result in results:
+                if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError):
+                    errors.append(f"uvicorn: {result}")
+        self._server_task = None
+        self._server_port = None
+
+        engine = self.engine
+        if engine is not None:
+            try:
+                # AsyncLLM.shutdown() is intentionally synchronous: it closes
+                # the EngineCore IPC client and joins/terminates its subprocess.
+                engine.shutdown()
+            except Exception as exc:  # pragma: no cover - depends on vLLM internals
+                errors.append(f"engine: {exc}")
+            finally:
+                self.engine = None
+
+        if self._external_engine_manager is not None:
+            try:
+                self._external_engine_manager.shutdown()
+            except Exception as exc:  # pragma: no cover - Qwen3.5 compatibility path
+                errors.append(f"external_engine: {exc}")
+            finally:
+                self._external_engine_manager = None
+
+        if errors:
+            logger.warning("vLLM server shutdown completed with errors: %s", errors)
+        else:
+            logger.info("vLLM server shutdown completed cleanly")
+        return {
+            "replica_rank": self.replica_rank,
+            "node_rank": self.node_rank,
+            "errors": errors,
+        }
 
     def _is_text_only_qwen3_5_causallm(self) -> bool:
         hf_config = self.model_config.hf_config

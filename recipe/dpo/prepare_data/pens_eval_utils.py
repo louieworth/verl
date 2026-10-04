@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Shared helpers for PENS personalized headline evaluation."""
+"""Helpers for preparing PENS personalized headline evaluation inputs."""
 
 from __future__ import annotations
 
@@ -8,11 +8,7 @@ import json
 import sys
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
-
-from recipe.dpo.data.prepare_pens_singlewise_dpo import (
+from recipe.dpo.prepare_data.prepare_pens_singlewise_dpo import (
     detect_delimiter,
     load_news_lookup,
     normalize_text,
@@ -20,14 +16,16 @@ from recipe.dpo.data.prepare_pens_singlewise_dpo import (
     split_id_list,
 )
 
-
 csv.field_size_limit(min(sys.maxsize, 2**31 - 1))
 
-BOXED_OUTPUT_TEMPLATE = "\\boxed{<personalized headline>}"
-
 OUTPUT_RULES_BLOCK = (
-    "Output the headline wrapped exactly in \\boxed{...}, with no extra text before or after.\n"
-    f"Example: {BOXED_OUTPUT_TEMPLATE}"
+    "Output exactly one short, non-empty personalized news headline and nothing else.\n"
+    "Do not output analysis, explanations, JSON, formatting wrappers, or refusal text.\n"
+    "Always produce a headline, even when the click history is weakly related or unrelated "
+    "to the candidate article.\n"
+    "Use the candidate article as the factual basis; use the click history only when it is helpful "
+    "for personalization.\n"
+    "Never say that the history is unrelated, that information is insufficient, or that no headline can be generated."
 )
 
 EVAL_PROMPT_INSTRUCTION = (
@@ -124,7 +122,9 @@ def build_personalized_eval_records(
                 continue
             key = (user_id, news_id)
             if key not in grouped:
-                history_block, history_count, missing_history_count = render_history_block(clicked_news_ids, news_lookup)
+                history_block, history_count, missing_history_count = render_history_block(
+                    clicked_news_ids, news_lookup
+                )
                 grouped[key] = {
                     "user_id": user_id,
                     "news_id": news_id,

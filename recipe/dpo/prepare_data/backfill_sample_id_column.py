@@ -15,7 +15,7 @@ if __package__ in {None, ""}:
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from recipe.dpo.sample_id import DEFAULT_SAMPLE_ID_KEY, compute_sample_id_from_record
+from recipe.dpo.prepare_data.sample_id import DEFAULT_SAMPLE_ID_KEY, compute_sample_id_from_record
 
 
 def infer_compression(parquet: pq.ParquetFile) -> str:

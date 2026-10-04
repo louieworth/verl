@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Build offline single-wise DPO parquet datasets from public PENS logs."""
+# ruff: noqa: E402 -- direct script imports follow the repository path setup.
 
 from __future__ import annotations
 
@@ -13,7 +14,10 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from recipe.dpo.sample_id import DEFAULT_SAMPLE_ID_KEY, compute_sample_id
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+
+from recipe.dpo.prepare_data.sample_id import DEFAULT_SAMPLE_ID_KEY, compute_sample_id
 
 try:
     from tqdm.auto import tqdm
@@ -477,7 +481,10 @@ def main() -> None:
         "--output-path",
         type=Path,
         default=None,
-        help="Optional direct train parquet path. When unset and --val-file is omitted, a click-hist train filename is derived under --output-root.",
+        help=(
+            "Optional direct train parquet path. When unset and --val-file is omitted, "
+            "a click-hist train filename is derived under --output-root."
+        ),
     )
     parser.add_argument("--shard-size", type=int, default=10_000, help="Rows per parquet shard")
     parser.add_argument(

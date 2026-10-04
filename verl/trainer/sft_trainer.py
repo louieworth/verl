@@ -182,6 +182,13 @@ class SFTTrainer:
             self.total_training_steps = self.config.trainer.total_training_steps
         else:
             self.total_training_steps = len(self.train_dataloader) * self.config.trainer.total_epochs
+        configured_stop_at_step = self.config.trainer.get("stop_at_step", None)
+        self.stop_at_step = self.total_training_steps
+        if configured_stop_at_step is not None:
+            self.stop_at_step = int(configured_stop_at_step)
+            if self.stop_at_step <= 0:
+                raise ValueError(f"trainer.stop_at_step must be positive, got {self.stop_at_step}")
+            self.stop_at_step = min(self.stop_at_step, self.total_training_steps)
         self.optimizer_config.total_training_steps = self.total_training_steps
 
         self.steps_per_epoch = len(self.train_dataloader)
@@ -314,6 +321,16 @@ class SFTTrainer:
         global_step = self.resume_global_step  # Start from resumed step
         last_valid_metric = None
 
+        if global_step >= self.stop_at_step:
+            log_with_rank(
+                f"Checkpoint global step {global_step} has reached this run's "
+                f"stop_at_step={self.stop_at_step}; no training is needed.",
+                logger=logger,
+                rank=0,
+                log_only_rank_0=True,
+            )
+            return
+
         log_with_rank(
             f"Total training steps: {self.total_training_steps},",
             logger=logger,
@@ -400,6 +417,7 @@ class SFTTrainer:
                         tracking.log(data=metrics, step=global_step)
 
                 is_last_step = global_step >= self.total_training_steps
+                is_run_stop_step = global_step >= self.stop_at_step
                 is_valid_step = global_step % self.test_freq == 0
                 is_save_step = global_step % self.save_freq == 0
 
@@ -428,11 +446,11 @@ class SFTTrainer:
                         last_valid_metric = metric
                     torch.distributed.barrier()
 
-                if is_last_step or (self.save_freq > 0 and is_save_step):
+                if is_last_step or is_run_stop_step or (self.save_freq > 0 and is_save_step):
                     aggressive_empty_cache(force_sync=True)
                     self.ckpt_handler.save_checkpoint(step=global_step)
 
-                if is_last_step:
+                if is_run_stop_step:
                     if is_logging:
                         print(f"Total time for train steps: {train_time:.2f}s")
                         print(f"Final validation metrics: {last_valid_metric}")

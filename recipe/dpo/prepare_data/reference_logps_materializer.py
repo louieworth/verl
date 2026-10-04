@@ -16,10 +16,13 @@ import pyarrow.parquet as pq
 import ray
 import torch
 from omegaconf import DictConfig
+from recipe.dpo.prepare_data.precompute_point_reference_logps import (
+    PointwiseTensorizer,
+    compute_reference_logps_for_table,
+    parse_dtype,
+)
+from recipe.dpo.prepare_data.sample_id import DEFAULT_SAMPLE_ID_KEY
 from transformers import AutoModelForCausalLM
-
-from recipe.dpo.data.precompute_point_reference_logps import PointwiseTensorizer, compute_reference_logps_for_table, parse_dtype
-from recipe.dpo.sample_id import DEFAULT_SAMPLE_ID_KEY
 
 try:
     from tqdm.auto import tqdm
@@ -516,7 +519,9 @@ def _load_sample_id_set(path: str, *, sample_id_key: str) -> set[str]:
     sample_ids: set[str] = set()
     for row_group_idx in range(parquet.num_row_groups):
         table = parquet.read_row_group(row_group_idx, columns=[sample_id_key])
-        sample_ids.update(str(sample_id) for sample_id in table.column(sample_id_key).to_pylist() if sample_id is not None)
+        sample_ids.update(
+            str(sample_id) for sample_id in table.column(sample_id_key).to_pylist() if sample_id is not None
+        )
     return sample_ids
 
 

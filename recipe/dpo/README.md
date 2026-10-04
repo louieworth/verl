@@ -7,6 +7,54 @@ It also supports a point-wise Prospect-DPO variant for unpaired `(prompt, respon
 It also supports a point-wise `single_wise_dpo` variant for offline `(prompt, response, label)` training with a
 reference model, where only the response tokens contribute to the loss.
 
+## Directory layout
+
+| Location | Responsibility |
+| --- | --- |
+| `recipe/dpo/*.py` | Core training: entry point, trainer, workers, losses, runtime datasets, batching, and sampling. |
+| `prepare_data/` | Download, prepare, sample, and inspect datasets, including evaluation prompts and precomputed reference log probabilities. |
+| `evaluation/` | Generate predictions, extract and score headlines, maintain evaluation checkpoint state, and record evaluation metrics in W&B. |
+| `run/` | Training launchers, Slurm submission, shared environment loading, paths, and experiment defaults (`common.py` / `common.sh`). |
+| `scripts/` | Checkpoint export and model conversion utilities. |
+| `config/` | Hydra training configurations. |
+
+Data preparation commands can run either as modules (`python3 -m recipe.dpo.prepare_data.<name>`) or by
+their file path. `prepare_data/pens_eval_utils.py` builds evaluation inputs; scoring remains in `evaluation/`.
+`run/common.py` is shared by launchers, evaluation, and training tracking and supports `python3 -S`.
+
+The dataset and preprocessing modules follow these boundaries:
+
+- `singlewise_dataset.py` tokenizes and loads single-wise training samples at runtime. It remains part of core
+  training and is used by the unweighted single-wise launchers.
+- `sampler.py` groups training samples by length and saves/restores iteration state. The PeNS click-history
+  launcher enables it by default.
+- `prepare_data/reference_logps_materializer.py` generates and reuses Parquet files with reference-model log
+  probabilities. Training calls it when a reference model is required; the reference-free PeNS launchers skip it.
+- `prepare_data/sample_id.py` generates deterministic sample IDs for data preparation, backfilling, and matching
+  cached reference probabilities. Keep it even for reference-free training datasets.
+
+Both checkpoint exporters are required by the current launchers:
+
+- `scripts/export_lora_checkpoint_to_hf.py` merges a DPO actor's `lora_adapter/` into its base model.
+- `scripts/merge_sft_lora_to_hf.py` validates and exports SFT Hugging Face checkpoints, including wrapped LoRA
+  tensors and already merged weights.
+
+`evaluation/wandb_utils.py` is required by `evaluation/run_pens_personalized_eval.py`. It writes evaluation
+metrics and evaluation configuration to the training run. Training configuration is also stored in W&B;
+the launchers no longer create a `metrics/` directory or separate `metrics.json`/`config.json` files.
+Checkpoint selection and resume still use `interleaved_eval_state.json` under the model directory.
+
+### Optional cleanup suggestions
+
+All files are retained. These are suggestions for a separate, manual cleanup:
+
+- `evaluation/update_pens_results_json.py` has no callers in the repository. The evaluation entry point already
+  updates the results JSON through `upsert_result_json()`, using an atomic write. Remove the standalone utility
+  only if no external/manual workflow uses it.
+- If this checkout is exclusively for PeNS, consider removing `run/vanilla/` and
+  `prepare_data/prepare_hf_dpo_datasets.py` together with the corresponding HH/TL;DR/IPO/SimPO configurations.
+  They still provide supported comparison workflows; keep them if those experiments are useful.
+
 Expected dataset columns:
 
 ```json
@@ -26,15 +74,6 @@ python3 -m recipe.dpo.main_dpo --config-name=dpo_trainer \
   data.val_files=/path/to/val.parquet
 ```
 
-Or with the generic launcher:
-
-```bash
-DPO_VARIANT=sigmoid bash recipe/dpo/run/run_dpo.sh \
-  actor_rollout_ref.model.path=/path/to/model \
-  data.train_files=/path/to/train.parquet \
-  data.val_files=/path/to/val.parquet
-```
-
 For the IPO variant, use:
 
 ```bash
@@ -45,15 +84,6 @@ python3 -m recipe.dpo.main_dpo --config-name=dpo_ipo \
 ```
 
 `dpo_ipo` keeps the IPO loss, but uses average response log probabilities instead of summed response log probabilities for the chosen/rejected sequence scores. This follows the same length-normalization intuition used by SimPO, without changing the loss into SimPO itself.
-
-The generic launcher also supports IPO directly:
-
-```bash
-DPO_VARIANT=ipo bash recipe/dpo/run/run_dpo.sh \
-  actor_rollout_ref.model.path=/path/to/model \
-  data.train_files=/path/to/train.parquet \
-  data.val_files=/path/to/val.parquet
-```
 
 For the SimPO variant, use:
 
@@ -66,15 +96,6 @@ python3 -m recipe.dpo.main_dpo --config-name=dpo_simpo \
 
 `dpo_simpo` is reference-free, uses average response log probabilities, and adds the SimPO target reward margin `algorithm.simpo_gamma`.
 
-The generic launcher also supports SimPO directly:
-
-```bash
-DPO_VARIANT=simpo bash recipe/dpo/run/run_dpo.sh \
-  actor_rollout_ref.model.path=/path/to/model \
-  data.train_files=/path/to/train.parquet \
-  data.val_files=/path/to/val.parquet
-```
-
 For the Prospect-DPO variant, use:
 
 ```bash
@@ -84,25 +105,17 @@ python3 -m recipe.dpo.main_dpo --config-name=dpo_prospect_dpo \
   data.val_files=/path/to/val.parquet
 ```
 
-The dedicated launcher exposes all Prospect-DPO-specific knobs as environment variables:
+The PeNS click-history launcher exposes the shared single-wise settings as environment variables and
+selects weighted Prospect-DPO by default:
 
 ```bash
-bash recipe/dpo/run/run_prospect_dpo.sh
+bash recipe/dpo/run/run_single_wise_click_hist_all.sh
 ```
 
-If `PROSPECT_DPO_TRAIN_FILE` is unset, the launcher can also resolve PENS click-history and personalization train
-parquets via `PROSPECT_DPO_INPUT_VARIANT` and `PROSPECT_DPO_SAMPLE_VARIANT`. In particular,
-`PROSPECT_DPO_INPUT_VARIANT=click_hist` with `PROSPECT_DPO_SAMPLE_VARIANT=all` will train on both
+If `SINGLE_WISE_DPO_TRAIN_FILE` is unset, the launcher resolves the train parquets via
+`SINGLE_WISE_DPO_INPUT_VARIANT` and `SINGLE_WISE_DPO_SAMPLE_VARIANT`. In particular,
+`SINGLE_WISE_DPO_INPUT_VARIANT=click_hist` with `SINGLE_WISE_DPO_SAMPLE_VARIANT=all` trains on both
 `only_positive_click_hist_train.parquet` and `only_negative_click_hist_train.parquet`.
-
-The generic launcher also supports Prospect-DPO directly:
-
-```bash
-DPO_VARIANT=prospect_dpo bash recipe/dpo/run/run_dpo.sh \
-  actor_rollout_ref.model.path=/path/to/model \
-  data.train_files=/path/to/train.parquet \
-  data.val_files=/path/to/val.parquet
-```
 
 Prospect-DPO expects one response per row with these additional columns:
 
@@ -120,19 +133,10 @@ python3 -m recipe.dpo.main_dpo --config-name=dpo_single_wise_dpo \
   data.val_files=/path/to/val.parquet
 ```
 
-The generic launcher also supports it directly:
+The shared launcher defaults to `POINTWISE_DPO_LOSS_TYPE=prospect_dpo` and exposes the common single-wise settings as environment variables. Set `POINTWISE_DPO_LOSS_TYPE=single_wise_dpo` explicitly to select the older BCE loss:
 
 ```bash
-DPO_VARIANT=single_wise_dpo bash recipe/dpo/run/run_dpo.sh \
-  actor_rollout_ref.model.path=/path/to/model \
-  data.train_files=/path/to/train.parquet \
-  data.val_files=/path/to/val.parquet
-```
-
-There is also a dedicated launcher that exposes the common single-wise settings as environment variables:
-
-```bash
-bash recipe/dpo/run/run_single_wise_dpo.sh
+POINTWISE_DPO_LOSS_TYPE=single_wise_dpo bash recipe/dpo/run/run_single_wise.sh
 ```
 
 The main environment variables are:
@@ -161,7 +165,7 @@ where `MODEL_SLUG` is derived from `SINGLE_WISE_DPO_MODEL_DIR`.
 To export a saved LoRA checkpoint into a directly loadable Hugging Face directory, run:
 
 ```bash
-python3 recipe/dpo/export_lora_checkpoint_to_hf.py \
+python3 recipe/dpo/scripts/export_lora_checkpoint_to_hf.py \
   --actor-dir /path/to/global_step_x/actor \
   --trust-remote-code
 ```
@@ -208,7 +212,7 @@ For TL;DR summarization, override `algorithm.dpo_beta=0.5`.
 For the TL;DR-specific paper preset, use:
 
 ```bash
-bash recipe/dpo/run/run_dpo_tldr_paper.sh \
+bash recipe/dpo/run/vanilla/run_dpo_tldr_paper.sh \
   actor_rollout_ref.model.path=/path/to/model
 ```
 
@@ -225,7 +229,7 @@ It also sets `max_prompt_length=512` and `max_response_length=512` as implementa
 For the Anthropic-HH-specific paper preset, use:
 
 ```bash
-bash recipe/dpo/run/run_dpo_hh_paper.sh \
+bash recipe/dpo/run/vanilla/run_dpo_hh_paper.sh \
   actor_rollout_ref.model.path=/path/to/model
 ```
 
@@ -255,7 +259,7 @@ For point-wise offline variants:
 To build a PENS single-wise offline dataset from `train.tsv`, `valid.tsv`, and `news.tsv`, use:
 
 ```bash
-python3 recipe/dpo/data/prepare_pens_singlewise_dpo.py \
+python3 recipe/dpo/prepare_data/prepare_pens_singlewise_dpo.py \
   --news-file /data/data/jiangli/data/pens/extract/news.tsv \
   --train-file /data/data/jiangli/data/pens/extract/train.tsv \
   --val-file /data/data/jiangli/data/pens/extract/valid.tsv \
@@ -271,7 +275,7 @@ If you do not want shards, use `--single-file`. This writes one parquet per spli
 batches internally, so it does not need to hold the full dataset in memory:
 
 ```bash
-python3 recipe/dpo/data/prepare_pens_singlewise_dpo.py \
+python3 recipe/dpo/prepare_data/prepare_pens_singlewise_dpo.py \
   --news-file /data/data/jiangli/data/pens/extract/news.tsv \
   --train-file /data/data/jiangli/data/pens/extract/train.tsv \
   --val-file /data/data/jiangli/data/pens/extract/valid.tsv \
@@ -306,7 +310,7 @@ be used for both `single_wise_dpo` and `prospect_dpo`.
 To download the original Hugging Face TL;DR and HH datasets and convert them into the required format, use:
 
 ```bash
-python3 recipe/dpo/data/prepare_hf_dpo_datasets.py \
+python3 recipe/dpo/prepare_data/prepare_hf_dpo_datasets.py \
   --hf-root /data/data/jiangli/huggingface \
   --parquet-root /data/data/jiangli/parquet \
   --datasets tldr hh
@@ -329,12 +333,12 @@ The TL;DR directory contains both the raw source files and a local Hugging Face 
 The converted parquet files are directly consumable by this recipe. For example:
 
 ```bash
-bash recipe/dpo/run/run_dpo_tldr_paper.sh \
+bash recipe/dpo/run/vanilla/run_dpo_tldr_paper.sh \
   actor_rollout_ref.model.path=/path/to/model
 ```
 
 ```bash
-bash recipe/dpo/run/run_dpo_hh_paper.sh \
+bash recipe/dpo/run/vanilla/run_dpo_hh_paper.sh \
   actor_rollout_ref.model.path=/path/to/model
 ```
 
@@ -346,7 +350,7 @@ Both scripts default to these local parquet paths:
 You can still override them either with Hydra arguments:
 
 ```bash
-bash recipe/dpo/run/run_dpo_tldr_paper.sh \
+bash recipe/dpo/run/vanilla/run_dpo_tldr_paper.sh \
   actor_rollout_ref.model.path=/path/to/model \
   data.train_files=/path/to/other_train.parquet \
   data.val_files=/path/to/other_val.parquet
@@ -357,6 +361,6 @@ or with environment variables:
 ```bash
 DPO_HH_TRAIN_FILE=/path/to/hh_train.parquet \
 DPO_HH_VAL_FILE=/path/to/hh_val.parquet \
-bash recipe/dpo/run/run_dpo_hh_paper.sh \
+bash recipe/dpo/run/vanilla/run_dpo_hh_paper.sh \
   actor_rollout_ref.model.path=/path/to/model
 ```

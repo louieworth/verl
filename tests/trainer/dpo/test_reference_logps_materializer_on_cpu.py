@@ -21,7 +21,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from omegaconf import OmegaConf
 
-from recipe.dpo.reference_logps_materializer import _materialize_file, _output_path_for_file
+from recipe.dpo.prepare_data.reference_logps_materializer import _materialize_file, _output_path_for_file
 
 
 class DummyLocalRunner:

@@ -66,6 +66,7 @@ class RecipeDPOActor(DataParallelPPOActor):
             append_to_dict(aggregated_metrics, {key: float(value) * weight})
 
     def _update_policy_prospect_dpo(self, data: DataProto) -> dict[str, float]:
+        reference_free = bool(data.meta_info.get("reference_free", False))
         required_keys = [
             "input_ids",
             "attention_mask",
@@ -75,18 +76,16 @@ class RecipeDPOActor(DataParallelPPOActor):
             "label",
             "s_dwell",
             "p_ctr",
-            "reference_logps",
         ]
+        if not reference_free:
+            required_keys.append("reference_logps")
         missing_keys = [key for key in required_keys if key not in data.batch]
         if missing_keys:
             raise KeyError(f"Missing required Prospect-DPO batch keys: {missing_keys}")
 
         beta = data.meta_info.get("dpo_beta", 0.1)
-        alpha_tau = data.meta_info.get("prospect_dpo_alpha_tau", 0.2)
-        alpha_k = data.meta_info.get("prospect_dpo_alpha_k", 10.0)
-        alpha_max = data.meta_info.get("prospect_dpo_alpha_max", 1.0)
-        lambda_max = data.meta_info.get("prospect_dpo_lambda_max", 2.0)
-        lambda_gamma = data.meta_info.get("prospect_dpo_lambda_gamma", 2.0)
+        positive_kappa = data.meta_info.get("prospect_dpo_positive_kappa", 3.65)
+        negative_kappa = data.meta_info.get("prospect_dpo_negative_kappa", 1.5)
         average_log_prob = bool(data.meta_info.get("average_log_prob", False))
 
         batch_size = data.batch["input_ids"].shape[0]
@@ -109,7 +108,7 @@ class RecipeDPOActor(DataParallelPPOActor):
             sample_labels = micro_batch.batch["label"]
             s_dwell = micro_batch.batch["s_dwell"]
             p_ctr = micro_batch.batch["p_ctr"]
-            micro_ref_logps = micro_batch.batch["reference_logps"]
+            micro_ref_logps = micro_batch.batch.get("reference_logps")
             loss_weight = sample_labels.shape[0] / batch_size
 
             with torch.autocast(device_type=self.device_name, dtype=self.param_dtype):
@@ -123,11 +122,13 @@ class RecipeDPOActor(DataParallelPPOActor):
                     beta=beta,
                     s_dwell=s_dwell,
                     p_ctr=p_ctr,
-                    alpha_tau=alpha_tau,
-                    alpha_k=alpha_k,
-                    lambda_max=lambda_max,
-                    lambda_gamma=lambda_gamma,
-                    alpha_max=alpha_max,
+                    positive_kappa=positive_kappa,
+                    negative_kappa=negative_kappa,
+                    reference_free=reference_free,
+                    sft_coef=data.meta_info.get("prospect_dpo_sft_coef", 0.0),
+                    negative_scale=data.meta_info.get("prospect_dpo_negative_scale", 1.0),
+                    class_fractions=data.meta_info.get("prospect_dpo_class_fractions"),
+                    use_feedback_weights=data.meta_info.get("prospect_dpo_use_feedback_weights", True),
                 )
                 scaled_loss = loss * loss_weight
 
@@ -148,9 +149,12 @@ class RecipeDPOActor(DataParallelPPOActor):
                 "actor/prospect_dpo_alpha": stats["alpha"].detach().item(),
                 "actor/prospect_dpo_lambda": stats["lambda"].detach().item(),
                 "actor/prospect_dpo_positive_fraction": stats["positive_fraction"].detach().item(),
+                "actor/prospect_dpo_positive_nll": stats["positive_nll"].detach().item(),
+                "actor/prospect_dpo_negative_scale": stats["negative_scale"].detach().item(),
                 "actor/policy_logps": policy_logps.detach().mean().item(),
-                "actor/reference_logps": micro_ref_logps.detach().mean().item(),
             }
+            if micro_ref_logps is not None:
+                micro_metrics["actor/reference_logps"] = micro_ref_logps.detach().mean().item()
             self._accumulate_weighted_metrics(aggregated_metrics, micro_metrics, loss_weight)
 
         grad_norm = self._optimizer_step()
@@ -161,7 +165,7 @@ class RecipeDPOActor(DataParallelPPOActor):
         return final_metrics
 
     def _update_policy_single_wise_dpo(self, data: DataProto) -> dict[str, float]:
-
+        reference_free = bool(data.meta_info.get("reference_free", False))
         required_keys = [
             "input_ids",
             "attention_mask",
@@ -169,8 +173,9 @@ class RecipeDPOActor(DataParallelPPOActor):
             "responses",
             "response_mask",
             "label",
-            "reference_logps",
         ]
+        if not reference_free:
+            required_keys.append("reference_logps")
         missing_keys = [key for key in required_keys if key not in data.batch]
         if missing_keys:
             raise KeyError(f"Missing required single-wise DPO batch keys: {missing_keys}")
@@ -196,7 +201,7 @@ class RecipeDPOActor(DataParallelPPOActor):
                 "response_mask": micro_batch.batch["response_mask"],
             }
             sample_labels = micro_batch.batch["label"]
-            micro_ref_logps = micro_batch.batch["reference_logps"]
+            micro_ref_logps = micro_batch.batch.get("reference_logps")
             loss_weight = sample_labels.shape[0] / batch_size
 
             with torch.autocast(device_type=self.device_name, dtype=self.param_dtype):
@@ -208,6 +213,7 @@ class RecipeDPOActor(DataParallelPPOActor):
                     reference_logps=micro_ref_logps,
                     labels=sample_labels,
                     beta=beta,
+                    reference_free=reference_free,
                 )
                 scaled_loss = loss * loss_weight
 
@@ -227,8 +233,9 @@ class RecipeDPOActor(DataParallelPPOActor):
                 "actor/single_wise_dpo_reward_neg": stats["negative_reward"].detach().item(),
                 "actor/single_wise_dpo_positive_fraction": stats["positive_fraction"].detach().item(),
                 "actor/policy_logps": policy_logps.detach().mean().item(),
-                "actor/reference_logps": micro_ref_logps.detach().mean().item(),
             }
+            if micro_ref_logps is not None:
+                micro_metrics["actor/reference_logps"] = micro_ref_logps.detach().mean().item()
             self._accumulate_weighted_metrics(aggregated_metrics, micro_metrics, loss_weight)
 
         grad_norm = self._optimizer_step()

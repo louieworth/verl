@@ -1,4 +1,7 @@
 import copy
+import hashlib
+import json
+import math
 import os
 from contextlib import contextmanager
 
@@ -73,6 +76,11 @@ class PointwiseDPODataset(Dataset):
         self.pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
         self.eos_token_id = tokenizer.eos_token_id
         self.reference_logps_key = config.get("reference_logps_key", "reference_logps")
+        self.length_estimation_mode = config.get("length_estimation_mode", "char")
+        self.length_estimation_batch_size = int(config.get("length_estimation_batch_size", 2048))
+        self.length_estimation_chars_per_token = float(config.get("length_estimation_chars_per_token", 4.0))
+        self.length_column = config.get("length_column", None)
+        self._sample_lengths: np.ndarray | None = None
         self._has_reference_logps = False
 
         self._download()
@@ -178,6 +186,137 @@ class PointwiseDPODataset(Dataset):
 
     def has_reference_logps(self) -> bool:
         return self._has_reference_logps
+
+    def get_sample_lengths(self) -> np.ndarray:
+        if self._sample_lengths is None:
+            self._sample_lengths = self._load_or_compute_sample_lengths()
+        return self._sample_lengths
+
+    def _sample_lengths_cache_path(self) -> str:
+        file_stats = []
+        for path in self.data_files:
+            try:
+                stat = os.stat(path)
+                file_stats.append((path, stat.st_size, int(stat.st_mtime)))
+            except FileNotFoundError:
+                file_stats.append((path, None, None))
+        payload = {
+            "files": file_stats,
+            "prompt_key": self.prompt_key,
+            "response_key": self.response_key,
+            "length_column": self.length_column,
+            "mode": self.length_estimation_mode,
+            "chars_per_token": self.length_estimation_chars_per_token,
+            "max_prompt_length": self.max_prompt_length,
+            "max_response_length": self.max_response_length,
+            "add_eos": self.add_eos,
+        }
+        cache_key = hashlib.sha1(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+        os.makedirs(self.cache_dir, exist_ok=True)
+        return os.path.join(self.cache_dir, f"pointwise_lengths_{cache_key}.npy")
+
+    def _load_or_compute_sample_lengths(self) -> np.ndarray:
+        cache_path = self._sample_lengths_cache_path()
+        if os.path.exists(cache_path):
+            cached = np.load(cache_path)
+            if len(cached) == len(self.dataframe):
+                return cached.astype(np.int32, copy=False)
+
+        if self.length_column is not None and self.length_column in self.dataframe.column_names:
+            lengths = np.asarray(self.dataframe[self.length_column], dtype=np.int32)
+            np.save(cache_path, lengths)
+            return lengths
+
+        lengths = np.empty(len(self.dataframe), dtype=np.int32)
+        progress = tqdm(
+            range(0, len(self.dataframe), self.length_estimation_batch_size),
+            desc="Estimating sample lengths",
+            total=math.ceil(len(self.dataframe) / self.length_estimation_batch_size),
+            unit="batch",
+            dynamic_ncols=True,
+            leave=False,
+        )
+        for start in progress:
+            end = min(start + self.length_estimation_batch_size, len(self.dataframe))
+            batch = self.dataframe[start:end]
+            lengths[start:end] = self._estimate_length_batch(batch)
+        progress.close()
+        np.save(cache_path, lengths)
+        return lengths
+
+    def _estimate_length_batch(self, batch: dict) -> np.ndarray:
+        prompts = batch[self.prompt_key]
+        responses = batch[self.response_key]
+        if (
+            self.length_estimation_mode == "token"
+            and prompts
+            and responses
+            and all(isinstance(prompt, str) for prompt in prompts)
+            and all(isinstance(response, str) for response in responses)
+        ):
+            prompt_lengths = np.asarray(
+                self.tokenizer(
+                    prompts,
+                    add_special_tokens=False,
+                    truncation=True,
+                    max_length=self.max_prompt_length,
+                    return_length=True,
+                )["length"],
+                dtype=np.int32,
+            )
+            response_max_len = self.max_response_length - int(self.add_eos and self.eos_token_id is not None)
+            response_lengths = np.asarray(
+                self.tokenizer(
+                    responses,
+                    add_special_tokens=False,
+                    truncation=True,
+                    max_length=max(response_max_len, 1),
+                    return_length=True,
+                )["length"],
+                dtype=np.int32,
+            )
+            if self.add_eos and self.eos_token_id is not None:
+                response_lengths = np.minimum(response_lengths + 1, self.max_response_length)
+            return prompt_lengths + response_lengths
+
+        return np.asarray(
+            [
+                self._estimate_prompt_length(prompt) + self._estimate_response_length(response)
+                for prompt, response in zip(prompts, responses, strict=False)
+            ],
+            dtype=np.int32,
+        )
+
+    def _estimate_prompt_length(self, prompt) -> int:
+        text = self._flatten_prompt_text(prompt)
+        approx = math.ceil(len(text) / max(self.length_estimation_chars_per_token, 1e-6))
+        return min(max(approx, 1), self.max_prompt_length)
+
+    def _estimate_response_length(self, response) -> int:
+        if not isinstance(response, str):
+            response = str(response)
+        approx = math.ceil(len(response) / max(self.length_estimation_chars_per_token, 1e-6))
+        if self.add_eos and self.eos_token_id is not None:
+            approx += 1
+        return min(max(approx, 1), self.max_response_length)
+
+    @staticmethod
+    def _flatten_prompt_text(prompt) -> str:
+        if isinstance(prompt, str):
+            return prompt
+        if isinstance(prompt, list):
+            parts = []
+            for message in prompt:
+                if isinstance(message, dict):
+                    content = message.get("content", "")
+                    if isinstance(content, list):
+                        parts.extend(str(item) for item in content)
+                    else:
+                        parts.append(str(content))
+                else:
+                    parts.append(str(message))
+            return "\n".join(parts)
+        return str(prompt)
 
     def _tokenize_prompt(self, prompt) -> list[int]:
         if isinstance(prompt, list):

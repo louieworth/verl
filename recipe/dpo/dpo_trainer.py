@@ -39,6 +39,7 @@ from recipe.dpo.batching import (
 from recipe.dpo.core_algos import (
     compute_dpo_loss,
     compute_prospect_dpo_loss,
+    prospect_negative_scale_at_step,
     compute_single_wise_dpo_loss,
     is_pointwise_dpo_loss,
     is_prospect_dpo_loss,
@@ -77,8 +78,6 @@ class RayDPOTrainer:
         self.prospect_dpo_enabled = is_prospect_dpo_loss(self.loss_type)
         self.single_wise_dpo_enabled = is_single_wise_dpo_loss(self.loss_type)
         self.pointwise_dpo_enabled = is_pointwise_dpo_loss(self.loss_type)
-        if self.pointwise_dpo_enabled and self.config.algorithm.get("reference_free", False):
-            raise ValueError("Point-wise offline DPO variants require algorithm.reference_free=false")
         self.requires_reference_model = requires_reference_model(
             self.loss_type,
             self.config.algorithm.get("reference_free", False),
@@ -298,7 +297,9 @@ class RayDPOTrainer:
             average_log_prob=self._use_average_log_prob(),
         )
 
-    def _get_point_reference_log_probs(self, batch: DataProto) -> torch.Tensor:
+    def _get_point_reference_log_probs(self, batch: DataProto) -> torch.Tensor | None:
+        if not self.requires_reference_model:
+            return None
         if "reference_logps" in batch.batch:
             return batch.batch["reference_logps"].float()
         return self._compute_point_reference_log_probs(batch)
@@ -341,11 +342,16 @@ class RayDPOTrainer:
                         beta=self.config.algorithm.dpo_beta,
                         s_dwell=batch.batch["s_dwell"],
                         p_ctr=batch.batch["p_ctr"],
-                        alpha_tau=self.config.algorithm.get("prospect_dpo_alpha_tau", 0.2),
-                        alpha_k=self.config.algorithm.get("prospect_dpo_alpha_k", 10.0),
-                        lambda_max=self.config.algorithm.get("prospect_dpo_lambda_max", 2.0),
-                        lambda_gamma=self.config.algorithm.get("prospect_dpo_lambda_gamma", 2.0),
-                        alpha_max=self.config.algorithm.get("prospect_dpo_alpha_max", 1.0),
+                        positive_kappa=self.config.algorithm.get("prospect_dpo_positive_kappa", 3.65),
+                        negative_kappa=self.config.algorithm.get("prospect_dpo_negative_kappa", 1.5),
+                        use_feedback_weights=self.config.algorithm.get("prospect_dpo_use_feedback_weights", True),
+                        reference_free=self.config.algorithm.get("reference_free", False),
+                        sft_coef=self.config.algorithm.get("prospect_dpo_sft_coef", 0.0),
+                        negative_scale=prospect_negative_scale_at_step(
+                            self.config.algorithm.get("prospect_dpo_negative_scale", 1.0),
+                            self.config.algorithm.get("prospect_dpo_negative_warmup_steps", 0),
+                            self.global_steps,
+                        ),
                     )
                     metrics["val/prospect_dpo_loss_pos"].append(stats["positive_loss"].item())
                     metrics["val/prospect_dpo_loss_neg"].append(stats["negative_loss"].item())
@@ -358,6 +364,7 @@ class RayDPOTrainer:
                         reference_logps=reference_logps,
                         labels=batch.batch["label"],
                         beta=self.config.algorithm.dpo_beta,
+                        reference_free=self.config.algorithm.get("reference_free", False),
                     )
                     metrics["val/single_wise_dpo_loss_pos"].append(stats["positive_loss"].item())
                     metrics["val/single_wise_dpo_loss_neg"].append(stats["negative_loss"].item())
@@ -392,6 +399,21 @@ class RayDPOTrainer:
 
         self._load_checkpoint()
 
+        configured_stop_at_step = self.config.trainer.get("stop_at_step", None)
+        stop_at_step = self.total_training_steps
+        if configured_stop_at_step is not None:
+            stop_at_step = int(configured_stop_at_step)
+            if stop_at_step <= 0:
+                raise ValueError(f"trainer.stop_at_step must be positive, got {stop_at_step}")
+            stop_at_step = min(stop_at_step, self.total_training_steps)
+
+        if self.global_steps >= stop_at_step:
+            print(
+                f"Checkpoint is already at global step {self.global_steps}, "
+                f"which has reached this run's stop_at_step={stop_at_step}."
+            )
+            return
+
         if self.config.trainer.get("val_before_train", True):
             val_metrics = self._validate()
             if val_metrics:
@@ -422,7 +444,7 @@ class RayDPOTrainer:
                 desc=f"Epoch {epoch + 1}/{self.config.trainer.total_epochs}",
             )
             for batch_idx, batch_dict in enumerate(self.train_dataloader, start=1):
-                if self.global_steps >= self.total_training_steps:
+                if self.global_steps >= stop_at_step:
                     break
                 
                 step_start = time.perf_counter()
@@ -433,13 +455,19 @@ class RayDPOTrainer:
                         dpo_update_batch = build_prospect_dpo_update_proto(
                             batch=batch,
                             beta=self.config.algorithm.dpo_beta,
-                            alpha_tau=self.config.algorithm.get("prospect_dpo_alpha_tau", 0.2),
-                            alpha_k=self.config.algorithm.get("prospect_dpo_alpha_k", 10.0),
-                            lambda_max=self.config.algorithm.get("prospect_dpo_lambda_max", 2.0),
-                            lambda_gamma=self.config.algorithm.get("prospect_dpo_lambda_gamma", 2.0),
-                            alpha_max=self.config.algorithm.get("prospect_dpo_alpha_max", 1.0),
+                            positive_kappa=self.config.algorithm.get("prospect_dpo_positive_kappa", 3.65),
+                            negative_kappa=self.config.algorithm.get("prospect_dpo_negative_kappa", 1.5),
                             average_log_prob=self._use_average_log_prob(),
                             reference_logps=reference_logps,
+                            reference_free=self.config.algorithm.get("reference_free", False),
+                            sft_coef=self.config.algorithm.get("prospect_dpo_sft_coef", 0.0),
+                            negative_scale=prospect_negative_scale_at_step(
+                                self.config.algorithm.get("prospect_dpo_negative_scale", 1.0),
+                                self.config.algorithm.get("prospect_dpo_negative_warmup_steps", 0),
+                                self.global_steps + 1,
+                            ),
+                            global_class_mean=self.config.algorithm.get("prospect_dpo_global_class_mean", False),
+                            use_feedback_weights=self.config.algorithm.get("prospect_dpo_use_feedback_weights", True),
                         )
                     else:
                         dpo_update_batch = build_single_wise_dpo_update_proto(
@@ -447,6 +475,7 @@ class RayDPOTrainer:
                             beta=self.config.algorithm.dpo_beta,
                             average_log_prob=self._use_average_log_prob(),
                             reference_logps=reference_logps,
+                            reference_free=self.config.algorithm.get("reference_free", False),
                         )
                 else:
                     ref_chosen, ref_rejected = self._compute_reference_log_probs(batch)
@@ -469,9 +498,10 @@ class RayDPOTrainer:
                 self.global_steps += 1
                 self.max_steps_duration = max(self.max_steps_duration, step_duration)
                 is_last_step = self.global_steps >= self.total_training_steps
+                is_run_stop_step = self.global_steps >= stop_at_step
                 is_epoch_end = batch_idx == len(self.train_dataloader) or is_last_step
                 log_freq = max(int(self.config.trainer.get("log_freq", 1)), 1)
-                if self.global_steps % log_freq == 0 or is_last_step:
+                if self.global_steps % log_freq == 0 or is_last_step or is_run_stop_step:
                     logger.log(data=metrics, step=self.global_steps)
                 progress_bar.update(1)
 
@@ -479,7 +509,7 @@ class RayDPOTrainer:
                 should_save_by_epoch = (
                     save_freq_epochs > 0 and is_epoch_end and (epoch + 1) % save_freq_epochs == 0
                 )
-                if should_save_by_step or should_save_by_epoch:
+                if should_save_by_step or should_save_by_epoch or is_run_stop_step:
                     self._save_checkpoint()
                     # When keep_only_latest_rolling_ckpt is enabled, treat interval
                     # (step) saves as rolling: delete the previous rolling ckpt so
@@ -514,7 +544,7 @@ class RayDPOTrainer:
                 ):
                     self._save_checkpoint()
 
-            if self.global_steps >= self.total_training_steps:
+            if self.global_steps >= stop_at_step:
                 progress_bar.close()
                 break
 

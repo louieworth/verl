@@ -1,26 +1,33 @@
 #!/usr/bin/env bash
 set -euxo pipefail
 
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../../.." && pwd)"
+cd "${REPO_ROOT}"
+source "${SCRIPT_DIR}/common.sh"
+
 # Ray needs a local filesystem for sockets, not Lustre
 export RAY_TMPDIR="${RAY_TMPDIR:-${SLURM_TMPDIR:-/tmp}}"
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+export PYTORCH_ALLOC_CONF="${PYTORCH_ALLOC_CONF:-expandable_segments:True}"
 
 # Files and paths
-DATA_ROOT="${SINGLE_WISE_DPO_DATA_ROOT:-/home/lijiang3/projects/def-y7ding/lijiang3/hf_cache/data}"
+DATA_ROOT="${SINGLE_WISE_DPO_DATA_ROOT:-${PENS_DPO_DATA_ROOT}}"
 INPUT_VARIANT="${SINGLE_WISE_DPO_INPUT_VARIANT:-click_hist}"
 SAMPLE_VARIANT="${SINGLE_WISE_DPO_SAMPLE_VARIANT:-all}"
-LOSS_TYPE="${POINTWISE_DPO_LOSS_TYPE:-${SINGLE_WISE_DPO_LOSS_TYPE:-single_wise_dpo}}"
+LOSS_TYPE="${POINTWISE_DPO_LOSS_TYPE:-${SINGLE_WISE_DPO_LOSS_TYPE:-prospect_dpo}}"
 TRAIN_FILE="${SINGLE_WISE_DPO_TRAIN_FILE:-}"
 HAS_EXPLICIT_TRAIN_FILE=false
 if [[ -n "${TRAIN_FILE}" ]]; then
   HAS_EXPLICIT_TRAIN_FILE=true
 fi
-MODEL_DIR="${SINGLE_WISE_DPO_MODEL_DIR:-/home/lijiang3/projects/def-y7ding/lijiang3/hf_cache/hub/models--Qwen--Qwen3-8B/snapshots/b968826d9c46dd6066d109eabc6255188de91218}"
+MODEL_DIR="${SINGLE_WISE_DPO_MODEL_DIR:-${PENS_MODEL_DIR}}"
 TOKENIZER_PATH="${SINGLE_WISE_DPO_TOKENIZER_PATH:-${MODEL_DIR}}"
 REFERENCE_MODEL_DIR="${SINGLE_WISE_DPO_REFERENCE_MODEL_DIR:-}"
-PROJECT_NAME="${SINGLE_WISE_DPO_PROJECT_NAME:-PENS}"
+PROJECT_NAME="${SINGLE_WISE_DPO_PROJECT_NAME:-${PENS_PROJECT_NAME}}"
 USE_LORA="${SINGLE_WISE_DPO_USE_LORA:-true}"
-CKPT_ROOT="${SINGLE_WISE_DPO_CKPT_ROOT:-/home/lijiang3/projects/def-y7ding/lijiang3/hf_cache/models/ckpt/PENS}"
-PYTHON_BIN="${SINGLE_WISE_DPO_PYTHON_BIN:-python3}"
+CKPT_ROOT="${SINGLE_WISE_DPO_CKPT_ROOT:-${PENS_CKPT_ROOT}}"
+PYTHON_BIN="${SINGLE_WISE_DPO_PYTHON_BIN:-${PENS_PYTHON_BIN}}"
 EXPORT_HF_MERGED="${SINGLE_WISE_DPO_EXPORT_HF_MERGED:-true}"
 EXPORT_HF_MERGED_DTYPE="${SINGLE_WISE_DPO_EXPORT_HF_MERGED_DTYPE:-bfloat16}"
 EXPORT_HF_MERGED_MAX_SHARD_SIZE="${SINGLE_WISE_DPO_EXPORT_HF_MERGED_MAX_SHARD_SIZE:-5GB}"
@@ -32,25 +39,27 @@ RESPONSE_KEY="${SINGLE_WISE_DPO_RESPONSE_KEY:-response}"
 LABEL_KEY="${SINGLE_WISE_DPO_LABEL_KEY:-label}"
 S_DWELL_KEY="${SINGLE_WISE_DPO_S_DWELL_KEY:-s_dwell}"
 P_CTR_KEY="${SINGLE_WISE_DPO_P_CTR_KEY:-p_ctr}"
-TRAIN_BATCH_SIZE="${SINGLE_WISE_DPO_TRAIN_BATCH_SIZE:-256}"
+TRAIN_BATCH_SIZE="${SINGLE_WISE_DPO_TRAIN_BATCH_SIZE:-112}"
 MAX_PROMPT_LENGTH="${SINGLE_WISE_DPO_MAX_PROMPT_LENGTH:-8192}"
 MAX_RESPONSE_LENGTH="${SINGLE_WISE_DPO_MAX_RESPONSE_LENGTH:-48}"
 PROMPT_TRUNCATION="${SINGLE_WISE_DPO_PROMPT_TRUNCATION:-}"
 DATALOADER_NUM_WORKERS="${SINGLE_WISE_DPO_DATALOADER_NUM_WORKERS:-8}"
+SEED="${SINGLE_WISE_DPO_SEED:-}"
+APPLY_CHAT_TEMPLATE_KWARGS="${SINGLE_WISE_DPO_APPLY_CHAT_TEMPLATE_KWARGS:-}"
 
 # Algorithm hyperparameters
-BETA="${SINGLE_WISE_DPO_BETA:-0.5}"
-ALPHA_TAU="${SINGLE_WISE_DPO_ALPHA_TAU:-0.2}"
-ALPHA_K="${SINGLE_WISE_DPO_ALPHA_K:-10.0}"
-ALPHA_MAX="${SINGLE_WISE_DPO_ALPHA_MAX:-1.0}"
-LAMBDA_MAX="${SINGLE_WISE_DPO_LAMBDA_MAX:-2.0}"
-LAMBDA_GAMMA="${SINGLE_WISE_DPO_LAMBDA_GAMMA:-2.0}"
-AVERAGE_LOG_PROB="${SINGLE_WISE_DPO_AVERAGE_LOG_PROB:-false}"
+REFERENCE_FREE="${SINGLE_WISE_DPO_REFERENCE_FREE:-false}"
+BETA="${SINGLE_WISE_DPO_BETA:-0.1}"
+POSITIVE_KAPPA="${SINGLE_WISE_DPO_POSITIVE_KAPPA:-3.65}"
+NEGATIVE_KAPPA="${SINGLE_WISE_DPO_NEGATIVE_KAPPA:-1.5}"
+USE_FEEDBACK_WEIGHTS="${SINGLE_WISE_DPO_USE_FEEDBACK_WEIGHTS:-true}"
+AVERAGE_LOG_PROB="${SINGLE_WISE_DPO_AVERAGE_LOG_PROB:-true}"
 
 # Optimizer / LR schedule
-ACTOR_LR="${SINGLE_WISE_DPO_ACTOR_LR:-1e-6}"
-ACTOR_LR_SCHEDULER_TYPE="${SINGLE_WISE_DPO_ACTOR_LR_SCHEDULER_TYPE:-constant}"
-ACTOR_LR_WARMUP_STEPS_RATIO="${SINGLE_WISE_DPO_ACTOR_LR_WARMUP_STEPS_RATIO:-0.0}"
+ACTOR_LR="${SINGLE_WISE_DPO_ACTOR_LR:-${PENS_LR}}"
+ACTOR_LR_SCHEDULER_TYPE="${SINGLE_WISE_DPO_ACTOR_LR_SCHEDULER_TYPE:-cosine}"
+ACTOR_LR_WARMUP_STEPS="${SINGLE_WISE_DPO_ACTOR_LR_WARMUP_STEPS:-}"
+ACTOR_LR_WARMUP_STEPS_RATIO="${SINGLE_WISE_DPO_ACTOR_LR_WARMUP_STEPS_RATIO:-0.03}"
 ACTOR_LR_MIN_RATIO="${SINGLE_WISE_DPO_ACTOR_LR_MIN_RATIO:-0.1}"
 ACTOR_LR_NUM_CYCLES="${SINGLE_WISE_DPO_ACTOR_LR_NUM_CYCLES:-0.5}"
 ACTOR_WEIGHT_DECAY="${SINGLE_WISE_DPO_ACTOR_WEIGHT_DECAY:-0.01}"
@@ -59,6 +68,7 @@ ACTOR_WEIGHT_DECAY="${SINGLE_WISE_DPO_ACTOR_WEIGHT_DECAY:-0.01}"
 NNODES="${SINGLE_WISE_DPO_NNODES:-4}"
 N_GPUS_PER_NODE="${SINGLE_WISE_DPO_N_GPUS_PER_NODE:-4}"
 ROLLOUT_TP_SIZE="${SINGLE_WISE_DPO_ROLLOUT_TP_SIZE:-1}"
+NCCL_TIMEOUT="${SINGLE_WISE_DPO_NCCL_TIMEOUT:-600}"
 ATTN_IMPLEMENTATION="${SINGLE_WISE_DPO_ATTN_IMPLEMENTATION:-flash_attention_2}"
 MODEL_DTYPE="${SINGLE_WISE_DPO_MODEL_DTYPE:-bf16}"
 USE_REMOVE_PADDING="${SINGLE_WISE_DPO_USE_REMOVE_PADDING:-false}"
@@ -76,9 +86,11 @@ LORA_EXCLUDE_MODULES="${SINGLE_WISE_DPO_LORA_EXCLUDE_MODULES:-}"
 # Training and logging
 MICRO_BATCH_SIZE="${SINGLE_WISE_DPO_MICRO_BATCH_SIZE:-8}"
 TOTAL_EPOCHS="${SINGLE_WISE_DPO_TOTAL_EPOCHS:-1}"
-TOTAL_TRAINING_STEPS="${SINGLE_WISE_DPO_TOTAL_TRAINING_STEPS:-}"
+TOTAL_TRAINING_STEPS="${SINGLE_WISE_DPO_TOTAL_TRAINING_STEPS:-${PENS_TOTAL_TRAINING_STEPS}}"
+STOP_AT_STEP="${SINGLE_WISE_DPO_STOP_AT_STEP:-}"
 LOG_FREQ="${SINGLE_WISE_DPO_LOG_FREQ:-10}"
-SAVE_FREQ="${SINGLE_WISE_DPO_SAVE_FREQ:--1}"
+LOGGER="${SINGLE_WISE_DPO_LOGGER:-${PENS_LOGGER}}"
+SAVE_FREQ="${SINGLE_WISE_DPO_SAVE_FREQ:-${PENS_EVAL_INTERVAL}}"
 SAVE_FREQ_EPOCHS="${SINGLE_WISE_DPO_SAVE_FREQ_EPOCHS:-1}"
 # Rolling-ckpt policy: when enabled, step-saves keep only the most recent one
 # (previous rolling ckpt is deleted on each new step-save); epoch-saves are
@@ -92,13 +104,21 @@ LENGTH_ESTIMATION_MODE="${SINGLE_WISE_DPO_LENGTH_ESTIMATION_MODE:-char}"
 LENGTH_ESTIMATION_BATCH_SIZE="${SINGLE_WISE_DPO_LENGTH_ESTIMATION_BATCH_SIZE:-2048}"
 LENGTH_ESTIMATION_CHARS_PER_TOKEN="${SINGLE_WISE_DPO_LENGTH_ESTIMATION_CHARS_PER_TOKEN:-4.0}"
 AUTO_PRECOMPUTE_REFERENCE_LOGPS="${SINGLE_WISE_DPO_AUTO_PRECOMPUTE_REFERENCE_LOGPS:-true}"
-REFERENCE_LOGPS_MATERIALIZED_DIR="${SINGLE_WISE_DPO_REFERENCE_LOGPS_MATERIALIZED_DIR:-${DATA_ROOT}/pens}"
+REFERENCE_LOGPS_MATERIALIZED_DIR="${SINGLE_WISE_DPO_REFERENCE_LOGPS_MATERIALIZED_DIR:-${CKPT_ROOT}/reference_logps}"
 REFERENCE_LOGPS_ALLOW_CROSS_NAMESPACE_REUSE="${SINGLE_WISE_DPO_REFERENCE_LOGPS_ALLOW_CROSS_NAMESPACE_REUSE:-true}"
 REFERENCE_LOGPS_ALLOW_SAMPLE_ID_REUSE="${SINGLE_WISE_DPO_REFERENCE_LOGPS_ALLOW_SAMPLE_ID_REUSE:-true}"
 REFERENCE_LOGPS_NUM_WORKERS="${SINGLE_WISE_DPO_REFERENCE_LOGPS_NUM_WORKERS:-0}"
 REFERENCE_LOGPS_ROWS_PER_TASK="${SINGLE_WISE_DPO_REFERENCE_LOGPS_ROWS_PER_TASK:-2048}"
 REFERENCE_LOGPS_MAX_BATCH_SIZE="${SINGLE_WISE_DPO_REFERENCE_LOGPS_MAX_BATCH_SIZE:-4}"
 REFERENCE_LOGPS_MAX_BATCHED_TOKENS="${SINGLE_WISE_DPO_REFERENCE_LOGPS_MAX_BATCHED_TOKENS:-16384}"
+
+RUN_POST_TRAIN_EVAL="${SINGLE_WISE_DPO_RUN_POST_TRAIN_EVAL:-false}"
+POST_TRAIN_EVAL_SCRIPT="${SINGLE_WISE_DPO_POST_TRAIN_EVAL_SCRIPT:-recipe/dpo/evaluation/run_pens_personalized_eval.sh}"
+POST_TRAIN_EVAL_WORKDIR="${SINGLE_WISE_DPO_POST_TRAIN_EVAL_WORKDIR:-$(pwd)}"
+POST_TRAIN_EVAL_NNODES="${SINGLE_WISE_DPO_POST_TRAIN_EVAL_NNODES:-1}"
+POST_TRAIN_EVAL_NGPUS_PER_NODE="${SINGLE_WISE_DPO_POST_TRAIN_EVAL_NGPUS_PER_NODE:-1}"
+POST_TRAIN_EVAL_GEN_TP="${SINGLE_WISE_DPO_POST_TRAIN_EVAL_GEN_TP:-1}"
+POST_TRAIN_EVAL_VLLM_ENABLE_THINKING="${SINGLE_WISE_DPO_POST_TRAIN_EVAL_VLLM_ENABLE_THINKING:-false}"
 
 LOSS_TYPE_NORMALIZED="$(printf '%s' "${LOSS_TYPE}" | tr '[:upper:]' '[:lower:]')"
 case "${LOSS_TYPE_NORMALIZED}" in
@@ -429,7 +449,7 @@ export_latest_hf_merged() {
 
   local export_cmd=(
     "${PYTHON_BIN}"
-    recipe/dpo/export_lora_checkpoint_to_hf.py
+    recipe/dpo/scripts/export_lora_checkpoint_to_hf.py
     --actor-dir
     "${actor_dir}"
     --output-dir
@@ -451,8 +471,52 @@ export_latest_hf_merged() {
   "${export_cmd[@]}"
 }
 
-if [[ -z "${MODEL_DIR}" ]]; then
-  echo "Missing model path. Set SINGLE_WISE_DPO_MODEL_DIR." >&2
+run_post_train_eval() {
+  if ! is_truthy "${RUN_POST_TRAIN_EVAL}"; then
+    return 0
+  fi
+
+  local latest_ckpt_dir
+  if ! latest_ckpt_dir="$(find_latest_checkpoint_dir)"; then
+    echo "Unable to find the latest checkpoint under ${CKPT_DIR} for post-training eval." >&2
+    return 1
+  fi
+
+  local eval_model_dir="${latest_ckpt_dir}/actor/hf_merged"
+  if [[ ! -d "${eval_model_dir}" ]]; then
+    echo "Missing merged HF model for post-training eval: ${eval_model_dir}" >&2
+    echo "Keep SINGLE_WISE_DPO_EXPORT_HF_MERGED=true or create actor/hf_merged before eval." >&2
+    return 1
+  fi
+  if [[ ! -f "${POST_TRAIN_EVAL_SCRIPT}" ]]; then
+    echo "Missing post-training eval script: ${POST_TRAIN_EVAL_SCRIPT}" >&2
+    return 1
+  fi
+
+  echo "Running post-training PENS eval for ${eval_model_dir}"
+  MODEL_PATH="${eval_model_dir}" \
+    PYTHON_BIN="${PYTHON_BIN}" \
+    WORKDIR="${POST_TRAIN_EVAL_WORKDIR}" \
+    NNODES="${POST_TRAIN_EVAL_NNODES}" \
+    NGPUS_PER_NODE="${POST_TRAIN_EVAL_NGPUS_PER_NODE}" \
+    GEN_TP="${POST_TRAIN_EVAL_GEN_TP}" \
+    VLLM_ENABLE_THINKING="${POST_TRAIN_EVAL_VLLM_ENABLE_THINKING}" \
+    bash "${POST_TRAIN_EVAL_SCRIPT}"
+}
+
+if [[ ! -x "${PYTHON_BIN}" ]]; then
+  echo "Missing or non-executable Python interpreter: ${PYTHON_BIN}" >&2
+  echo "Set SINGLE_WISE_DPO_PYTHON_BIN to the verl environment's Python executable." >&2
+  exit 1
+fi
+if [[ -z "${MODEL_DIR}" || ! -d "${MODEL_DIR}" || ! -f "${MODEL_DIR}/config.json" ]]; then
+  echo "Missing or incomplete model directory: ${MODEL_DIR}" >&2
+  echo "Set SINGLE_WISE_DPO_MODEL_DIR to a local Hugging Face model directory." >&2
+  exit 1
+fi
+if [[ ! -d "${TOKENIZER_PATH}" || ! -f "${TOKENIZER_PATH}/tokenizer_config.json" ]]; then
+  echo "Missing or incomplete tokenizer directory: ${TOKENIZER_PATH}" >&2
+  echo "Set SINGLE_WISE_DPO_TOKENIZER_PATH to a local tokenizer directory." >&2
   exit 1
 fi
 
@@ -479,9 +543,15 @@ REFERENCE_MODEL_SLUG="$(reference_model_slug "${REFERENCE_MODEL_EFFECTIVE_DIR}")
 # Timestamp the experiment/save path so re-runs never clobber or silently
 # resume from a stale ckpt. Override SINGLE_WISE_DPO_RUN_TIMESTAMP to pin.
 SINGLE_WISE_DPO_RUN_TIMESTAMP="${SINGLE_WISE_DPO_RUN_TIMESTAMP:-$(date +%Y%m%d_%H%M%S)}"
-DEFAULT_EXPERIMENT_NAME="${LOSS_TYPE_NORMALIZED}_${INPUT_VARIANT}_${SAMPLE_VARIANT}_${FINETUNE_VARIANT}_${MODEL_SLUG}_${SINGLE_WISE_DPO_RUN_TIMESTAMP}"
-EXPERIMENT_NAME="${SINGLE_WISE_DPO_EXPERIMENT_NAME:-${DEFAULT_EXPERIMENT_NAME}}"
-CKPT_DIR="${SINGLE_WISE_DPO_CKPT_DIR:-${CKPT_ROOT}/${EXPERIMENT_NAME}}"
+export POINTWISE_DPO_LOSS_TYPE="${LOSS_TYPE_NORMALIZED}"
+export SINGLE_WISE_DPO_MODEL_DIR="${MODEL_DIR}" SINGLE_WISE_DPO_TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE}"
+export SINGLE_WISE_DPO_ACTOR_LR="${ACTOR_LR}" SINGLE_WISE_DPO_REFERENCE_FREE="${REFERENCE_FREE}"
+export SINGLE_WISE_DPO_SAMPLE_VARIANT="${SAMPLE_VARIANT}" SINGLE_WISE_DPO_INPUT_VARIANT="${INPUT_VARIANT}"
+export SINGLE_WISE_DPO_USE_LORA="${USE_LORA}" SINGLE_WISE_DPO_PROJECT_NAME="${PROJECT_NAME}"
+export SINGLE_WISE_DPO_LOGGER="${LOGGER}"
+pens_init_run dpo "$@"
+EXPERIMENT_NAME="${SINGLE_WISE_DPO_EXPERIMENT_NAME}"
+CKPT_DIR="${SINGLE_WISE_DPO_CKPT_DIR}"
 
 if [[ -n "${TRAIN_FILES_OVERRIDE}" ]]; then
   if [[ -n "${POS_TRAIN_FILE}" ]]; then
@@ -507,9 +577,16 @@ fi
 
 mkdir -p "${CKPT_DIR}"
 mkdir -p "${REFERENCE_LOGPS_MATERIALIZED_DIR}"
+mkdir -p "${WANDB_DIR}"
 
 extra_args=()
 extra_args+=("data.val_files=null")
+if [[ -n "${SEED}" ]]; then
+  extra_args+=("data.seed=${SEED}")
+fi
+if [[ -n "${APPLY_CHAT_TEMPLATE_KWARGS}" ]]; then
+  extra_args+=("+data.apply_chat_template_kwargs=${APPLY_CHAT_TEMPLATE_KWARGS}")
+fi
 if [[ -n "${LORA_ADAPTER_PATH}" ]]; then
   extra_args+=("actor_rollout_ref.model.lora_adapter_path=${LORA_ADAPTER_PATH}")
 fi
@@ -548,11 +625,9 @@ extra_args+=("trainer.log_val_generations=0")
 if [[ "${LOSS_TYPE_NORMALIZED}" == "prospect_dpo" ]]; then
   extra_args+=("data.s_dwell_key=${S_DWELL_KEY}")
   extra_args+=("data.p_ctr_key=${P_CTR_KEY}")
-  extra_args+=("algorithm.prospect_dpo_alpha_tau=${ALPHA_TAU}")
-  extra_args+=("algorithm.prospect_dpo_alpha_k=${ALPHA_K}")
-  extra_args+=("algorithm.prospect_dpo_alpha_max=${ALPHA_MAX}")
-  extra_args+=("algorithm.prospect_dpo_lambda_max=${LAMBDA_MAX}")
-  extra_args+=("algorithm.prospect_dpo_lambda_gamma=${LAMBDA_GAMMA}")
+  extra_args+=("algorithm.prospect_dpo_positive_kappa=${POSITIVE_KAPPA}")
+  extra_args+=("algorithm.prospect_dpo_negative_kappa=${NEGATIVE_KAPPA}")
+  extra_args+=("algorithm.prospect_dpo_use_feedback_weights=${USE_FEEDBACK_WEIGHTS}")
 fi
 extra_args+=("algorithm.average_log_prob=${AVERAGE_LOG_PROB}")
 
@@ -573,7 +648,7 @@ cmd=(
   "+actor_rollout_ref.model.override_config.attn_implementation=${ATTN_IMPLEMENTATION}"
   "algorithm.dpo_beta=${BETA}"
   "algorithm.dpo_loss_type=${LOSS_TYPE_NORMALIZED}"
-  "algorithm.reference_free=false"
+  "algorithm.reference_free=${REFERENCE_FREE}"
   "actor_rollout_ref.actor.optim.lr=${ACTOR_LR}"
   "actor_rollout_ref.actor.optim.lr_scheduler_type=${ACTOR_LR_SCHEDULER_TYPE}"
   "actor_rollout_ref.actor.optim.lr_warmup_steps_ratio=${ACTOR_LR_WARMUP_STEPS_RATIO}"
@@ -589,6 +664,7 @@ cmd=(
   "data.prompt_truncation=${PROMPT_TRUNCATION}"
   "data.dataloader_num_workers=${DATALOADER_NUM_WORKERS}"
   "actor_rollout_ref.rollout.tensor_model_parallel_size=${ROLLOUT_TP_SIZE}"
+  "actor_rollout_ref.nccl_timeout=${NCCL_TIMEOUT}"
   "actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=${MICRO_BATCH_SIZE}"
   "actor_rollout_ref.actor.ppo_max_token_len_per_gpu=${MAX_TOKEN_LEN_PER_GPU}"
   "actor_rollout_ref.actor.fsdp_config.model_dtype=${MODEL_DTYPE}"
@@ -601,9 +677,16 @@ cmd=(
   "trainer.default_local_dir=${CKPT_DIR}"
   "trainer.save_freq=${SAVE_FREQ}"
   "trainer.resume_mode=${RESUME_MODE}"
+  "trainer.logger=${LOGGER}"
+  "+trainer.wandb_run_id=${WANDB_RUN_ID}"
+  "+trainer.wandb_dir=${WANDB_DIR}"
+  "+trainer.eval_config_json=$(pens_hydra_quote "${PENS_EVAL_CONFIG_JSON}")"
   "+trainer.log_freq=${LOG_FREQ}"
   "+trainer.keep_only_latest_rolling_ckpt=${KEEP_ONLY_LATEST_ROLLING_CKPT}"
 )
+if [[ -n "${ACTOR_LR_WARMUP_STEPS}" ]]; then
+  cmd+=("actor_rollout_ref.actor.optim.lr_warmup_steps=${ACTOR_LR_WARMUP_STEPS}")
+fi
 if [[ -n "${MAX_ACTOR_CKPT_TO_KEEP}" ]]; then
   cmd+=("+trainer.max_actor_ckpt_to_keep=${MAX_ACTOR_CKPT_TO_KEEP}")
 fi
@@ -617,6 +700,15 @@ if [[ "${USE_SINGLE_WISE_LENGTH_BUCKET_CONFIG}" == "true" ]]; then
     "data.length_estimation_chars_per_token=${LENGTH_ESTIMATION_CHARS_PER_TOKEN}"
   )
 fi
+if [[ "${LOSS_TYPE_NORMALIZED}" == "prospect_dpo" && "${USE_LENGTH_BUCKET_SAMPLER}" == "true" ]]; then
+  cmd+=(
+    "+data.use_length_bucket_sampler=${USE_LENGTH_BUCKET_SAMPLER}"
+    "+data.length_bucket_size_multiplier=${LENGTH_BUCKET_SIZE_MULTIPLIER}"
+    "+data.length_estimation_mode=${LENGTH_ESTIMATION_MODE}"
+    "+data.length_estimation_batch_size=${LENGTH_ESTIMATION_BATCH_SIZE}"
+    "+data.length_estimation_chars_per_token=${LENGTH_ESTIMATION_CHARS_PER_TOKEN}"
+  )
+fi
 if [[ "${LOSS_TYPE_NORMALIZED}" == "prospect_dpo" ]]; then
   cmd+=("+trainer.save_freq_epochs=${SAVE_FREQ_EPOCHS}")
 else
@@ -626,8 +718,27 @@ fi
 if [[ -n "${TOTAL_TRAINING_STEPS}" ]]; then
   cmd+=("trainer.total_training_steps=${TOTAL_TRAINING_STEPS}")
 fi
+if [[ -n "${STOP_AT_STEP}" ]]; then
+  cmd+=("+trainer.stop_at_step=${STOP_AT_STEP}")
+fi
 cmd+=("${extra_args[@]}")
 cmd+=("$@")
 
+if is_truthy "${SINGLE_WISE_DPO_DRY_RUN:-false}"; then
+  printf 'DPO launch command: %s\n' "${cmd[*]}"
+  exit 0
+fi
+
 "${cmd[@]}"
+
+# Hydra inspection modes do not run training or create checkpoints.
+for arg in "$@"; do
+  case "${arg}" in
+    --cfg|--cfg=*|--info|--info=*|--help|-h)
+      exit 0
+      ;;
+  esac
+done
+
 export_latest_hf_merged
+run_post_train_eval

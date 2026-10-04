@@ -65,6 +65,12 @@ trainer:
   experiment_name: test
   total_epochs: 4
   total_training_steps: null
+
+  # Optional absolute optimizer step at which this invocation saves and exits.
+  # This supports interleaved external evaluation without shortening the
+  # optimizer/LR schedule configured by total_training_steps.
+  stop_at_step: null
+
   logger: [ 'console', 'wandb' ]
   seed: 1
   save_freq: -1

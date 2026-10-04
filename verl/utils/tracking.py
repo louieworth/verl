@@ -61,7 +61,20 @@ class Tracking:
                 assert backend in self.supported_backend, f"{backend} is not supported"
 
         self.logger = {}
+        trainer_config = (config or {}).get("trainer", {})
+        run_id = trainer_config.get("wandb_run_id")
+        if run_id:
+            from recipe.dpo.run.common import default_paths, load_env_file
 
+            load_env_file()
+        tracking_config = config
+        if run_id:
+            train_config = dict(config or {})
+            train_config["trainer"] = {key: value for key, value in trainer_config.items() if key != "eval_config_json"}
+            tracking_config = {
+                "train": train_config,
+                "eval": json.loads(trainer_config.get("eval_config_json") or "{}"),
+            }
         if "tracking" in default_backend or "wandb" in default_backend:
             import os
 
@@ -71,8 +84,35 @@ class Tracking:
             if config and config["trainer"].get("wandb_proxy", None):
                 settings = wandb.Settings(https_proxy=config["trainer"]["wandb_proxy"])
             entity = os.environ.get("WANDB_ENTITY", None)
-            wandb.init(project=project_name, name=experiment_name, entity=entity, config=config, settings=settings)
-            self.logger["wandb"] = wandb
+            init_kwargs = {}
+            if run_id:
+                directory = trainer_config.get("wandb_dir")
+                if directory:
+                    Path(directory).mkdir(parents=True, exist_ok=True)
+                init_kwargs = {
+                    "id": run_id,
+                    "resume": os.environ.get("WANDB_RESUME", "allow"),
+                    "mode": default_paths()["WANDB_MODE"],
+                    "dir": directory,
+                    "allow_val_change": True,
+                    "job_type": "train-and-eval",
+                }
+            run = wandb.init(
+                project=project_name,
+                name=experiment_name,
+                entity=entity,
+                config=tracking_config,
+                settings=settings,
+                **init_kwargs,
+            )
+            if run_id:
+                run.define_metric("train/global_step")
+                run.define_metric("eval/global_step")
+                run.define_metric("train/*", step_metric="train/global_step")
+                run.define_metric("eval/*", step_metric="eval/global_step")
+                self.logger["wandb"] = _WandbStepAdapter(run)
+            else:
+                self.logger["wandb"] = wandb
 
         if "trackio" in default_backend:
             import trackio
@@ -179,6 +219,32 @@ class Tracking:
             self.logger["trackio"].finish()
         if "file" in self.logger:
             self.logger["file"].finish()
+
+
+class _WandbStepAdapter:
+    """Use optimizer steps as chart axes while W&B advances its history index."""
+
+    def __init__(self, run):
+        self.run = run
+
+    def log(self, data, step):
+        metrics = {}
+        for key, value in data.items():
+            group, separator, name = key.partition("/")
+            if group in {"eval", "val"} and separator:
+                target = "eval/" + name.replace("/", "_")
+            elif group in {"actor", "train"} and separator:
+                target = "train/" + name.replace("/", "_")
+            else:
+                target = "train/" + key.replace("/", "_")
+            metrics[target] = value
+        for group in ("train", "eval"):
+            if any(key.startswith(group + "/") for key in metrics):
+                metrics[f"{group}/global_step"] = step
+        self.run.log(metrics)
+
+    def finish(self, exit_code=0):
+        self.run.finish(exit_code=exit_code)
 
 
 class ClearMLLogger:

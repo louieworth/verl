@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Post-process raw PENS generations and update shared metrics JSON."""
+"""Score raw PENS generations, log to W&B, and hand off checkpoint state."""
+# ruff: noqa: E402 -- direct script imports follow the repository path setup.
 
 from __future__ import annotations
 
@@ -26,26 +27,25 @@ except ModuleNotFoundError:
 
 import pandas as pd
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-if str(SCRIPT_DIR) not in sys.path:
-    sys.path.insert(0, str(SCRIPT_DIR))
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
-from extract_pens_prediction_json import extract_generation_text, extract_prediction, load_rows
-from score_pens_predictions import (
+from recipe.dpo.evaluation.manage_pens_interleaved_checkpoint import record_evaluation_result
+from recipe.dpo.evaluation.score_pens_predictions import (
     STRUCTURED_PARSE_STATUSES,
     choose_prediction_key,
     join_predictions,
     load_references,
+    load_table,
     mean,
     parse_reference_list,
     score_with_rouge_package_multi,
 )
+from recipe.dpo.evaluation.wandb_utils import evaluation_config, log_eval_to_wandb
+from recipe.dpo.run.common import default_paths
 
-DEFAULT_MODEL_PATH = (
-    "/data/data/jiangli/ckpt/PENS/"
-    "single_wise_dpo_click_hist_positive_only_lora_qwen3_5-4b/global_step_5341/actor/hf_merged"
-)
-DEFAULT_TEST_FILE = "/data/data/jiangli/data/pens/extract/personalized_test.tsv"
+DEFAULT_MODEL_PATH = default_paths()["PENS_MODEL_DIR"]
+DEFAULT_TEST_FILE = default_paths()["PENS_EVAL_TEST_FILE"]
 
 
 def env_default(name: str, default: str | None = None) -> str | None:
@@ -69,30 +69,44 @@ def env_flag(name: str, default: bool = False) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def thinking_metadata(value: str) -> tuple[bool | None, str]:
+    normalized = value.strip().lower()
+    if normalized == "skip":
+        return None, "NA"
+    return normalized == "true", "ON" if normalized == "true" else "OFF"
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--workdir", type=Path, default=Path(env_default("WORKDIR", os.getcwd())))
     parser.add_argument("--model-path", type=str, default=env_default("MODEL_PATH", DEFAULT_MODEL_PATH))
     parser.add_argument("--test-file", type=Path, default=env_path("TEST_FILE") or Path(DEFAULT_TEST_FILE))
     parser.add_argument("--results-gen-dir", type=Path, default=env_path("RESULTS_GEN_DIR"))
-    parser.add_argument("--results-dir", type=Path, default=env_path("RESULTS_DIR"))
+    # Accept old arguments from already launched drivers without writing them.
+    parser.add_argument("--results-dir", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--raw-file", type=Path, default=env_path("RAW_FILE"))
-    parser.add_argument("--result-json-file", type=Path, default=env_path("RESULT_JSON_FILE"))
+    parser.add_argument(
+        "--result-json-file", type=Path, default=env_path("RESULT_JSON_FILE"), help=argparse.SUPPRESS
+    )
+    parser.add_argument("--checkpoint-state-file", type=Path, default=env_path("PENS_EVAL_STATE_FILE"))
     parser.add_argument("--model-key", type=str, default=env_default("MODEL_KEY"))
     parser.add_argument("--backend", choices=["rouge"], default="rouge")
     parser.add_argument("--response-index", type=int, default=int(env_default("RESPONSE_INDEX", "0")))
     parser.add_argument("--align-by-order", action="store_true", default=env_flag("ALIGN_BY_ORDER"))
     parser.add_argument(
         "--thinking",
-        choices=["true", "false"],
+        choices=["true", "false", "skip"],
         default=env_default("VLLM_ENABLE_THINKING", "false"),
-        help="Whether the generation used vLLM thinking mode. Tagged into the result JSON key.",
+        help=(
+            "Whether generation used vLLM thinking mode; skip means the model has no "
+            "thinking-mode switch. Tagged into the W&B result key."
+        ),
     )
     parser.add_argument(
         "--date-tag",
         type=str,
         default=env_default("DATE_TAG") or datetime.now().strftime("%Y%m%d"),
-        help="Date tag (default: today YYYYMMDD) appended to the result JSON key.",
+        help="Date tag (default: today YYYYMMDD) appended to the W&B result key.",
     )
     return parser.parse_args()
 
@@ -123,15 +137,47 @@ def resolve_paths(args: argparse.Namespace) -> argparse.Namespace:
     args.workdir = args.workdir.resolve()
     args.test_file = args.test_file.resolve()
     args.model_key = args.model_key or derive_model_slug(args.model_path)
-    args.results_gen_dir = (args.results_gen_dir or (args.workdir / "gen_results")).resolve()
-    args.results_dir = (args.results_dir or (args.workdir / "results")).resolve()
+    paths = default_paths()
+    experiment = env_default("PENS_EXPERIMENT_NAME", args.model_key)
+    args.results_gen_dir = (args.results_gen_dir or (Path(paths["PENS_OUTPUT_ROOT"]) / experiment)).resolve()
     args.raw_file = (args.raw_file or (args.results_gen_dir / f"{args.model_key}.parquet")).resolve()
-    args.result_json_file = (args.result_json_file or (args.results_dir / "result.json")).resolve()
+    if args.checkpoint_state_file is None and args.result_json_file is not None:
+        # Older running drivers only pass the metrics filename. Use their
+        # checkpoint state instead so they can finish without that file.
+        kind = env_default("PENS_RUN_KIND", "dpo")
+        prefix = "SFT" if kind == "sft" else "SINGLE_WISE_DPO"
+        checkpoint_key = f"{prefix}_DEFAULT_LOCAL_DIR" if kind == "sft" else f"{prefix}_CKPT_DIR"
+        checkpoint = env_path(checkpoint_key)
+        args.checkpoint_state_file = env_path(f"{prefix}_CHECKPOINT_EVAL_STATE_FILE")
+        if args.checkpoint_state_file is None and checkpoint is not None:
+            args.checkpoint_state_file = checkpoint / "interleaved_eval_state.json"
+    if args.checkpoint_state_file is not None:
+        args.checkpoint_state_file = args.checkpoint_state_file.resolve()
     return args
 
 
+def extract_generation_text(row: dict, response_index: int) -> str:
+    responses = row.get("responses")
+    if hasattr(responses, "tolist"):
+        responses = responses.tolist()
+    if isinstance(responses, str):
+        responses = [responses]
+    if isinstance(responses, list | tuple) and responses:
+        index = response_index if 0 <= response_index < len(responses) else 0
+        value = responses[index]
+    else:
+        value = row.get("generated_text", "")
+    return "" if value is None else str(value).strip()
+
+
+def extract_prediction(text: str) -> tuple[str, str]:
+    """Score the headline verbatim, without interpreting JSON or boxed output."""
+    prediction = text.strip()
+    return prediction, "plain_text" if prediction else "empty"
+
+
 def extract_predictions_frame(raw_file: Path, response_index: int) -> tuple[pd.DataFrame, dict[str, int], int]:
-    rows = load_rows(raw_file)
+    rows = load_table(raw_file).to_dict(orient="records")
     extracted_rows: list[dict] = []
     status_counts: dict[str, int] = {}
     non_empty_prediction_count = 0
@@ -194,28 +240,6 @@ def score_predictions_frame(
     }
 
 
-def upsert_result_json(result_file: Path, model_key: str, payload: dict) -> None:
-    """Insert-or-update a single model_key in result_file."""
-    result_file.parent.mkdir(parents=True, exist_ok=True)
-    result = {}
-    if result_file.exists() and result_file.stat().st_size > 0:
-        with result_file.open("r", encoding="utf-8") as f:
-            content = f.read().strip()
-        if content:
-            existing = json.loads(content)
-            if not isinstance(existing, dict):
-                raise ValueError(f"Expected {result_file} to contain a JSON object.")
-            result = existing
-
-    result[model_key] = payload
-
-    tmp_path = result_file.with_suffix(result_file.suffix + f".tmp.{os.getpid()}")
-    with tmp_path.open("w", encoding="utf-8") as f:
-        json.dump(result, f, ensure_ascii=False, indent=2)
-        f.write("\n")
-    os.replace(tmp_path, result_file)
-
-
 def main() -> None:
     args = resolve_paths(parse_args())
     if not args.raw_file.exists():
@@ -238,11 +262,15 @@ def main() -> None:
     payload["parse_status_counts"] = parse_status_counts
     payload["model_path"] = args.model_path
     payload["raw_generation_file"] = str(args.raw_file)
-    thinking_on = str(args.thinking).strip().lower() == "true"
-    payload["thinking_mode"] = thinking_on
+    thinking_mode, thinking_tag = thinking_metadata(str(args.thinking))
+    payload["thinking_mode"] = thinking_mode
     payload["date"] = args.date_tag
-    tagged_key = f"{args.model_key}__think{'ON' if thinking_on else 'OFF'}__{args.date_tag}"
-    upsert_result_json(args.result_json_file, tagged_key, payload)
+    payload["evaluation_config"] = evaluation_config()
+    payload["evaluation_config"]["reference_file"] = str(args.test_file)
+    tagged_key = f"{args.model_key}__think{thinking_tag}__{args.date_tag}"
+    log_eval_to_wandb(payload, result_key=tagged_key, date_tag=args.date_tag, model_path=args.model_path)
+    if args.checkpoint_state_file is not None:
+        record_evaluation_result(args.checkpoint_state_file, tagged_key, payload)
     args.model_key = tagged_key
 
     print(
@@ -250,7 +278,6 @@ def main() -> None:
             {
                 "model_key": args.model_key,
                 "raw_generation_file": str(args.raw_file),
-                "result_json_file": str(args.result_json_file),
                 "metrics": payload,
             },
             ensure_ascii=False,
