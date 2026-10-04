@@ -1,0 +1,20 @@
+{
+  "best_e_hf_merged_current_eval__thinkOFF__current_boxed_eval": {
+    "backend": "rouge",
+    "count": 20465,
+    "joined_count": 20554,
+    "skipped_count": 89,
+    "rouge_1_f1": 0.2933888365419484,
+    "rouge_2_f1": 0.10662834364424847,
+    "rouge_l_f1": 0.24099149824883745,
+    "non_empty_prediction_count": 20465,
+    "parse_status_counts": {
+      "boxed": 20465,
+      "empty": 89
+    },
+    "model_path": "/data/data/jiangli/models/pens/best_e_hf_merged",
+    "raw_generation_file": "/opt/dlami/nvme/lijiang3/pens_dpo/gen_results/best_e_hf_merged_current_eval/best_e_hf_merged_current_eval.parquet",
+    "thinking_mode": false,
+    "date": "current_boxed_eval"
+  }
+}

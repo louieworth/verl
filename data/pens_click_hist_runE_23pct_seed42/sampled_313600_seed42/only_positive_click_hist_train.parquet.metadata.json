@@ -1,0 +1,9 @@
+{
+  "input": "/data/dpo_pens/data/pens_click_hist_runE_23pct_seed42/only_positive_click_hist_train.parquet",
+  "output": "/data/dpo_pens/data/pens_click_hist_runE_23pct_seed42/sampled_313600_seed42/only_positive_click_hist_train.parquet",
+  "seed": 42,
+  "input_rows": 683767,
+  "sampled_rows": 156823,
+  "fraction": 0.2293515188653445,
+  "compression": "snappy"
+}
