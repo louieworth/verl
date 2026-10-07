@@ -1,4 +1,12 @@
 import torch
+from recipe.dpo.core_algos import (
+    compute_kto_loss,
+    compute_prospect_dpo_loss,
+    compute_single_wise_dpo_loss,
+    is_kto_loss,
+    is_pointwise_dpo_loss,
+    is_prospect_dpo_loss,
+)
 
 from verl import DataProto
 from verl.utils.device import get_device_id
@@ -8,19 +16,12 @@ from verl.utils.seqlen_balancing import prepare_dynamic_batch
 from verl.workers.actor import DataParallelPPOActor
 from verl.workers.actor.dp_actor import logger as dp_actor_logger
 
-from recipe.dpo.core_algos import (
-    compute_prospect_dpo_loss,
-    compute_single_wise_dpo_loss,
-    is_prospect_dpo_loss,
-    is_single_wise_dpo_loss,
-)
-
 
 class RecipeDPOActor(DataParallelPPOActor):
     @GPUMemoryLogger(role="dp actor", logger=dp_actor_logger)
     def update_policy_dpo(self, data: DataProto) -> dict[str, float]:
         loss_type = data.meta_info.get("dpo_loss_type", "sigmoid")
-        if not (is_prospect_dpo_loss(loss_type) or is_single_wise_dpo_loss(loss_type)):
+        if not is_pointwise_dpo_loss(loss_type):
             return super().update_policy_dpo(data=data)
 
         self.actor_module.train()
@@ -165,7 +166,11 @@ class RecipeDPOActor(DataParallelPPOActor):
         return final_metrics
 
     def _update_policy_single_wise_dpo(self, data: DataProto) -> dict[str, float]:
+        kto_enabled = is_kto_loss(data.meta_info.get("dpo_loss_type", "single_wise_dpo"))
         reference_free = bool(data.meta_info.get("reference_free", False))
+        if kto_enabled and reference_free:
+            raise ValueError("KTO requires a reference policy")
+        metric_prefix = "kto" if kto_enabled else "single_wise_dpo"
         required_keys = [
             "input_ids",
             "attention_mask",
@@ -208,13 +213,24 @@ class RecipeDPOActor(DataParallelPPOActor):
                 policy_logps = self._compute_point_policy_logps(
                     inputs, inputs["response_mask"], average_log_prob=average_log_prob
                 )
-                loss, stats = compute_single_wise_dpo_loss(
-                    policy_logps=policy_logps,
-                    reference_logps=micro_ref_logps,
-                    labels=sample_labels,
-                    beta=beta,
-                    reference_free=reference_free,
-                )
+                if kto_enabled:
+                    loss, stats = compute_kto_loss(
+                        policy_logps=policy_logps,
+                        reference_logps=micro_ref_logps,
+                        labels=sample_labels,
+                        beta=beta,
+                        kl=data.meta_info["kto_kl"],
+                        desirable_weight=data.meta_info.get("kto_desirable_weight", 1.0),
+                        undesirable_weight=data.meta_info.get("kto_undesirable_weight", 1.0),
+                    )
+                else:
+                    loss, stats = compute_single_wise_dpo_loss(
+                        policy_logps=policy_logps,
+                        reference_logps=micro_ref_logps,
+                        labels=sample_labels,
+                        beta=beta,
+                        reference_free=reference_free,
+                    )
                 scaled_loss = loss * loss_weight
 
             if self.scaler is not None:
@@ -226,16 +242,18 @@ class RecipeDPOActor(DataParallelPPOActor):
                 "actor/dpo_loss": loss.detach().item(),
                 "actor/dpo_accuracy": stats["accuracy"].detach().item(),
                 "actor/dpo_margin": stats["margin"].detach().item(),
-                "actor/single_wise_dpo_loss_pos": stats["positive_loss"].detach().item(),
-                "actor/single_wise_dpo_loss_neg": stats["negative_loss"].detach().item(),
-                "actor/single_wise_dpo_reward": stats["reward"].detach().item(),
-                "actor/single_wise_dpo_reward_pos": stats["positive_reward"].detach().item(),
-                "actor/single_wise_dpo_reward_neg": stats["negative_reward"].detach().item(),
-                "actor/single_wise_dpo_positive_fraction": stats["positive_fraction"].detach().item(),
+                f"actor/{metric_prefix}_loss_pos": stats["positive_loss"].detach().item(),
+                f"actor/{metric_prefix}_loss_neg": stats["negative_loss"].detach().item(),
+                f"actor/{metric_prefix}_reward": stats["reward"].detach().item(),
+                f"actor/{metric_prefix}_reward_pos": stats["positive_reward"].detach().item(),
+                f"actor/{metric_prefix}_reward_neg": stats["negative_reward"].detach().item(),
+                f"actor/{metric_prefix}_positive_fraction": stats["positive_fraction"].detach().item(),
                 "actor/policy_logps": policy_logps.detach().mean().item(),
             }
             if micro_ref_logps is not None:
                 micro_metrics["actor/reference_logps"] = micro_ref_logps.detach().mean().item()
+            if kto_enabled:
+                micro_metrics["actor/kto_kl"] = stats["kl"].item()
             self._accumulate_weighted_metrics(aggregated_metrics, micro_metrics, loss_weight)
 
         grad_norm = self._optimizer_step()

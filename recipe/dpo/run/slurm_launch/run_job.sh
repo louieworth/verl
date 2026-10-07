@@ -6,7 +6,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../../../.." && pwd)"
 cd "${REPO_ROOT}"
 
-variant="${1:?Expected all, positive, negative, all_no_weight, positive_no_weight, negative_no_weight, or sft}"
+variant="${1:?Expected all, positive, negative, all_no_weight, positive_no_weight, negative_no_weight, kto, or sft}"
 shift
 case "${variant}" in
   all) train_script=recipe/dpo/run/run_single_wise_click_hist_all.sh ;;
@@ -15,6 +15,7 @@ case "${variant}" in
   all_no_weight) train_script=recipe/dpo/run/run_single_wise_click_hist_all_no_weight.sh ;;
   positive_no_weight) train_script=recipe/dpo/run/run_single_wise_click_hist_positive_only_no_weight.sh ;;
   negative_no_weight) train_script=recipe/dpo/run/run_single_wise_click_hist_negative_only_no_weight.sh ;;
+  kto) train_script=recipe/dpo/run/KTO.sh ;;
   sft) train_script=recipe/dpo/run/run_pens_sft.sh ;;
   *) echo "Unknown PeNS Slurm experiment: ${variant}" >&2; exit 1 ;;
 esac

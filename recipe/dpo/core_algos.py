@@ -16,9 +16,13 @@ def is_single_wise_dpo_loss(loss_type: str) -> bool:
     return normalize_dpo_loss_type(loss_type) == "single_wise_dpo"
 
 
+def is_kto_loss(loss_type: str) -> bool:
+    return normalize_dpo_loss_type(loss_type) == "kto"
+
+
 def is_pointwise_dpo_loss(loss_type: str) -> bool:
     normalized_loss_type = normalize_dpo_loss_type(loss_type)
-    return normalized_loss_type in {"prospect_dpo", "single_wise_dpo"}
+    return normalized_loss_type in {"prospect_dpo", "single_wise_dpo", "kto"}
 
 
 def use_average_sequence_log_probs(loss_type: str) -> bool:
@@ -28,7 +32,60 @@ def use_average_sequence_log_probs(loss_type: str) -> bool:
 
 def requires_reference_model(loss_type: str, reference_free: bool) -> bool:
     normalized_loss_type = normalize_dpo_loss_type(loss_type)
+    if is_kto_loss(loss_type):
+        return True
     return (not reference_free) and normalized_loss_type != "simpo"
+
+
+def estimate_kto_kl(policy_logps: torch.Tensor, reference_logps: torch.Tensor) -> torch.Tensor:
+    """Detached, nonnegative KL estimate over the full mismatched update batch."""
+    return (policy_logps.float() - reference_logps.float()).mean().detach().clamp_min(0.0)
+
+
+def compute_kto_loss(
+    policy_logps: torch.Tensor,
+    reference_logps: torch.Tensor,
+    labels: torch.Tensor,
+    beta: float,
+    kl: float | torch.Tensor,
+    desirable_weight: float = 1.0,
+    undesirable_weight: float = 1.0,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    """KTO Eq. 7 with a detached KL baseline and a sample-wise mean reduction.
+
+    KL must be estimated on mismatched prompt/response sequences before the
+    optimizer update. Both scores follow the caller's log-prob normalization.
+    https://arxiv.org/abs/2402.01306
+    """
+    beta = _validate_positive_kappa(beta, "beta")
+    desirable_weight = _validate_positive_kappa(desirable_weight, "desirable_weight")
+    undesirable_weight = _validate_positive_kappa(undesirable_weight, "undesirable_weight")
+    if reference_logps is None:
+        raise ValueError("KTO requires reference log probabilities")
+    rewards = beta * (policy_logps.float() - reference_logps.float())
+    kl = torch.as_tensor(kl, dtype=torch.float32, device=rewards.device).detach().clamp_min(0.0)
+    positive_mask = labels > 0.5
+    signed_margin = torch.where(positive_mask, rewards - beta * kl, beta * kl - rewards)
+    weights = torch.where(positive_mask, desirable_weight, undesirable_weight)
+    losses = weights * torch.sigmoid(-signed_margin)
+    positive_mask_f = positive_mask.float()
+    negative_mask_f = (~positive_mask).float()
+
+    def masked_mean(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        return (values * mask).sum() / mask.sum().clamp_min(1.0)
+
+    return losses.mean(), {
+        "loss": losses.mean(),
+        "positive_loss": masked_mean(losses, positive_mask_f),
+        "negative_loss": masked_mean(losses, negative_mask_f),
+        "accuracy": (signed_margin > 0).float().mean(),
+        "margin": signed_margin.mean(),
+        "reward": rewards.mean(),
+        "positive_reward": masked_mean(rewards, positive_mask_f),
+        "negative_reward": masked_mean(rewards, negative_mask_f),
+        "positive_fraction": positive_mask_f.mean(),
+        "kl": kl,
+    }
 
 
 def get_batch_logps(
@@ -92,7 +149,8 @@ def compute_dpo_loss(
         raise ValueError(f"Unsupported DPO loss_type: {loss_type}")
 
     chosen_rewards = beta * (
-        policy_chosen_logps - (torch.zeros_like(policy_chosen_logps) if effective_reference_free else reference_chosen_logps)
+        policy_chosen_logps
+        - (torch.zeros_like(policy_chosen_logps) if effective_reference_free else reference_chosen_logps)
     )
     rejected_rewards = beta * (
         policy_rejected_logps

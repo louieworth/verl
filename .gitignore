@@ -8,6 +8,7 @@
 **/playground
 **/wandb
 paper/
+paper_plots/
 /pyrightconfig.json
 
 # Byte-compiled / optimized / DLL files

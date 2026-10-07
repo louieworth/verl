@@ -8,13 +8,15 @@
 #SBATCH --constraint=80gb
 #SBATCH --cpus-per-task=32
 #SBATCH --mem=256G
-#SBATCH --time=03:00:00
+#SBATCH --time=01:00:00
 #SBATCH --chdir=/scratch/l/luli/src/dpo_pens
 #SBATCH --output=/scratch/l/luli/src/dpo_pens/recipe/dpo/run/slurm_launch/logs/%x-%j.out
 #SBATCH --error=/scratch/l/luli/src/dpo_pens/recipe/dpo/run/slurm_launch/logs/%x-%j.err
 
 set -euo pipefail
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# sbatch executes a spooled copy, so resolve helpers from the repository.
+REPO_ROOT=/scratch/l/luli/src/dpo_pens
+SCRIPT_DIR="${REPO_ROOT}/recipe/dpo/run/slurm_launch"
 source "${SCRIPT_DIR}/../common.sh"
 
 # Continue job 503785 in its original experiment, including the missing eval.

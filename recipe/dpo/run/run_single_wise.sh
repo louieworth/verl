@@ -136,8 +136,15 @@ case "${LOSS_TYPE_NORMALIZED}" in
     USE_SINGLE_WISE_LENGTH_BUCKET_CONFIG=false
     REQUIRE_PROSPECT_COLUMNS=true
     ;;
+  kto)
+    CONFIG_NAME="dpo_kto"
+    DEFAULT_PROMPT_TRUNCATION="right"
+    DEFAULT_USE_LENGTH_BUCKET_SAMPLER="true"
+    USE_SINGLE_WISE_LENGTH_BUCKET_CONFIG=true
+    REQUIRE_PROSPECT_COLUMNS=false
+    ;;
   *)
-    echo "Unsupported point-wise loss type: ${LOSS_TYPE}. Expected single_wise_dpo or prospect_dpo." >&2
+    echo "Unsupported point-wise loss type: ${LOSS_TYPE}. Expected single_wise_dpo, prospect_dpo, or kto." >&2
     exit 1
     ;;
 esac
@@ -630,6 +637,10 @@ if [[ "${LOSS_TYPE_NORMALIZED}" == "prospect_dpo" ]]; then
   extra_args+=("algorithm.prospect_dpo_use_feedback_weights=${USE_FEEDBACK_WEIGHTS}")
 fi
 extra_args+=("algorithm.average_log_prob=${AVERAGE_LOG_PROB}")
+if [[ "${LOSS_TYPE_NORMALIZED}" == "kto" ]]; then
+  extra_args+=("algorithm.kto_desirable_weight=${KTO_DESIRABLE_WEIGHT:-1.0}")
+  extra_args+=("algorithm.kto_undesirable_weight=${KTO_UNDESIRABLE_WEIGHT:-1.0}")
+fi
 
 cmd=(
   "${PYTHON_BIN}"

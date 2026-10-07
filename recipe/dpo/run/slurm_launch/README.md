@@ -1,5 +1,32 @@
 # PeNS Slurm jobs
 
+`KTO.sbatch` runs KTO on the same sampled positive and negative click-history
+parquets, without constructing preference pairs. It requests six hours and
+four H100 80GB GPUs on `gpubase_bynode_b2` (the existing `b1` partition allows
+only three hours). `../KTO.sh` delegates to the common all-data recipe: model,
+LR `5e-6`, beta `0.1`, batch 128 / micro batch 4, LoRA rank 64 / alpha 128,
+seed 42, 500 updates, and evaluation every 50 updates remain the same.
+Experiment/checkpoint/generation names start with `kto_click_hist_all_without_weight_`.
+Training and evaluation log W&B offline through the shared job runtime.
+
+KTO uses a fixed reference policy and a detached nonnegative KL estimate from
+responses rolled across the complete update batch. Reference scores for these
+mismatched sequences are computed live; with LoRA, the base model with its
+adapter disabled is the reference. All ranks/micro-batches share one KL
+baseline per update. Desirable/undesirable loss multipliers default to 1 and
+can be set with `KTO_DESIRABLE_WEIGHT` / `KTO_UNDESIRABLE_WEIGHT`; dwell/CTR
+feedback weights are not used. As requested for comparison, the launcher
+inherits `algorithm.average_log_prob=true`, including for the KL estimate.
+This is a length-normalized KTO variant; set
+`SINGLE_WISE_DPO_AVERAGE_LOG_PROB=false` for the paper's summed sequence scores.
+The loss and KL estimator follow [KTO](https://arxiv.org/abs/2402.01306) and
+the [TRL implementation](https://huggingface.co/docs/trl/kto_trainer).
+
+```bash
+PENS_SLURM_DRY_RUN=true bash recipe/dpo/run/slurm_launch/KTO.sbatch
+sbatch recipe/dpo/run/slurm_launch/KTO.sbatch
+```
+
 `run_pens_sft_from0_500.sbatch` starts a new positive-only SFT run from the
 Qwen3-4B-Instruct base model, with 4 H100 80GB GPUs and a two-hour time limit.
 It uses LR `5e-6`, batch 128, micro batch 4, LoRA rank 64 / alpha 128, and seed 42.
@@ -68,7 +95,7 @@ here. `metrics/no_weight_config_audit.json` records the fully resolved
 configuration comparison for all three jobs against weighted all.
 
 Launcher filenames and Slurm job names use `single_wise_click_hist_*`.
-All non-SFT entrypoints default to `POINTWISE_DPO_LOSS_TYPE=prospect_dpo`;
+The `single_wise_click_hist_*` entrypoints default to `POINTWISE_DPO_LOSS_TYPE=prospect_dpo`;
 the three `*_no_weight` entrypoints force that loss and disable feedback weights.
 New experiment/output names use `prospect_click_hist_<split>_<weight>_<timestamp>`.
 Existing configuration keys and environment variables keep their API names.

@@ -17,21 +17,21 @@ import socket
 
 import hydra
 import ray
-
-from recipe.dpo.core_algos import is_pointwise_dpo_loss, is_prospect_dpo_loss, requires_reference_model
 from recipe.dpo.collate import pointwise_dynamic_prompt_collate_fn
+from recipe.dpo.core_algos import is_kto_loss, is_pointwise_dpo_loss, is_prospect_dpo_loss, requires_reference_model
 from recipe.dpo.dpo_trainer import RayDPOTrainer
 from recipe.dpo.pointwise_dataset import PointwiseDPODataset
 from recipe.dpo.prepare_data.reference_logps_materializer import maybe_materialize_pointwise_reference_logps
 from recipe.dpo.recipe_worker import RecipeDPOWorker
 from recipe.dpo.sampler import LengthBucketSampler
 from recipe.dpo.singlewise_dataset import SingleWiseDPODataset
+
 from verl.experimental.reward_loop import migrate_legacy_reward_impl
 from verl.trainer.main_ppo import create_rl_sampler, run_ppo
 from verl.trainer.ppo.utils import Role
 from verl.utils.config import validate_config
-from verl.utils.device import auto_set_device
 from verl.utils.dataset import DPOPairDataset
+from verl.utils.device import auto_set_device
 
 
 class DPOTaskRunner:
@@ -40,7 +40,7 @@ class DPOTaskRunner:
 
         from omegaconf import OmegaConf
 
-        from verl.single_controller.ray import ResourcePoolManager, RayWorkerGroup
+        from verl.single_controller.ray import RayWorkerGroup, ResourcePoolManager
         from verl.utils import hf_processor, hf_tokenizer
         from verl.utils.fs import copy_to_local
 
@@ -52,6 +52,8 @@ class DPOTaskRunner:
             raise NotImplementedError("Offline DPO currently supports only FSDP legacy workers")
 
         loss_type = config.algorithm.get("dpo_loss_type", "sigmoid")
+        if is_kto_loss(loss_type) and config.algorithm.get("reference_free", False):
+            raise ValueError("KTO requires algorithm.reference_free=false")
         if is_pointwise_dpo_loss(loss_type) and requires_reference_model(
             loss_type,
             config.algorithm.get("reference_free", False),
@@ -97,17 +99,24 @@ class DPOTaskRunner:
 
         pointwise_precomputed_reference_logps = (
             is_pointwise_dpo_loss(loss_type)
+            and not is_kto_loss(loss_type)  # Mismatched KL sequences still need a live reference policy.
             and hasattr(train_dataset, "has_reference_logps")
             and train_dataset.has_reference_logps()
-            and (val_dataset is None or (hasattr(val_dataset, "has_reference_logps") and val_dataset.has_reference_logps()))
+            and (
+                val_dataset is None
+                or (hasattr(val_dataset, "has_reference_logps") and val_dataset.has_reference_logps())
+            )
         )
         if pointwise_precomputed_reference_logps:
             print("Detected precomputed point-wise reference_logps in parquet. RefPolicy workers will be skipped.")
 
-        use_reference_policy = requires_reference_model(
-            loss_type,
-            config.algorithm.get("reference_free", False),
-        ) and not pointwise_precomputed_reference_logps
+        use_reference_policy = (
+            requires_reference_model(
+                loss_type,
+                config.algorithm.get("reference_free", False),
+            )
+            and not pointwise_precomputed_reference_logps
+        )
 
         role_worker_mapping = {
             Role.Actor: ray.remote(RecipeDPOWorker),

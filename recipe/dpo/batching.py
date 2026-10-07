@@ -1,7 +1,7 @@
 import torch
 
 from verl import DataProto
-
+from verl.utils.model import compute_position_id_with_mask
 
 PAIR_KEYS = (
     "input_ids",
@@ -63,6 +63,30 @@ def build_point_log_prob_batch(batch: DataProto) -> tuple[DataProto, torch.Tenso
         }
     )
     return log_prob_batch, response_mask
+
+
+def build_kto_kl_batch(batch: DataProto) -> DataProto:
+    """Roll responses across the full batch, retaining each original prompt.
+
+    This is an auxiliary KL estimate, not a chosen/rejected preference pair.
+    Rebuild masks and positions because response lengths can differ.
+    """
+    if len(batch) < 2:
+        raise ValueError("KTO KL estimation requires at least two samples")
+    responses = batch.batch["responses"].roll(1, dims=0)
+    response_mask = batch.batch["response_mask"].roll(1, dims=0)
+    prompt_length = batch.batch["input_ids"].shape[1] - responses.shape[1]
+    input_ids = torch.cat([batch.batch["input_ids"][:, :prompt_length], responses], dim=1)
+    attention_mask = torch.cat([batch.batch["attention_mask"][:, :prompt_length], response_mask], dim=1)
+    return DataProto.from_dict(
+        tensors={
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "position_ids": compute_position_id_with_mask(attention_mask).long(),
+            "responses": responses,
+            "response_mask": response_mask,
+        }
+    )
 
 
 def compute_sequence_log_probs(
@@ -194,3 +218,32 @@ def build_single_wise_dpo_update_proto(
         "global_token_num": int(batch.batch["attention_mask"].sum().item()),
     }
     return DataProto.from_dict(tensors=tensors, meta_info=meta_info)
+
+
+def build_kto_update_proto(
+    batch: DataProto,
+    beta: float,
+    reference_logps: torch.Tensor,
+    kl: float,
+    average_log_prob: bool = False,
+    desirable_weight: float = 1.0,
+    undesirable_weight: float = 1.0,
+) -> DataProto:
+    if reference_logps is None:
+        raise ValueError("KTO requires reference log probabilities")
+    update = build_single_wise_dpo_update_proto(
+        batch,
+        beta,
+        reference_logps,
+        average_log_prob=average_log_prob,
+        reference_free=False,
+    )
+    update.meta_info.update(
+        {
+            "dpo_loss_type": "kto",
+            "kto_kl": float(kl),
+            "kto_desirable_weight": desirable_weight,
+            "kto_undesirable_weight": undesirable_weight,
+        }
+    )
+    return update

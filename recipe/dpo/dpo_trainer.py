@@ -21,6 +21,30 @@ from typing import Optional
 
 import torch
 from omegaconf import OmegaConf, open_dict
+from recipe.dpo.batching import (
+    build_dpo_update_proto,
+    build_kto_kl_batch,
+    build_kto_update_proto,
+    build_pair_log_prob_batch,
+    build_point_log_prob_batch,
+    build_prospect_dpo_update_proto,
+    build_single_wise_dpo_update_proto,
+    compute_sequence_log_probs,
+)
+from recipe.dpo.core_algos import (
+    compute_dpo_loss,
+    compute_kto_loss,
+    compute_prospect_dpo_loss,
+    compute_single_wise_dpo_loss,
+    estimate_kto_kl,
+    is_kto_loss,
+    is_pointwise_dpo_loss,
+    is_prospect_dpo_loss,
+    is_single_wise_dpo_loss,
+    prospect_negative_scale_at_step,
+    requires_reference_model,
+    use_average_sequence_log_probs,
+)
 from torch.utils.data import Dataset, Sampler
 from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
@@ -28,25 +52,6 @@ from tqdm import tqdm
 from verl import DataProto
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup, ResourcePoolManager
 from verl.single_controller.ray.base import create_colocated_worker_cls
-from recipe.dpo.batching import (
-    build_dpo_update_proto,
-    build_pair_log_prob_batch,
-    build_prospect_dpo_update_proto,
-    build_point_log_prob_batch,
-    build_single_wise_dpo_update_proto,
-    compute_sequence_log_probs,
-)
-from recipe.dpo.core_algos import (
-    compute_dpo_loss,
-    compute_prospect_dpo_loss,
-    prospect_negative_scale_at_step,
-    compute_single_wise_dpo_loss,
-    is_pointwise_dpo_loss,
-    is_prospect_dpo_loss,
-    is_single_wise_dpo_loss,
-    requires_reference_model,
-    use_average_sequence_log_probs,
-)
 from verl.trainer.main_ppo import create_rl_sampler
 from verl.trainer.ppo.metric_utils import reduce_metrics
 from verl.trainer.ppo.utils import Role
@@ -75,6 +80,9 @@ class RayDPOTrainer:
         self.resource_pool_manager = resource_pool_manager
         self.ray_worker_group_cls = ray_worker_group_cls
         self.loss_type = self.config.algorithm.get("dpo_loss_type", "sigmoid")
+        self.kto_enabled = is_kto_loss(self.loss_type)
+        if self.kto_enabled and self.config.algorithm.get("reference_free", False):
+            raise ValueError("KTO requires algorithm.reference_free=false")
         self.prospect_dpo_enabled = is_prospect_dpo_loss(self.loss_type)
         self.single_wise_dpo_enabled = is_single_wise_dpo_loss(self.loss_type)
         self.pointwise_dpo_enabled = is_pointwise_dpo_loss(self.loss_type)
@@ -83,7 +91,9 @@ class RayDPOTrainer:
             self.config.algorithm.get("reference_free", False),
         )
         self.pointwise_precomputed_reference_logps = (
-            self.pointwise_dpo_enabled and self._datasets_have_precomputed_point_reference_logps(train_dataset, val_dataset)
+            self.pointwise_dpo_enabled
+            and not self.kto_enabled
+            and self._datasets_have_precomputed_point_reference_logps(train_dataset, val_dataset)
         )
         self.use_reference_policy = self.requires_reference_model and not self.pointwise_precomputed_reference_logps
         lora_rank = self.config.actor_rollout_ref.model.get("lora", {}).get("rank", 0)
@@ -324,6 +334,14 @@ class RayDPOTrainer:
             average_log_prob=self._use_average_log_prob(),
         )
 
+    def _compute_kto_kl(self, batch: DataProto) -> float:
+        # RPC results contain the entire update batch across all ranks, so KL
+        # is shared by every micro-batch and independent of gradient accumulation.
+        kl_batch = build_kto_kl_batch(batch)
+        reference_logps = self._compute_point_reference_log_probs(kl_batch)
+        policy_logps = self._compute_point_policy_log_probs(kl_batch)
+        return float(estimate_kto_kl(policy_logps, reference_logps).item())
+
     def _validate(self) -> dict[str, float]:
         if self.val_dataloader is None:
             return {}
@@ -358,6 +376,17 @@ class RayDPOTrainer:
                     metrics["val/prospect_dpo_alpha"].append(stats["alpha"].item())
                     metrics["val/prospect_dpo_lambda"].append(stats["lambda"].item())
                     metrics["val/prospect_dpo_positive_fraction"].append(stats["positive_fraction"].item())
+                elif self.kto_enabled:
+                    loss, stats = compute_kto_loss(
+                        policy_logps=policy_logps,
+                        reference_logps=reference_logps,
+                        labels=batch.batch["label"],
+                        beta=self.config.algorithm.dpo_beta,
+                        kl=self._compute_kto_kl(batch),
+                        desirable_weight=self.config.algorithm.get("kto_desirable_weight", 1.0),
+                        undesirable_weight=self.config.algorithm.get("kto_undesirable_weight", 1.0),
+                    )
+                    metrics["val/kto_kl"].append(stats["kl"].item())
                 else:
                     loss, stats = compute_single_wise_dpo_loss(
                         policy_logps=policy_logps,
@@ -446,7 +475,7 @@ class RayDPOTrainer:
             for batch_idx, batch_dict in enumerate(self.train_dataloader, start=1):
                 if self.global_steps >= stop_at_step:
                     break
-                
+
                 step_start = time.perf_counter()
                 batch = DataProto.from_single_dict(batch_dict)
                 if self.pointwise_dpo_enabled:
@@ -468,6 +497,16 @@ class RayDPOTrainer:
                             ),
                             global_class_mean=self.config.algorithm.get("prospect_dpo_global_class_mean", False),
                             use_feedback_weights=self.config.algorithm.get("prospect_dpo_use_feedback_weights", True),
+                        )
+                    elif self.kto_enabled:
+                        dpo_update_batch = build_kto_update_proto(
+                            batch=batch,
+                            beta=self.config.algorithm.dpo_beta,
+                            reference_logps=reference_logps,
+                            kl=self._compute_kto_kl(batch),
+                            average_log_prob=self._use_average_log_prob(),
+                            desirable_weight=self.config.algorithm.get("kto_desirable_weight", 1.0),
+                            undesirable_weight=self.config.algorithm.get("kto_undesirable_weight", 1.0),
                         )
                     else:
                         dpo_update_batch = build_single_wise_dpo_update_proto(
@@ -506,9 +545,7 @@ class RayDPOTrainer:
                 progress_bar.update(1)
 
                 should_save_by_step = save_freq_steps > 0 and self.global_steps % save_freq_steps == 0
-                should_save_by_epoch = (
-                    save_freq_epochs > 0 and is_epoch_end and (epoch + 1) % save_freq_epochs == 0
-                )
+                should_save_by_epoch = save_freq_epochs > 0 and is_epoch_end and (epoch + 1) % save_freq_epochs == 0
                 if should_save_by_step or should_save_by_epoch or is_run_stop_step:
                     self._save_checkpoint()
                     # When keep_only_latest_rolling_ckpt is enabled, treat interval
@@ -520,10 +557,7 @@ class RayDPOTrainer:
                         if should_save_by_epoch:
                             self._last_rolling_step = None
                         elif should_save_by_step:
-                            if (
-                                prev_rolling is not None
-                                and prev_rolling != self.global_steps
-                            ):
+                            if prev_rolling is not None and prev_rolling != self.global_steps:
                                 old = os.path.join(
                                     self.config.trainer.default_local_dir,
                                     f"global_step_{prev_rolling}",
