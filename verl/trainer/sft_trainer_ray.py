@@ -15,6 +15,7 @@
 
 import os
 from functools import partial
+from pathlib import Path
 
 from tensordict.tensorclass import NonTensorData
 
@@ -34,6 +35,7 @@ from tqdm import tqdm
 
 from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint import CheckpointHandler, OrchestrationMode
+from verl.utils.checkpoint.checkpoint_handler import extract_step
 from verl.utils.dataset.dataset_utils import SFTTensorCollator
 from verl.utils.dataset.multiturn_sft_dataset import MultiTurnSFTDataset
 from verl.utils.device import auto_set_device, get_device_name
@@ -45,12 +47,36 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_SFT_LOGGING_LEVEL", "WARN"))
 
 
+class RaySFTCheckpointHandler(CheckpointHandler):
+    def _load_dataloader_state(self, checkpoint_path):
+        # Older torchrun SFT checkpoints save a sharded iterator per DP rank.
+        # The Ray controller uses a global iterator. Reconstruct its position
+        # from the absolute step, preserving the same shuffled sample prefix.
+        if len(list(Path(checkpoint_path).glob("data_*.pt"))) > 1:
+            step = extract_step(checkpoint_path)
+            steps_per_epoch = len(self.train_dataloader)
+            self.train_dataloader.sampler.set_epoch(step // steps_per_epoch)
+            iterator = iter(self.train_dataloader)
+            for _ in range(step % steps_per_epoch):
+                next(iterator)
+            state = self.train_dataloader.state_dict()
+            self.train_dataloader.load_state_dict(state)
+            print(f"Migrated SPMD SFT dataloader position to the global Ray iterator at step {step}")
+        else:
+            super()._load_dataloader_state(checkpoint_path)
+
+
 class SFTTrainer:
     def __init__(
         self,
         config,
     ):
         self.config = config
+        self.pens_evaluator = None
+
+        from recipe.dpo.evaluation.in_process_eval import configure_in_process_eval
+
+        configure_in_process_eval(config)
 
         self._build_config()
         self._build_dataset()
@@ -64,6 +90,14 @@ class SFTTrainer:
 
         self.device_name = self.config.trainer.device
 
+        if self.config.trainer.get("in_process_eval", False):
+            from recipe.dpo.evaluation.in_process_eval import PensInProcessEvaluator
+
+            self.training_client.init_rollout(self.config.rollout)
+            self.pens_evaluator = PensInProcessEvaluator(
+                self.config, self.model_config.tokenizer, self.training_client
+            )
+
         print(self.config)
 
     def _build_ckpt_handler(self):
@@ -72,7 +106,7 @@ class SFTTrainer:
         max_ckpt_to_keep = getattr(self.config.trainer, "max_ckpt_to_keep", None)
         default_hdfs_dir = getattr(self.config.trainer, "default_hdfs_dir", None)
 
-        self.ckpt_handler = CheckpointHandler(
+        self.ckpt_handler = RaySFTCheckpointHandler(
             engine=self.training_client,
             train_dataloader=self.train_dataloader,
             default_local_dir=self.config.trainer.default_local_dir,
@@ -91,6 +125,10 @@ class SFTTrainer:
         self.optimizer_config = omega_conf_to_dataclass(self.config.optim)
         self.checkpoint_config = omega_conf_to_dataclass(self.config.checkpoint)
         self.profiler_config = omega_conf_to_dataclass(self.config.profiler)
+        configured_stop = self.config.trainer.get("stop_at_step")
+        self.stop_at_step = int(configured_stop) if configured_stop is not None else None
+        if self.stop_at_step is not None and self.stop_at_step <= 0:
+            raise ValueError("trainer.stop_at_step must be positive")
 
         # check profile interval
         self.profiler_interval = self.config.trainer.profile_interval
@@ -183,7 +221,7 @@ class SFTTrainer:
             batch_size=self.train_batch_size_per_dp,
             sampler=self.train_sampler,
             collate_fn=self.collate_fn,
-            num_workers=8,
+            num_workers=config.data.get("num_workers", 8),
             pin_memory=False,
             drop_last=True,
             pin_memory_device=device_name,
@@ -198,7 +236,7 @@ class SFTTrainer:
                 batch_size=self.train_batch_size_per_dp,
                 sampler=self.val_sampler,
                 collate_fn=self.collate_fn,
-                num_workers=8,
+                num_workers=config.data.get("num_workers", 8),
                 pin_memory=False,
                 drop_last=True,
                 pin_memory_device=device_name,
@@ -214,6 +252,9 @@ class SFTTrainer:
         self.optimizer_config.total_training_steps = self.total_training_steps
 
         self.steps_per_epoch = len(self.train_dataloader)
+        if self.steps_per_epoch < 1:
+            raise ValueError("SFT train dataloader is empty")
+        self.stop_at_step = min(self.stop_at_step or self.total_training_steps, self.total_training_steps)
 
         # manage save and test frequency
         self.save_freq = self.config.trainer.save_freq
@@ -243,6 +284,14 @@ class SFTTrainer:
 
         global_step = self.resume_global_step  # Start from resumed step
         last_valid_metric = None
+
+        if self.pens_evaluator is not None and self.pens_evaluator.should_evaluate(
+            global_step, final=global_step >= self.stop_at_step
+        ):
+            if self.pens_evaluator.evaluate(global_step, tracking):
+                return
+        if global_step >= self.stop_at_step:
+            return
 
         log_with_rank(
             f"Total training steps: {self.total_training_steps},",
@@ -314,14 +363,18 @@ class SFTTrainer:
                 metrics["train/grad_norm"] = metrics.pop("grad_norm")
                 metrics["train/lr"] = metrics.pop("lr")
                 metrics["train/mfu"] = metrics.pop("mfu")
-                metrics["train/global_tokens"] = torch.sum(torch.tensor(batch_seqlens, device=self.device_name)).item()
+                metrics["train/global_tokens"] = sum(batch_seqlens)
                 total_tokens += metrics["train/global_tokens"]
                 metrics["train/total_tokens(B)"] = total_tokens / 1e9
                 tracking.log(data=metrics, step=global_step)
 
                 is_last_step = global_step >= self.total_training_steps
-                is_valid_step = global_step % self.test_freq == 0
-                is_save_step = global_step % self.save_freq == 0
+                is_run_stop_step = global_step >= self.stop_at_step
+                is_valid_step = self.test_freq > 0 and global_step % self.test_freq == 0
+                is_save_step = self.save_freq > 0 and global_step % self.save_freq == 0
+                should_eval = self.pens_evaluator is not None and self.pens_evaluator.should_evaluate(
+                    global_step, final=is_run_stop_step
+                )
 
                 # early exit or validation step
                 if is_last_step and self.val_dataloader is not None or (self.test_freq > 0 and is_valid_step):
@@ -334,25 +387,36 @@ class SFTTrainer:
                         metrics = tu.get(output, "metrics")
                         val_losses.append(metrics["loss"])
 
-                    val_loss = torch.mean(torch.tensor(val_losses, device=self.device_name))
+                    val_loss = torch.mean(torch.tensor(val_losses))
 
                     metric = {"val/loss": val_loss.detach().item()}
                     tracking.log(data=metric, step=global_step)
                     last_valid_metric = metric
 
-                if is_last_step or (self.save_freq > 0 and is_save_step):
+                if is_run_stop_step or is_save_step or should_eval:
                     self.ckpt_handler.save_checkpoint(step=global_step)
 
-                if is_last_step:
+                if should_eval and self.pens_evaluator.evaluate(global_step, tracking):
+                    is_run_stop_step = True
+
+                if is_run_stop_step:
                     print(f"Total time for train steps: {train_time:.2f}s")
                     print(f"Final validation metrics: {last_valid_metric}")
                     return
 
 
 def run_sft(config):
-    ray.init()
-    trainer = SFTTrainer(config=config)
-    trainer.fit()
+    ray_config = OmegaConf.select(config, "ray_kwargs.ray_init", default={})
+    ray_kwargs = OmegaConf.to_container(ray_config, resolve=True) if OmegaConf.is_config(ray_config) else ray_config
+    ray.init(**ray_kwargs)
+    trainer = None
+    try:
+        trainer = SFTTrainer(config=config)
+        trainer.fit()
+    finally:
+        if trainer is not None and trainer.pens_evaluator is not None:
+            trainer.pens_evaluator.close()
+        ray.shutdown()
 
 
 @hydra.main(config_path="config", config_name="sft_trainer_engine", version_base=None)

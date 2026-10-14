@@ -106,6 +106,7 @@ class RayDPOTrainer:
         self.ref_policy_wg = None
         self.global_steps = 0
         self.max_steps_duration = 0.0
+        self.pens_evaluator = None
 
         self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler)
 
@@ -189,7 +190,7 @@ class RayDPOTrainer:
         actor_cls = RayClassWithInitArgs(
             cls=self.role_worker_mapping[Role.Actor],
             config=self.config.actor_rollout_ref,
-            role=str(Role.Actor),
+            role=str(Role.ActorRollout) if self.config.trainer.get("in_process_eval", False) else str(Role.Actor),
         )
         resource_pool_to_cls[actor_pool][str(Role.Actor)] = actor_cls
 
@@ -224,6 +225,11 @@ class RayDPOTrainer:
             else:
                 self.ref_policy_wg = all_wg[str(Role.RefPolicy)]
                 self.ref_policy_wg.init_model()
+
+        if self.config.trainer.get("in_process_eval", False):
+            from recipe.dpo.evaluation.in_process_eval import PensInProcessEvaluator
+
+            self.pens_evaluator = PensInProcessEvaluator(self.config, self.tokenizer, self.actor_wg)
 
     def _save_checkpoint(self):
         os.makedirs(self.config.trainer.default_local_dir, exist_ok=True)
@@ -436,6 +442,13 @@ class RayDPOTrainer:
                 raise ValueError(f"trainer.stop_at_step must be positive, got {stop_at_step}")
             stop_at_step = min(stop_at_step, self.total_training_steps)
 
+        if self.pens_evaluator is not None and self.pens_evaluator.should_evaluate(
+            self.global_steps, final=self.global_steps >= stop_at_step
+        ):
+            # Retry an eval interrupted after saving, before another update.
+            if self.pens_evaluator.evaluate(self.global_steps, logger):
+                return
+
         if self.global_steps >= stop_at_step:
             print(
                 f"Checkpoint is already at global step {self.global_steps}, "
@@ -546,7 +559,10 @@ class RayDPOTrainer:
 
                 should_save_by_step = save_freq_steps > 0 and self.global_steps % save_freq_steps == 0
                 should_save_by_epoch = save_freq_epochs > 0 and is_epoch_end and (epoch + 1) % save_freq_epochs == 0
-                if should_save_by_step or should_save_by_epoch or is_run_stop_step:
+                should_eval = self.pens_evaluator is not None and self.pens_evaluator.should_evaluate(
+                    self.global_steps, final=is_run_stop_step
+                )
+                if should_save_by_step or should_save_by_epoch or is_run_stop_step or should_eval:
                     self._save_checkpoint()
                     # When keep_only_latest_rolling_ckpt is enabled, treat interval
                     # (step) saves as rolling: delete the previous rolling ckpt so
@@ -571,6 +587,9 @@ class RayDPOTrainer:
                     val_metrics = self._validate()
                     if val_metrics:
                         logger.log(data=val_metrics, step=self.global_steps)
+
+                if should_eval and self.pens_evaluator.evaluate(self.global_steps, logger):
+                    stop_at_step = self.global_steps
 
                 if should_save_ckpt_esi(
                     self.max_steps_duration,

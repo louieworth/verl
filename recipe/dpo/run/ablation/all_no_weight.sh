@@ -10,4 +10,4 @@ export POINTWISE_DPO_LOSS_TYPE=prospect_dpo
 export SINGLE_WISE_DPO_USE_FEEDBACK_WEIGHTS=false
 
 echo "Unweighted Prospect run: sample_variant=${SINGLE_WISE_DPO_SAMPLE_VARIANT}, experiment=${SINGLE_WISE_DPO_EXPERIMENT_NAME:-auto}"
-exec bash "${SCRIPT_DIR}/run_single_wise_click_hist_all.sh" "$@"
+exec bash "${SCRIPT_DIR}/../all.sh" "$@"

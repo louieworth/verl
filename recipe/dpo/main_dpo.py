@@ -39,11 +39,13 @@ class DPOTaskRunner:
         from pprint import pprint
 
         from omegaconf import OmegaConf
+        from recipe.dpo.evaluation.in_process_eval import configure_in_process_eval
 
         from verl.single_controller.ray import RayWorkerGroup, ResourcePoolManager
         from verl.utils import hf_processor, hf_tokenizer
         from verl.utils.fs import copy_to_local
 
+        configure_in_process_eval(config)
         print(f"TaskRunner hostname: {socket.gethostname()}, PID: {os.getpid()}")
         pprint(OmegaConf.to_container(config, resolve=True))
         OmegaConf.resolve(config)
@@ -162,7 +164,11 @@ class DPOTaskRunner:
             train_sampler=train_sampler,
         )
         trainer.init_workers()
-        trainer.fit()
+        try:
+            trainer.fit()
+        finally:
+            if trainer.pens_evaluator is not None:
+                trainer.pens_evaluator.close()
 
 
 @hydra.main(config_path="config", config_name="dpo_trainer", version_base=None)
@@ -172,9 +178,8 @@ def main(config):
     try:
         run_ppo(config, task_runner_class=ray.remote(num_cpus=1)(DPOTaskRunner))
     finally:
-        # Interleaved PENS runs launch generation eval after each training
-        # segment. Tear down all training actors before the shell proceeds so
-        # vLLM receives the full GPU set.
+        # Release workers when the job finishes, including the optional legacy
+        # workflow that launches an external eval after each training segment.
         if ray.is_initialized():
             ray.shutdown()
 

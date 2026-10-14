@@ -11,7 +11,6 @@ import re
 import shutil
 from pathlib import Path
 
-
 CHECKPOINT_RE = re.compile(r"global_step_(\d+)")
 
 DEFAULT_TARGET_ROUGE_1 = 0.2933888365419484
@@ -89,7 +88,7 @@ def record_evaluation_result(state_file: Path, result_key: str, payload: dict) -
     save_json_atomic(state_file, state)
 
 
-def main() -> None:
+def main(argv=None) -> dict:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint-dir", type=Path, required=True)
     parser.add_argument("--state-file", type=Path, required=True)
@@ -109,8 +108,10 @@ def main() -> None:
     parser.add_argument("--selection-baseline-rouge-2", type=float)
     parser.add_argument("--selection-baseline-rouge-l", type=float)
     parser.add_argument("--selection-minimum-count", type=int, default=0)
-    parser.add_argument("--keep-best-checkpoint", action="store_true", help="Retain the best model as well as the current checkpoint")
-    args = parser.parse_args()
+    parser.add_argument(
+        "--keep-best-checkpoint", action="store_true", help="Retain the best model as well as the current checkpoint"
+    )
+    args = parser.parse_args(argv)
 
     checkpoint_dir = args.checkpoint_dir.resolve()
     if checkpoint_dir == Path("/") or not checkpoint_dir.is_dir():
@@ -350,6 +351,7 @@ def main() -> None:
             indent=2,
         )
     )
+    return state
 
 
 if __name__ == "__main__":

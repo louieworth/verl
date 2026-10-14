@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # PENS positive-only SFT followed by the same interleaved headline evaluation
-# protocol used by run_single_wise_click_hist_all.sh.
+# protocol used by all.sh.
 
 set -euo pipefail
 
@@ -75,9 +75,17 @@ export SFT_RUN_TIMESTAMP="${SFT_RUN_TIMESTAMP:-$(date -u +%Y%m%d_%H%M%S)}"
 
 export SFT_PYTHON_BIN="${SFT_PYTHON_BIN:-${PENS_PYTHON_BIN}}"
 export SFT_TORCHRUN_BIN="${SFT_TORCHRUN_BIN:-}"
-export SFT_ENTRYPOINT="${SFT_ENTRYPOINT:--m verl.trainer.sft_trainer}"
+IN_PROCESS_EVAL="${SFT_IN_PROCESS_EVAL:-${SINGLE_WISE_DPO_IN_PROCESS_EVAL:-true}}"
+if ! is_truthy "${SFT_RUN_CHECKPOINT_EVAL:-true}"; then
+  IN_PROCESS_EVAL=false
+fi
+if is_truthy "${IN_PROCESS_EVAL}"; then
+  export SFT_ENTRYPOINT="${SFT_ENTRYPOINT:--m verl.trainer.sft_trainer_ray}"
+else
+  export SFT_ENTRYPOINT="${SFT_ENTRYPOINT:--m verl.trainer.sft_trainer}"
+fi
 
-# External PENS headline evaluation. Defaults intentionally disable early
+# PENS headline evaluation. Defaults intentionally disable early
 # stopping so all 10 boundaries through step 500 are evaluated by default.
 export SFT_RUN_CHECKPOINT_EVAL="${SFT_RUN_CHECKPOINT_EVAL:-true}"
 export SFT_CHECKPOINT_EVAL_PROMPT_FILE="${SFT_CHECKPOINT_EVAL_PROMPT_FILE:-${PENS_EVAL_PROMPT_FILE}}"
@@ -131,9 +139,14 @@ for required_file in "${SFT_TRAIN_FILE}" "${SFT_MODEL_DIR}/config.json" "${SFT_T
 done
 
 read -r -a entrypoint_args <<< "${SFT_ENTRYPOINT}"
-launcher_cmd=("${SFT_PYTHON_BIN}" -m torch.distributed.run)
-if [[ -n "${SFT_TORCHRUN_BIN}" ]]; then
-  launcher_cmd=("${SFT_TORCHRUN_BIN}")
+if is_truthy "${IN_PROCESS_EVAL}"; then
+  launcher_cmd=("${SFT_PYTHON_BIN}")
+else
+  launcher_cmd=("${SFT_PYTHON_BIN}" -m torch.distributed.run)
+  if [[ -n "${SFT_TORCHRUN_BIN}" ]]; then
+    launcher_cmd=("${SFT_TORCHRUN_BIN}")
+  fi
+  launcher_cmd+=(--standalone --nnodes=1 "--nproc_per_node=${SFT_N_GPUS_PER_NODE}")
 fi
 val_files_override="[]"
 if [[ -n "${SFT_VAL_FILE}" ]]; then
@@ -142,9 +155,6 @@ fi
 
 cmd=(
   "${launcher_cmd[@]}"
-  --standalone
-  --nnodes=1
-  "--nproc_per_node=${SFT_N_GPUS_PER_NODE}"
   "${entrypoint_args[@]}"
   "data.train_files=[${SFT_TRAIN_FILE}]"
   "data.val_files=${val_files_override}"
@@ -198,6 +208,20 @@ cmd=(
   "trainer.resume_mode=${SFT_RESUME_MODE}"
   "checkpoint.save_contents=${SFT_CHECKPOINT_SAVE_CONTENTS}"
 )
+if is_truthy "${IN_PROCESS_EVAL}"; then
+  eval_options="$("${PENS_DEFAULTS_PYTHON}" -S "${SCRIPT_DIR}/common.py" --in-process-eval-options sft)"
+  cmd+=(
+    "+trainer.in_process_eval=true"
+    "+trainer.in_process_eval_options_json=$(pens_hydra_quote "${eval_options}")"
+    "engine.param_offload=true"
+    "engine.optimizer_offload=true"
+    "+ray_kwargs.ray_init._temp_dir=$(pens_hydra_quote "${RAY_TMPDIR}")"
+    "+ray_kwargs.ray_init.include_dashboard=${RAY_INCLUDE_DASHBOARD:-false}"
+  )
+  if [[ -n "${RAY_NUM_CPUS:-${SLURM_CPUS_PER_TASK:-}}" ]]; then
+    cmd+=("+ray_kwargs.ray_init.num_cpus=${RAY_NUM_CPUS:-${SLURM_CPUS_PER_TASK}}")
+  fi
+fi
 cmd+=("$@")
 
 echo "[run_pens_sft] launching: ${cmd[*]}"

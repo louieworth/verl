@@ -160,6 +160,55 @@ class TrainingWorker(Worker, DistProfilerExtension):
         """
         self.engine.initialize()
 
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def init_rollout(self, rollout_config):
+        """Attach colocated inference to an existing training engine."""
+        self.rollout_config = omega_conf_to_dataclass(rollout_config)
+        if self.rollout_config.checkpoint_engine.backend != "naive":
+            raise ValueError("TrainingWorker's colocated rollout requires the naive weight-transfer backend")
+        infer_tp = self.rollout_config.tensor_model_parallel_size * self.rollout_config.data_parallel_size
+        infer_pp = self.rollout_config.pipeline_model_parallel_size
+        infer_world_size = infer_tp * infer_pp
+        if self.world_size % infer_world_size:
+            raise ValueError("Training world size must be divisible by rollout world size")
+        device_mesh = init_device_mesh(
+            get_device_name(),
+            mesh_shape=(self.world_size // infer_world_size, infer_tp, infer_pp),
+            mesh_dim_names=["dp", "infer_tp", "infer_pp"],
+        )
+        self.rollout = get_rollout_class(self.rollout_config.name, self.rollout_config.mode)(
+            config=self.rollout_config, model_config=self.model_config, device_mesh=device_mesh
+        )
+        if self.model_config.lora_rank > 0 and not self.model_config.lora.get("merge", False):
+            self.rollout.sleep_level = 1
+        # Offload live tensors before vLLM profiles the shared GPUs.
+        self.engine.to("cpu", model=True, optimizer=True, grad=True)
+        aggressive_empty_cache(force_sync=True)
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
+    async def update_weights(self, global_steps: int = None):
+        """Synchronize live weights without saving or loading a checkpoint."""
+        from verl.utils.checkpoint.checkpoint_manager import BaseCheckpointManager
+
+        rng_state = BaseCheckpointManager.get_rng_state()
+        set_expandable_segments(False)
+        try:
+            self.engine.to("cpu", model=False, optimizer=True, grad=False)
+            await self.rollout.resume(tags=["weights"])
+            params, peft_config = self.engine.get_per_tensor_param(base_sync_done=True)
+            await self.rollout.update_weights(
+                params, peft_config=peft_config, base_sync_done=True, global_steps=global_steps
+            )
+            if peft_config is not None:
+                self.rollout.sleep_level = 1
+            self.engine.to("cpu", model=True, optimizer=False, grad=False)
+            aggressive_empty_cache(force_sync=True)
+            await self.rollout.resume(tags=["kv_cache"])
+        finally:
+            BaseCheckpointManager.load_rng_state(rng_state)
+            set_expandable_segments(True)
+        return True
+
     def _postprocess_output(self, output, *, global_token_num, delta_time, forward_only, images_seqlens):
         """
 

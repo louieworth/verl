@@ -82,9 +82,9 @@ if [[ "${PIFO_RESUME_INSPECT:-false}" == true ]]; then
   export CUDA_VISIBLE_DEVICES=0,1,2,3
   export SINGLE_WISE_DPO_N_GPUS_PER_NODE=4
   export SINGLE_WISE_DPO_CHECKPOINT_EVAL_NGPUS_PER_NODE=4
-  train_script="${SCRIPT_DIR}/../run_single_wise_click_hist_all.sh"
+  train_script="${SCRIPT_DIR}/../all.sh"
   if [[ "${variant}" == positive ]]; then
-    train_script="${SCRIPT_DIR}/../run_single_wise_click_hist_positive_only.sh"
+    train_script="${SCRIPT_DIR}/../positive_only.sh"
   fi
   exec bash "${train_script}" "${loss_args[@]}" "$@"
 fi

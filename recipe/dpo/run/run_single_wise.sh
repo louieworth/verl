@@ -113,6 +113,7 @@ REFERENCE_LOGPS_MAX_BATCH_SIZE="${SINGLE_WISE_DPO_REFERENCE_LOGPS_MAX_BATCH_SIZE
 REFERENCE_LOGPS_MAX_BATCHED_TOKENS="${SINGLE_WISE_DPO_REFERENCE_LOGPS_MAX_BATCHED_TOKENS:-16384}"
 
 RUN_POST_TRAIN_EVAL="${SINGLE_WISE_DPO_RUN_POST_TRAIN_EVAL:-false}"
+IN_PROCESS_EVAL="${SINGLE_WISE_DPO_IN_PROCESS_EVAL:-false}"
 POST_TRAIN_EVAL_SCRIPT="${SINGLE_WISE_DPO_POST_TRAIN_EVAL_SCRIPT:-recipe/dpo/evaluation/run_pens_personalized_eval.sh}"
 POST_TRAIN_EVAL_WORKDIR="${SINGLE_WISE_DPO_POST_TRAIN_EVAL_WORKDIR:-$(pwd)}"
 POST_TRAIN_EVAL_NNODES="${SINGLE_WISE_DPO_POST_TRAIN_EVAL_NNODES:-1}"
@@ -629,6 +630,15 @@ extra_args+=("trainer.val_before_train=false")
 extra_args+=("trainer.test_freq=-1")
 extra_args+=("trainer.val_only=false")
 extra_args+=("trainer.log_val_generations=0")
+if is_truthy "${IN_PROCESS_EVAL}"; then
+  eval_options="$("${PENS_DEFAULTS_PYTHON}" -S "${SCRIPT_DIR}/common.py" --in-process-eval-options dpo)"
+  extra_args+=(
+    "+trainer.in_process_eval=true"
+    "+trainer.in_process_eval_options_json=$(pens_hydra_quote "${eval_options}")"
+    "actor_rollout_ref.actor.fsdp_config.param_offload=true"
+    "actor_rollout_ref.actor.fsdp_config.optimizer_offload=true"
+  )
+fi
 if [[ "${LOSS_TYPE_NORMALIZED}" == "prospect_dpo" ]]; then
   extra_args+=("data.s_dwell_key=${S_DWELL_KEY}")
   extra_args+=("data.p_ctr_key=${P_CTR_KEY}")

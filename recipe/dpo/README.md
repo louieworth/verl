@@ -109,8 +109,22 @@ The PeNS click-history launcher exposes the shared single-wise settings as envir
 selects weighted Prospect-DPO by default:
 
 ```bash
-bash recipe/dpo/run/run_single_wise_click_hist_all.sh
+bash recipe/dpo/run/all.sh
 ```
+
+The weighted positive-only and negative-only launchers are `run/positive_only.sh` and
+`run/negative_only.sh`. Strict feedback-weight ablations live under `run/ablation/` as
+`all_no_weight.sh`, `positive_only_no_weight.sh`, and `negative_only_no_weight.sh`.
+Matching Slurm submission files use the same names with the `.sbatch` extension under
+`run/slurm_launch/`, with unweighted jobs and their resume jobs in `run/slurm_launch/ablation/`.
+
+The all-data weight sweep uses `run/ablation/all_kplus3.5_kminus<N>.sh`,
+fixing kappa+ at 3.5 and varying kappa- over 0.5, 2.5, 3.5, 4.5, and 5.5 with feedback weights enabled.
+The main kappa-=1.5 run is reused.
+Each setting trains to step 600, with evaluation every 50 steps.
+Matching `.sbatch` files live in `run/slurm_launch/ablation/` and request four hours
+on `gpubase_bynode_b2`. Default experiment
+names include both kappa values so the five settings have separate outputs.
 
 If `SINGLE_WISE_DPO_TRAIN_FILE` is unset, the launcher resolves the train parquets via
 `SINGLE_WISE_DPO_INPUT_VARIANT` and `SINGLE_WISE_DPO_SAMPLE_VARIANT`. In particular,

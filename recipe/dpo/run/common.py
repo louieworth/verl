@@ -217,6 +217,66 @@ def run_defaults(kind, env=None, overrides=()):
     }
 
 
+def in_process_eval_options(kind="dpo", env=None):
+    """Serialize evaluation controls for the persistent training process."""
+    env = os.environ if env is None else env
+    prefix = "SFT" if kind == "sft" else "SINGLE_WISE_DPO"
+    run = run_defaults(kind, env)
+
+    def value(suffix, default, convert=float):
+        return convert(env.get(f"{prefix}_{suffix}") or default)
+
+    thresholds = {
+        "early-stop-patience": value("EARLY_STOP_PATIENCE", 2, int),
+        "early-stop-min-delta": value("EARLY_STOP_MIN_DELTA", 0.0005),
+        "catastrophic-drop": value("CATASTROPHIC_DROP", 0.01),
+        "minimum-output-coverage": value("MINIMUM_OUTPUT_COVERAGE", 0.99),
+        "target-rouge-1": value("TARGET_ROUGE_1", 0.2933888365419484),
+        "minimum-rouge-2": value("MINIMUM_ROUGE_2", 0.10612834364424847),
+        "minimum-rouge-l": value("MINIMUM_ROUGE_L", 0.24049149824883745),
+        "selection-mode": value("CHECKPOINT_SELECTION_MODE", "rouge_1", str),
+        "selection-minimum-count": value("SELECTION_MINIMUM_COUNT", 0, int),
+    }
+    for suffix, fallback in (
+        ("ROUGE_1", "target-rouge-1"),
+        ("ROUGE_2", "minimum-rouge-2"),
+        ("ROUGE_L", "minimum-rouge-l"),
+    ):
+        thresholds[f"selection-baseline-{suffix.lower().replace('_', '-')}"] = value(
+            f"SELECTION_BASELINE_{suffix}", thresholds[fallback]
+        )
+    engine_kwargs = {}
+    for name, key in {
+        "language_model_only": "VLLM_LANGUAGE_MODEL_ONLY",
+        "disable_hybrid_kv_cache_manager": "VLLM_DISABLE_HYBRID_KV_CACHE_MANAGER",
+        "max_cudagraph_capture_size": "VLLM_MAX_CUDAGRAPH_CAPTURE_SIZE",
+        "block_size": "VLLM_BLOCK_SIZE",
+        "mamba_cache_mode": "VLLM_MAMBA_CACHE_MODE",
+    }.items():
+        if env.get(key):
+            try:
+                engine_kwargs[name] = json.loads(env[key].lower())
+            except json.JSONDecodeError:
+                engine_kwargs[name] = env[key]
+    rollout_overrides = {}
+    for name, key in {
+        "enforce_eager": "GEN_ENFORCE_EAGER", "enable_prefix_caching": "GEN_ENABLE_PREFIX_CACHING"
+    }.items():
+        if env.get(key):
+            rollout_overrides[name] = env[key].lower() in {"1", "true", "yes", "on"}
+    return {
+        "output_dir": run[f"{prefix}_CHECKPOINT_EVAL_GEN_DIR"],
+        "state_file": run[f"{prefix}_CHECKPOINT_EVAL_STATE_FILE"],
+        "thresholds": thresholds,
+        "keep_best_checkpoint": value("KEEP_BEST_CHECKPOINT", "false", str).lower() in {"1", "true", "yes", "on"},
+        "request_concurrency": int(env.get("GEN_REQUEST_CONCURRENCY") or 128),
+        "response_index": int(env.get("RESPONSE_INDEX") or 0),
+        "align_by_order": (env.get("ALIGN_BY_ORDER") or "false").lower() in {"1", "true", "yes", "on"},
+        "engine_kwargs": engine_kwargs,
+        "rollout_overrides": rollout_overrides,
+    }
+
+
 def shell_exports(values):
     return "\n".join(f"export {key}={shlex.quote(str(value))}" for key, value in values.items())
 
@@ -226,9 +286,13 @@ def main():
     parser.add_argument("--shell-env", action="store_true")
     parser.add_argument("--shell-defaults", action="store_true")
     parser.add_argument("--shell-run", choices=["dpo", "sft"])
+    parser.add_argument("--in-process-eval-options", choices=["dpo", "sft"])
     parser.add_argument("overrides", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     loaded = load_env_file()
+    if args.in_process_eval_options:
+        print(json.dumps(in_process_eval_options(args.in_process_eval_options), sort_keys=True))
+        return
     if args.shell_env:
         print(shell_exports(loaded))
         return

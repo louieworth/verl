@@ -470,7 +470,14 @@ def run_sft(config):
 def main(config):
     # Automatically set `config.trainer.device = npu` when running on Ascend NPU.
     auto_set_device(config)
-    run_sft(config)
+    if config.trainer.get("in_process_eval", False):
+        # Persistent vLLM evaluation shares the existing FSDP SFT engine via
+        # Ray workers. Keep this entrypoint compatible with older launchers.
+        from verl.trainer.sft_trainer_ray import run_sft as run_sft_ray
+
+        run_sft_ray(config)
+    else:
+        run_sft(config)
 
 
 def create_sft_dataset(data_paths, data_config, tokenizer, processor, max_samples=-1):

@@ -6,15 +6,16 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../../../.." && pwd)"
 cd "${REPO_ROOT}"
 
-variant="${1:?Expected all, positive, negative, all_no_weight, positive_no_weight, negative_no_weight, kto, or sft}"
+variant="${1:?Expected all, positive, negative, *_no_weight, all_kplus3.5_kminus<N> (N=0.5/2.5/3.5/4.5/5.5), kto, or sft}"
 shift
 case "${variant}" in
-  all) train_script=recipe/dpo/run/run_single_wise_click_hist_all.sh ;;
-  positive) train_script=recipe/dpo/run/run_single_wise_click_hist_positive_only.sh ;;
-  negative) train_script=recipe/dpo/run/run_single_wise_click_hist_negative_only.sh ;;
-  all_no_weight) train_script=recipe/dpo/run/run_single_wise_click_hist_all_no_weight.sh ;;
-  positive_no_weight) train_script=recipe/dpo/run/run_single_wise_click_hist_positive_only_no_weight.sh ;;
-  negative_no_weight) train_script=recipe/dpo/run/run_single_wise_click_hist_negative_only_no_weight.sh ;;
+  all) train_script=recipe/dpo/run/all.sh ;;
+  positive) train_script=recipe/dpo/run/positive_only.sh ;;
+  negative) train_script=recipe/dpo/run/negative_only.sh ;;
+  all_no_weight) train_script=recipe/dpo/run/ablation/all_no_weight.sh ;;
+  positive_no_weight) train_script=recipe/dpo/run/ablation/positive_only_no_weight.sh ;;
+  negative_no_weight) train_script=recipe/dpo/run/ablation/negative_only_no_weight.sh ;;
+  all_kplus3.5_kminus[02345].5) train_script="recipe/dpo/run/ablation/${variant}.sh" ;;
   kto) train_script=recipe/dpo/run/KTO.sh ;;
   sft) train_script=recipe/dpo/run/run_pens_sft.sh ;;
   *) echo "Unknown PeNS Slurm experiment: ${variant}" >&2; exit 1 ;;
@@ -52,7 +53,9 @@ fi
 export TORCHINDUCTOR_CACHE_DIR="${TMPDIR}/torchinductor"
 export TRITON_CACHE_DIR="${TMPDIR}/triton"
 export VLLM_CACHE_ROOT="${TMPDIR}/vllm"
-mkdir -p "${TMPDIR}" "${ray_storage}" "${TORCHINDUCTOR_CACHE_DIR}" "${TRITON_CACHE_DIR}" "${VLLM_CACHE_ROOT}"
+export FLASHINFER_WORKSPACE_BASE="${TMPDIR}/flashinfer"
+export VLLM_CONFIG_ROOT="${TMPDIR}/vllm_config"
+mkdir -p "${TMPDIR}" "${ray_storage}" "${TORCHINDUCTOR_CACHE_DIR}" "${TRITON_CACHE_DIR}" "${VLLM_CACHE_ROOT}" "${FLASHINFER_WORKSPACE_BASE}" "${VLLM_CONFIG_ROOT}"
 ln -sfn "${ray_storage}" "${ray_short_path}"
 export RAY_TMPDIR="${ray_short_path}"
 export PENS_EVAL_RAY_TMPDIR="${ray_short_path}"

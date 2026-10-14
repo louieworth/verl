@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=single_wise_click_hist_all_no_weight
+#SBATCH --job-name=pifo_all_no_weight
 #SBATCH --account=aip-plbacon
 #SBATCH --partition=gpubase_bynode_b1
 #SBATCH --nodes=1

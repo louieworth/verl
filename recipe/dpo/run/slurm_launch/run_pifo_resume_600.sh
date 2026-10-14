@@ -12,22 +12,22 @@ shift
 case "${variant}" in
   negative)
     original=prospect_click_hist_negative_with_weight_20261004_031023
-    train_script=run_single_wise_click_hist_negative_only.sh
+    train_script=negative_only.sh
     use_weights=true
     ;;
   negative_no_weight)
     original=prospect_click_hist_negative_without_weight_20261004_031006
-    train_script=run_single_wise_click_hist_negative_only_no_weight.sh
+    train_script=ablation/negative_only_no_weight.sh
     use_weights=false
     ;;
   positive_no_weight)
     original=prospect_click_hist_positive_without_weight_20261004_031239
-    train_script=run_single_wise_click_hist_positive_only_no_weight.sh
+    train_script=ablation/positive_only_no_weight.sh
     use_weights=false
     ;;
   all_no_weight)
     original=prospect_click_hist_all_without_weight_20261004_030847
-    train_script=run_single_wise_click_hist_all_no_weight.sh
+    train_script=ablation/all_no_weight.sh
     use_weights=false
     ;;
   *) echo "Unsupported PIFO resume variant: ${variant}" >&2; exit 1 ;;

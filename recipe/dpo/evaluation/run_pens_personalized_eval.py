@@ -240,8 +240,11 @@ def score_predictions_frame(
     }
 
 
-def main() -> None:
-    args = resolve_paths(parse_args())
+def evaluate_saved_generations(
+    args: argparse.Namespace, *, log_to_wandb: bool = True, record_checkpoint_state: bool = True
+) -> tuple[str, dict]:
+    """Score generations using the same contract for live and standalone eval."""
+    args = resolve_paths(args)
     if not args.raw_file.exists():
         raise FileNotFoundError(f"Missing raw generation file: {args.raw_file}")
     if not args.test_file.exists():
@@ -268,15 +271,21 @@ def main() -> None:
     payload["evaluation_config"] = evaluation_config()
     payload["evaluation_config"]["reference_file"] = str(args.test_file)
     tagged_key = f"{args.model_key}__think{thinking_tag}__{args.date_tag}"
-    log_eval_to_wandb(payload, result_key=tagged_key, date_tag=args.date_tag, model_path=args.model_path)
-    if args.checkpoint_state_file is not None:
+    if log_to_wandb:
+        log_eval_to_wandb(payload, result_key=tagged_key, date_tag=args.date_tag, model_path=args.model_path)
+    if record_checkpoint_state and args.checkpoint_state_file is not None:
         record_evaluation_result(args.checkpoint_state_file, tagged_key, payload)
-    args.model_key = tagged_key
+    return tagged_key, payload
+
+
+def main() -> None:
+    args = parse_args()
+    tagged_key, payload = evaluate_saved_generations(args)
 
     print(
         json.dumps(
             {
-                "model_key": args.model_key,
+                "model_key": tagged_key,
                 "raw_generation_file": str(args.raw_file),
                 "metrics": payload,
             },

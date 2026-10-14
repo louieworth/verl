@@ -48,6 +48,7 @@ case "${EVAL_THINKING_MODE}" in
     ;;
 esac
 RUN_EVAL="${SINGLE_WISE_DPO_RUN_CHECKPOINT_EVAL:-true}"
+IN_PROCESS_EVAL="${SINGLE_WISE_DPO_IN_PROCESS_EVAL:-true}"
 DRY_RUN="${SINGLE_WISE_DPO_INTERLEAVED_DRY_RUN:-false}"
 EARLY_STOP_PATIENCE="${SINGLE_WISE_DPO_EARLY_STOP_PATIENCE:-2}"
 EARLY_STOP_MIN_DELTA="${SINGLE_WISE_DPO_EARLY_STOP_MIN_DELTA:-0.0005}"
@@ -96,23 +97,42 @@ if is_truthy "${DRY_RUN}"; then
     checkpoint_retention="best and current"
   fi
   for step in "${eval_steps[@]}"; do
-    echo "DRY RUN: train until step ${step}, save, exit training, evaluate, retain ${checkpoint_retention}, resume"
+    if is_truthy "${IN_PROCESS_EVAL}"; then
+      echo "DRY RUN: train until step ${step}, save, evaluate in process from memory, retain ${checkpoint_retention}, continue without reloading"
+    else
+      echo "DRY RUN: train until step ${step}, save, exit training, evaluate, retain ${checkpoint_retention}, resume"
+    fi
   done
   exit 0
+fi
+
+if is_truthy "${IN_PROCESS_EVAL}"; then
+  # The trainer owns all evaluation boundaries. Only a new job loads a resume
+  # checkpoint; evaluation never terminates or recreates the training workers.
+  export SINGLE_WISE_DPO_IN_PROCESS_EVAL=true
+  export SINGLE_WISE_DPO_RUN_POST_TRAIN_EVAL=false
+  export SINGLE_WISE_DPO_KEEP_ONLY_LATEST_ROLLING_CKPT=false
+  unset SINGLE_WISE_DPO_STOP_AT_STEP
 fi
 
 # Hydra inspection modes should inspect one training invocation only.
 for arg in "$@"; do
   case "${arg}" in
     --cfg|--cfg=*|--info|--info=*|--help|-h)
-      export SINGLE_WISE_DPO_STOP_AT_STEP="${eval_steps[0]}"
+      if ! is_truthy "${IN_PROCESS_EVAL}"; then
+        export SINGLE_WISE_DPO_STOP_AT_STEP="${eval_steps[0]}"
+      fi
       bash "${TRAIN_SCRIPT}" "$@"
       exit 0
       ;;
   esac
 done
 
-for required_file in "${TRAIN_SCRIPT}" "${EVAL_SCRIPT}" "${CHECKPOINT_MANAGER}" "${EVAL_TEST_FILE}" "${EVAL_PROMPT_FILE}"; do
+required_files=("${TRAIN_SCRIPT}" "${CHECKPOINT_MANAGER}" "${EVAL_TEST_FILE}" "${EVAL_PROMPT_FILE}")
+if ! is_truthy "${IN_PROCESS_EVAL}"; then
+  required_files+=("${EVAL_SCRIPT}")
+fi
+for required_file in "${required_files[@]}"; do
   if [[ ! -f "${required_file}" ]]; then
     echo "Missing interleaved train/eval input: ${required_file}" >&2
     exit 1
@@ -121,6 +141,12 @@ done
 if [[ ! -x "${PYTHON_BIN}" ]]; then
   echo "Missing interleaved train/eval Python executable: ${PYTHON_BIN}" >&2
   exit 1
+fi
+
+if is_truthy "${IN_PROCESS_EVAL}"; then
+  echo "One training process through step ${TOTAL_STEPS}; in-memory eval every ${EVAL_INTERVAL} steps."
+  bash "${TRAIN_SCRIPT}" "$@"
+  exit 0
 fi
 
 mkdir -p "${CKPT_DIR}" "${EVAL_GEN_DIR}"

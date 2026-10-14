@@ -1,5 +1,12 @@
 # PeNS Slurm jobs
 
+Weighted PIFO launchers are `all.sbatch`, `positive_only.sbatch`, and
+`negative_only.sbatch`. Their training entrypoints are `../all.sh`,
+`../positive_only.sh`, and `../negative_only.sh`. The unweighted submission
+files, including resume jobs, live in `ablation/` and launch the corresponding
+`../ablation/*_no_weight.sh` training scripts through the shared `run_job.sh`.
+The weighted resume submission files stay in this directory.
+
 `KTO.sbatch` runs KTO on the same sampled positive and negative click-history
 parquets, without constructing preference pairs. It requests six hours and
 four H100 80GB GPUs on `gpubase_bynode_b2` (the existing `b1` partition allows
@@ -53,8 +60,8 @@ Training metrics and the three evaluation metrics (`ROUGE-1`, `ROUGE-2`,
 Upload the completed run from the login node after training ends; compute
 nodes do not upload to W&B.
 
-`run_single_wise_click_hist_negative_only.sbatch` uses the same Slurm
-resources as `run_single_wise_click_hist_all.sbatch`: four H100 80GB GPUs,
+`negative_only.sbatch` uses the same Slurm
+resources as `all.sbatch`: four H100 80GB GPUs,
 32 CPUs, 256G RAM, and three hours. Its wrapper delegates to the all launcher,
 changing only the training split to `only_negative_click_hist_train.parquet`
 and using a separate experiment/output namespace. It preserves Slurm's GPU
@@ -65,8 +72,8 @@ and evaluation settings are inherited from all. Current defaults are LR
 Training and evaluation use W&B offline through the same shared job runtime.
 
 ```bash
-PENS_SLURM_DRY_RUN=true bash recipe/dpo/run/slurm_launch/run_single_wise_click_hist_negative_only.sbatch
-sbatch recipe/dpo/run/slurm_launch/run_single_wise_click_hist_negative_only.sbatch
+PENS_SLURM_DRY_RUN=true bash recipe/dpo/run/slurm_launch/negative_only.sbatch
+sbatch recipe/dpo/run/slurm_launch/negative_only.sbatch
 ```
 
 The complete resolved all/negative-only parameter comparison and dataset
@@ -84,9 +91,52 @@ versions select their corresponding training split. Each job requests three
 hours and four H100 80GB GPUs and logs W&B offline.
 
 ```bash
-sbatch recipe/dpo/run/slurm_launch/run_single_wise_click_hist_all_no_weight.sbatch
-sbatch recipe/dpo/run/slurm_launch/run_single_wise_click_hist_negative_only_no_weight.sbatch
-sbatch recipe/dpo/run/slurm_launch/run_single_wise_click_hist_positive_only_no_weight.sbatch
+sbatch recipe/dpo/run/slurm_launch/ablation/all_no_weight.sbatch
+sbatch recipe/dpo/run/slurm_launch/ablation/negative_only_no_weight.sbatch
+sbatch recipe/dpo/run/slurm_launch/ablation/positive_only_no_weight.sbatch
+```
+
+The five `ablation/all_kplus3.5_kminus<N>.sbatch` jobs sweep feedback weights
+on the all-data split: kappa+ is fixed at 3.5 and kappa- is 0.5, 2.5, 3.5, 4.5, or 5.5.
+The existing main kappa-=1.5 run is reused rather than submitted again.
+Their training entrypoints are `../ablation/all_kplus3.5_kminus<N>.sh`.
+They enable feedback weights and inherit the main all recipe's model,
+optimizer, and batching. They train to step 600 and evaluate every 50 steps,
+for 12 evaluation boundaries. Each submission requests four H100 80GB GPUs,
+32 CPUs, 256G RAM, and four hours on `gpubase_bynode_b2`, and logs W&B offline
+through `run_job.sh`.
+The four-hour limit is based on completed Slurm records: all-data no-weight
+job 503779 ran 500 steps with evaluation in 2:33:22, and its 500-to-600 resume
+job 512344 took 0:33:39. Their combined elapsed time was 3:07:01.
+Weighted all-data job 511962 took 1:30:04 to resume from step 500 to 800.
+The `b1` partition's maximum is three hours; `b2` allows up to 12 hours.
+Default experiment names are
+`prospect_click_hist_all_with_weight_kplus3.5_kminus<N>_<timestamp>` so each
+weight setting has separate checkpoint, generation, and W&B directories.
+Explicit experiment names and timestamps can still be supplied for resumes.
+
+```bash
+for kminus in 0.5 2.5 3.5 4.5 5.5; do
+  sbatch "recipe/dpo/run/slurm_launch/ablation/all_kplus3.5_kminus${kminus}.sbatch"
+done
+```
+
+The `ablation/all_kplus3.5_kminus{3.5,4.5,5.5}_resume_600.sbatch` launchers
+continue interrupted jobs 513195, 513196, and 513197 in their original
+`20261008_154851` experiments. They restore complete training state from
+steps 550, 300, and 200, respectively, including optimizer and dataloader
+state. The interleaved driver retries the missing evaluations at 550 and
+200 before continuing training; kappa-=4.5 repeats unsaved updates 301--347.
+They retain the original W&B identities and train to 600 with evaluation
+every 50 steps. Evaluation uses eager mode to avoid CUDA graph initialization
+and compiler-cache failures; sampling and scoring settings are unchanged.
+All three exclude nodes `tg10803,tg11104`. The kappa-=3.5 continuation requests
+two hours; the other two request four hours, with four H100 80GB GPUs each.
+
+```bash
+for kminus in 3.5 4.5 5.5; do
+  sbatch "recipe/dpo/run/slurm_launch/ablation/all_kplus3.5_kminus${kminus}_resume_600.sbatch"
+done
 ```
 
 The older BCE `single_wise_dpo` implementation remains a separate supported
@@ -94,8 +144,10 @@ loss; these three launchers now use the strict Prospect ablation requested
 here. `metrics/no_weight_config_audit.json` records the fully resolved
 configuration comparison for all three jobs against weighted all.
 
-Launcher filenames and Slurm job names use `single_wise_click_hist_*`.
-The `single_wise_click_hist_*` entrypoints default to `POINTWISE_DPO_LOSS_TYPE=prospect_dpo`;
-the three `*_no_weight` entrypoints force that loss and disable feedback weights.
-New experiment/output names use `prospect_click_hist_<split>_<weight>_<timestamp>`.
+Launcher filenames use the split names `all`, `positive_only`, and `negative_only`,
+with `_no_weight` added for unweighted ablations and `_kplus3.5_kminus<N>` for
+the all-data weight sweep. PIFO Slurm job names use the `pifo_` prefix.
+The weighted entrypoints default to `POINTWISE_DPO_LOSS_TYPE=prospect_dpo`;
+the three `ablation/*_no_weight` entrypoints force that loss and disable feedback weights.
+Main experiment/output names use `prospect_click_hist_<split>_<weight>_<timestamp>`.
 Existing configuration keys and environment variables keep their API names.

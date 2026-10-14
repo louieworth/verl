@@ -8,4 +8,4 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 export SINGLE_WISE_DPO_SAMPLE_VARIANT=negative_only
 
 echo "Unweighted Prospect negative-only run: experiment=${SINGLE_WISE_DPO_EXPERIMENT_NAME:-auto}"
-exec bash "${SCRIPT_DIR}/run_single_wise_click_hist_all_no_weight.sh" "$@"
+exec bash "${SCRIPT_DIR}/all_no_weight.sh" "$@"

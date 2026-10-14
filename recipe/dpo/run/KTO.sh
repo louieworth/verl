@@ -15,4 +15,4 @@ export SINGLE_WISE_DPO_TOTAL_TRAINING_STEPS=500
 export KTO_DESIRABLE_WEIGHT="${KTO_DESIRABLE_WEIGHT:-1.0}"
 export KTO_UNDESIRABLE_WEIGHT="${KTO_UNDESIRABLE_WEIGHT:-1.0}"
 
-exec bash "${SCRIPT_DIR}/run_single_wise_click_hist_all.sh" "$@"
+exec bash "${SCRIPT_DIR}/all.sh" "$@"
